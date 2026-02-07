@@ -1,0 +1,24 @@
+{
+  "name": "bdk-photography-bms",
+  "version": "0.1.0",
+  "private": true,
+  "description": "BDK Photography Business Management System",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev -w @bdk/api\" \"npm run dev -w @bdk/web\"",
+    "dev:api": "npm run dev -w @bdk/api",
+    "dev:web": "npm run dev -w @bdk/web",
+    "build": "npm run build -ws --if-present",
+    "typecheck": "npm run typecheck -ws --if-present"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
