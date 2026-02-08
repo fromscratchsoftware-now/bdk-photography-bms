@@ -37,6 +37,13 @@ bdk-photography-bms/
 
 Prerequisite: `Node.js 20+` and `npm 10+`.
 
+### Storage (SiteGround PHP API)
+
+By default, the SiteGround deployment stores data in `data/state.json`.
+
+To switch to MySQL storage, configure `.env` with `BDK_STORAGE=mysql` and the `BDK_DB_*` credentials.
+The PHP API stores the same JSON state in a single MySQL row (`bdk_state_store`) for v1 compatibility.
+
 ### Demo Logins (Seeded)
 
 All seeded accounts share the same password: `bdk1234`.
@@ -77,12 +84,13 @@ npm run dev
 ## Core API Endpoints
 
 - Auth:
-  - `POST /api/auth/signup` (creates a `SALES` user, returns `{ token, user }`)
   - `POST /api/auth/login` (returns `{ token, user }`)
   - `GET /api/auth/me` (requires `x-user-id`)
-  - Most other `/api/*` endpoints require an `x-user-id` header, except `GET /api/meta/seed` and `GET /api/health`.
+  - User creation is admin-only:
+    - `POST /api/admin/users` (requires `x-user-id` for an `ADMIN`)
+  - Most other `/api/*` endpoints require an `x-user-id` header. Only `GET /api/health` and `POST /api/auth/login` are public.
 
-- `GET /api/meta/seed`
+- `GET /api/meta/seed` (requires `x-user-id`)
 - `GET /api/health`
 - `GET /api/products`
 - `POST /api/products`

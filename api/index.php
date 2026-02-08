@@ -5,6 +5,45 @@ declare(strict_types=1);
 // Minimal PHP API for SiteGround deployment (Node is not available).
 // Matches the currently-used web UI endpoints under /api/*.
 
+function load_dotenv(string $path): void {
+  if (!file_exists($path)) {
+    return;
+  }
+  $lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+  if (!is_array($lines)) {
+    return;
+  }
+
+  foreach ($lines as $line) {
+    $trimmed = trim($line);
+    if ($trimmed === "" || str_starts_with($trimmed, "#")) {
+      continue;
+    }
+    $pos = strpos($trimmed, "=");
+    if ($pos === false) {
+      continue;
+    }
+    $key = trim(substr($trimmed, 0, $pos));
+    $value = trim(substr($trimmed, $pos + 1));
+    if ($key === "" || $value === "") {
+      continue;
+    }
+    // Strip surrounding quotes if present.
+    if ((str_starts_with($value, "\"") && str_ends_with($value, "\"")) || (str_starts_with($value, "'") && str_ends_with($value, "'"))) {
+      $value = substr($value, 1, -1);
+    }
+    // Do not override server-provided environment variables.
+    if (getenv($key) !== false) {
+      continue;
+    }
+    putenv($key . "=" . $value);
+    $_ENV[$key] = $value;
+  }
+}
+
+// Load optional runtime config from the repo root. This file is gitignored and blocked from web access via .htaccess.
+load_dotenv(__DIR__ . "/../.env");
+
 function json_response(int $status, $payload): void {
   http_response_code($status);
   header("Content-Type: application/json; charset=utf-8");
@@ -42,6 +81,61 @@ function get_header_value(string $name): ?string {
     return $_SERVER[$key];
   }
   return null;
+}
+
+function should_use_mysql(): bool {
+  $backend = strtolower((string)(getenv("BDK_STORAGE") ?: ""));
+  if ($backend === "mysql") {
+    return true;
+  }
+  if ($backend === "file") {
+    return false;
+  }
+
+  // Auto-detect when DB config exists.
+  $host = getenv("BDK_DB_HOST") ?: "";
+  $name = getenv("BDK_DB_NAME") ?: "";
+  $user = getenv("BDK_DB_USER") ?: "";
+  return $host !== "" && $name !== "" && $user !== "";
+}
+
+function mysql_pdo(): PDO {
+  static $pdo = null;
+  if ($pdo instanceof PDO) {
+    return $pdo;
+  }
+
+  $host = (string)(getenv("BDK_DB_HOST") ?: "");
+  $port = (string)(getenv("BDK_DB_PORT") ?: "3306");
+  $name = (string)(getenv("BDK_DB_NAME") ?: "");
+  $user = (string)(getenv("BDK_DB_USER") ?: "");
+  $pass = (string)(getenv("BDK_DB_PASS") ?: "");
+
+  if ($host === "" || $name === "" || $user === "") {
+    json_response(500, [
+      "error" => "ConfigError",
+      "message" => "MySQL is enabled but BDK_DB_HOST/BDK_DB_NAME/BDK_DB_USER are not fully configured"
+    ]);
+  }
+
+  $dsn = "mysql:host=" . $host . ";port=" . $port . ";dbname=" . $name . ";charset=utf8mb4";
+  $pdo = new PDO($dsn, $user, $pass, [
+    PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+    PDO::ATTR_EMULATE_PREPARES => false,
+  ]);
+
+  return $pdo;
+}
+
+function mysql_ensure_state_table(PDO $pdo): void {
+  $pdo->exec(
+    "CREATE TABLE IF NOT EXISTS bdk_state_store (" .
+      "id TINYINT UNSIGNED NOT NULL PRIMARY KEY," .
+      "state_json JSON NOT NULL," .
+      "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP" .
+    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+  );
 }
 
 function seed_state(): array {
@@ -154,6 +248,46 @@ function public_user(array $user): array {
 }
 
 function load_state(): array {
+  if (should_use_mysql()) {
+    $pdo = mysql_pdo();
+    mysql_ensure_state_table($pdo);
+    $stmt = $pdo->prepare("SELECT state_json FROM bdk_state_store WHERE id = 1");
+    $stmt->execute();
+    $row = $stmt->fetch();
+    if (!is_array($row) || !isset($row["state_json"])) {
+      // First-time DB init. If a file state exists, migrate it; otherwise seed.
+      $initial = null;
+      $path = state_path();
+      if (file_exists($path)) {
+        $raw = file_get_contents($path);
+        $decoded = json_decode($raw ?: "{}", true);
+        if (is_array($decoded) && !empty($decoded)) {
+          $initial = $decoded;
+        }
+      }
+      if (!is_array($initial)) {
+        $initial = seed_state();
+      }
+
+      ensure_state_migrations($initial);
+
+      $json = json_encode($initial, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+      if (!is_string($json)) {
+        json_response(500, ["error" => "InternalServerError", "message" => "Failed to encode seed state"]);
+      }
+      $insert = $pdo->prepare("INSERT INTO bdk_state_store (id, state_json) VALUES (1, :json)");
+      $insert->execute([":json" => $json]);
+      return $initial;
+    }
+
+    $decoded = json_decode((string)$row["state_json"], true);
+    if (!is_array($decoded)) {
+      return seed_state();
+    }
+    ensure_state_migrations($decoded);
+    return $decoded;
+  }
+
   $path = state_path();
   if (!file_exists($path)) {
     $seed = seed_state();
@@ -244,6 +378,65 @@ function ensure_state_migrations(array &$state): void {
 }
 
 function with_state(callable $mutator) {
+  if (should_use_mysql()) {
+    $pdo = mysql_pdo();
+    mysql_ensure_state_table($pdo);
+
+    try {
+      $pdo->beginTransaction();
+      $stmt = $pdo->prepare("SELECT state_json FROM bdk_state_store WHERE id = 1 FOR UPDATE");
+      $stmt->execute();
+      $row = $stmt->fetch();
+      if (!is_array($row) || !isset($row["state_json"])) {
+        // First-time DB init. If a file state exists, migrate it; otherwise seed.
+        $initial = null;
+        $path = state_path();
+        if (file_exists($path)) {
+          $raw = file_get_contents($path);
+          $decoded = json_decode($raw ?: "{}", true);
+          if (is_array($decoded) && !empty($decoded)) {
+            $initial = $decoded;
+          }
+        }
+        if (!is_array($initial)) {
+          $initial = seed_state();
+        }
+
+        ensure_state_migrations($initial);
+
+        $json = json_encode($initial, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+        if (!is_string($json)) {
+          throw new RuntimeException("Failed to encode seed state");
+        }
+        $insert = $pdo->prepare("INSERT INTO bdk_state_store (id, state_json) VALUES (1, :json)");
+        $insert->execute([":json" => $json]);
+        $state = $initial;
+      } else {
+        $decoded = json_decode((string)$row["state_json"], true);
+        $state = is_array($decoded) && !empty($decoded) ? $decoded : seed_state();
+      }
+
+      ensure_state_migrations($state);
+
+      $result = $mutator($state);
+
+      $json = json_encode($state, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+      if (!is_string($json)) {
+        throw new RuntimeException("Failed to encode state");
+      }
+      $update = $pdo->prepare("UPDATE bdk_state_store SET state_json = :json WHERE id = 1");
+      $update->execute([":json" => $json]);
+
+      $pdo->commit();
+      return $result;
+    } catch (Throwable $error) {
+      if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+      }
+      throw $error;
+    }
+  }
+
   $path = state_path();
   $fp = fopen($path, "c+");
   if ($fp === false) {
