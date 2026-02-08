@@ -89,8 +89,8 @@ function main(): int {
     stderr("Missing seed config. Set SEED_ADMIN_PHONE and SEED_ADMIN_PASSWORD in .env");
     return 1;
   }
-  if (strlen($adminPassword) < 8) {
-    stderr("SEED_ADMIN_PASSWORD must be at least 8 characters.");
+  if (strlen($adminPassword) < 6) {
+    stderr("SEED_ADMIN_PASSWORD must be at least 6 characters.");
     return 1;
   }
 
@@ -100,40 +100,54 @@ function main(): int {
   try {
     // Roles (idempotent by unique name)
     $roles = [
-      ["id" => "role-admin", "name" => "ADMIN", "description" => "Full system access"],
-      ["id" => "role-manager", "name" => "MANAGER", "description" => "Shop manager (restricted visibility)"],
-      ["id" => "role-sales", "name" => "SALES", "description" => "Sales user (single-shop access)"],
+      ["seedId" => "role-admin", "name" => "ADMIN", "description" => "Full system access"],
+      ["seedId" => "role-manager", "name" => "MANAGER", "description" => "Shop manager (restricted visibility)"],
+      ["seedId" => "role-sales", "name" => "SALES", "description" => "Sales user (single-shop access)"],
     ];
 
-    $stmtRole = $db->prepare(
+    $stmtRoleUpsert = $db->prepare(
       "INSERT INTO roles (id, name, description, notes, created_at, updated_at) " .
       "VALUES (:id, :name, :description, NULL, NOW(), NOW()) " .
       "ON DUPLICATE KEY UPDATE description = VALUES(description), updated_at = NOW()"
     );
+    $stmtRoleId = $db->prepare("SELECT id FROM roles WHERE name = :name LIMIT 1");
+    $roleIds = [];
     foreach ($roles as $role) {
-      $stmtRole->execute([
-        ":id" => $role["id"],
+      $stmtRoleUpsert->execute([
+        ":id" => $role["seedId"],
         ":name" => $role["name"],
         ":description" => $role["description"],
       ]);
+      $stmtRoleId->execute([":name" => $role["name"]]);
+      $row = $stmtRoleId->fetch();
+      if (!is_array($row) || !isset($row["id"])) {
+        throw new RuntimeException("Failed to read role id for " . $role["name"]);
+      }
+      $roleIds[$role["name"]] = (string)$row["id"];
     }
 
     // Shops (idempotent by unique code)
     $shops = [
-      ["id" => "shop-kla", "code" => "KLA", "name" => "Kampala Main"],
-      ["id" => "shop-wdg", "code" => "WDG", "name" => "Wandegeya"],
+      ["seedId" => "shop-kla", "code" => "KLA", "name" => "Kampala Main"],
+      ["seedId" => "shop-wdg", "code" => "WDG", "name" => "Wandegeya"],
     ];
-    $stmtShop = $db->prepare(
+    $stmtShopUpsert = $db->prepare(
       "INSERT INTO shops (id, code, name, notes, created_at, updated_at) " .
       "VALUES (:id, :code, :name, NULL, NOW(), NOW()) " .
       "ON DUPLICATE KEY UPDATE name = VALUES(name), updated_at = NOW()"
     );
+    $stmtShopId = $db->prepare("SELECT id FROM shops WHERE code = :code LIMIT 1");
     foreach ($shops as $shop) {
-      $stmtShop->execute([
-        ":id" => $shop["id"],
+      $stmtShopUpsert->execute([
+        ":id" => $shop["seedId"],
         ":code" => $shop["code"],
         ":name" => $shop["name"],
       ]);
+      $stmtShopId->execute([":code" => $shop["code"]]);
+      $row = $stmtShopId->fetch();
+      if (!is_array($row) || !isset($row["id"])) {
+        throw new RuntimeException("Failed to read shop id for " . $shop["code"]);
+      }
     }
 
     // Admin user (idempotent by unique phone)
@@ -152,7 +166,7 @@ function main(): int {
       ":full_name" => $adminFullName,
       ":phone" => $adminPhone,
       ":password_hash" => $passwordHash,
-      ":role_id" => "role-admin",
+      ":role_id" => $roleIds["ADMIN"],
       ":notes" => "Seeded on " . now_iso(),
     ]);
 
@@ -167,4 +181,3 @@ function main(): int {
 }
 
 exit(main());
-
