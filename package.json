@@ -8,8 +8,9 @@
     "packages/*"
   ],
   "scripts": {
+    "predev": "npm run build -w @bdk/shared",
     "dev": "concurrently \"npm run dev -w @bdk/api\" \"npm run dev -w @bdk/web\"",
-    "dev:api": "npm run dev -w @bdk/api",
+    "dev:api": "npm run build -w @bdk/shared && npm run dev -w @bdk/api",
     "dev:web": "npm run dev -w @bdk/web",
     "build": "npm run build -ws --if-present",
     "test": "npm run test -ws --if-present",
