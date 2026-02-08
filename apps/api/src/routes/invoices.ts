@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
+import { HttpError } from "../services/http-error.js";
 import {
   addInvoicePayment,
   createCustomer,
@@ -25,9 +26,7 @@ const invoiceLineSchema = z.object({
 });
 
 const createInvoiceSchema = z.object({
-  shopId: z.string().min(1),
   customerId: z.string().min(1),
-  createdByUserId: z.string().min(1),
   status: z.enum(["DRAFT", "ISSUED"]).default("ISSUED"),
   lines: z.array(invoiceLineSchema).min(1),
   dueDate: z.string().date().optional(),
@@ -52,6 +51,13 @@ invoicesRouter.get("/customers", (_req, res) => {
 
 invoicesRouter.post("/customers", (req, res, next) => {
   try {
+    const user = req.authUser;
+    if (!user) {
+      throw new HttpError(401, "Unauthenticated");
+    }
+    if (user.role !== "SALES" && user.role !== "ADMIN") {
+      throw new HttpError(403, "Forbidden");
+    }
     const payload = createCustomerSchema.parse(req.body);
     const customer = createCustomer(payload);
     res.status(201).json({ data: customer });
@@ -65,13 +71,34 @@ invoicesRouter.get("/", (_req, res) => {
 });
 
 invoicesRouter.get("/overdue", (_req, res) => {
+  const user = _req.authUser;
+  if (!user) {
+    throw new HttpError(401, "Unauthenticated");
+  }
+  if (user.role !== "ADMIN" && user.role !== "MANAGER") {
+    throw new HttpError(403, "Forbidden");
+  }
   res.json({ data: listOverdueInvoices() });
 });
 
 invoicesRouter.post("/", (req, res, next) => {
   try {
+    const user = req.authUser;
+    if (!user) {
+      throw new HttpError(401, "Unauthenticated");
+    }
+    if (user.role !== "SALES") {
+      throw new HttpError(403, "Only sales users can create invoices");
+    }
+    if (!user.shopId) {
+      throw new HttpError(400, "User is not assigned to a shop");
+    }
     const payload = createInvoiceSchema.parse(req.body);
-    const invoice = createInvoice(payload);
+    const invoice = createInvoice({
+      shopId: user.shopId,
+      createdByUserId: user.id,
+      ...payload
+    });
     res.status(201).json({ data: invoice });
   } catch (error) {
     next(error);
@@ -80,6 +107,13 @@ invoicesRouter.post("/", (req, res, next) => {
 
 invoicesRouter.patch("/:invoiceId/status", (req, res, next) => {
   try {
+    const user = req.authUser;
+    if (!user) {
+      throw new HttpError(401, "Unauthenticated");
+    }
+    if (user.role !== "ADMIN") {
+      throw new HttpError(403, "Only admins can change invoice status");
+    }
     const payload = setInvoiceStatusSchema.parse(req.body);
     const invoice = setInvoiceStatus(req.params.invoiceId, payload.status);
     res.json({ data: invoice });
@@ -94,6 +128,13 @@ invoicesRouter.get("/:invoiceId/payments", (req, res) => {
 
 invoicesRouter.post("/:invoiceId/payments", (req, res, next) => {
   try {
+    const user = req.authUser;
+    if (!user) {
+      throw new HttpError(401, "Unauthenticated");
+    }
+    if (user.role !== "SALES" && user.role !== "ADMIN") {
+      throw new HttpError(403, "Forbidden");
+    }
     const payload = createPaymentSchema.parse(req.body);
     const result = addInvoicePayment({
       invoiceId: req.params.invoiceId,
@@ -104,4 +145,3 @@ invoicesRouter.post("/:invoiceId/payments", (req, res, next) => {
     next(error);
   }
 });
-

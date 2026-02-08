@@ -1,6 +1,7 @@
 import cors from "cors";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { ZodError } from "zod";
+import { requireAuth } from "./middleware/auth.js";
 import { cashRouter } from "./routes/cash.js";
 import { healthRouter } from "./routes/health.js";
 import { invoicesRouter } from "./routes/invoices.js";
@@ -26,6 +27,10 @@ app.get("/api/meta/seed", (_req, res) => {
 });
 
 app.use("/api/health", healthRouter);
+
+// Everything else requires auth in v1.
+app.use("/api", requireAuth);
+
 app.use("/api/products", productsRouter);
 app.use("/api/sales", salesRouter);
 app.use("/api/cash", cashRouter);
@@ -65,4 +70,3 @@ app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
     message: "An unexpected error occurred"
   });
 });
-

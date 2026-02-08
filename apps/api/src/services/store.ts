@@ -182,6 +182,12 @@ function requireUser(userId: string): User {
   return user;
 }
 
+export type AuthUser = User;
+
+export function getAuthUser(userId: string): AuthUser {
+  return requireUser(userId);
+}
+
 function requireProduct(productId: string): Product {
   const product = products.find((item) => item.id === productId);
   if (!product) {

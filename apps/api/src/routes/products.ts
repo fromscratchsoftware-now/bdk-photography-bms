@@ -18,6 +18,13 @@ productsRouter.get("/", (_req, res) => {
 
 productsRouter.post("/", (req, res, next) => {
   try {
+    const user = req.authUser;
+    if (!user) {
+      throw new HttpError(401, "Unauthenticated");
+    }
+    if (user.role !== "ADMIN") {
+      throw new HttpError(403, "Only admins can create products");
+    }
     const payload = createProductSchema.parse(req.body);
     const product = createProduct(payload);
     res.status(201).json({ data: product });
@@ -32,6 +39,13 @@ productsRouter.get("/inventory", (_req, res) => {
 
 productsRouter.post("/inventory/receive", (req, res, next) => {
   try {
+    const user = req.authUser;
+    if (!user) {
+      throw new HttpError(401, "Unauthenticated");
+    }
+    if (user.role !== "ADMIN") {
+      throw new HttpError(403, "Only admins can receive stock");
+    }
     const payload = receiveStockSchema.parse(req.body);
     const row = receiveStock(payload);
     res.status(201).json({ data: row });
@@ -43,4 +57,3 @@ productsRouter.post("/inventory/receive", (req, res, next) => {
     next(error);
   }
 });
-

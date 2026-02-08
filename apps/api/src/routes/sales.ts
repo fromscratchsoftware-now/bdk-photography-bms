@@ -11,10 +11,21 @@ salesRouter.get("/", (_req, res) => {
 salesRouter.post("/", (req, res, next) => {
   try {
     const payload = addSaleSchema.parse(req.body);
-    const sale = createSale(payload);
+    const user = req.authUser;
+    if (!user) {
+      throw new Error("Unauthenticated");
+    }
+    if (!user.shopId) {
+      throw new Error("User is not assigned to a shop");
+    }
+
+    const sale = createSale({
+      shopId: user.shopId,
+      userId: user.id,
+      ...payload
+    });
     res.status(201).json({ data: sale });
   } catch (error) {
     next(error);
   }
 });
-

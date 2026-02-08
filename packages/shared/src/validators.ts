@@ -12,8 +12,6 @@ export const createProductSchema = z.object({
 });
 
 export const addSaleSchema = z.object({
-  shopId: z.string().min(1),
-  userId: z.string().min(1),
   paymentMethod: z.enum(["CASH", "MOBILE_MONEY", "CARD", "CREDIT"]),
   notes: z.string().optional(),
   lines: z
@@ -31,12 +29,10 @@ export const addExpenseSchema = z.object({
   amount: z.number().positive(),
   category: z.string().min(2),
   notes: z.string().optional(),
-  paidBy: z.enum(["SALESPERSON_CASH", "ADMIN_BANK"]),
-  recordedByUserId: z.string().min(1)
+  paidBy: z.enum(["SALESPERSON_CASH", "ADMIN_BANK"])
 });
 
 export const createTransferSchema = z.object({
-  senderUserId: z.string().min(1),
   receiverUserId: z.string().min(1),
   amount: z.number().positive()
 });
@@ -46,7 +42,6 @@ export const decideTransferSchema = z.object({
 });
 
 export const createBankActionSchema = z.object({
-  userId: z.string().min(1),
   amount: z.number().positive()
 });
 

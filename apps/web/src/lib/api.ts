@@ -1,9 +1,10 @@
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:4000";
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(path: string, init?: RequestInit, userId?: string): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      ...(userId ? { "x-user-id": userId } : {})
     },
     ...init
   });
@@ -54,32 +55,56 @@ export function getSeedMeta(): Promise<SeedMeta> {
   return request<SeedMeta>("/api/meta/seed");
 }
 
-export function getProducts(): Promise<Product[]> {
-  return request<Product[]>("/api/products");
+export function getProducts(userId: string): Promise<Product[]> {
+  return request<Product[]>("/api/products", undefined, userId);
 }
 
-export function getInventory(): Promise<InventoryRow[]> {
-  return request<InventoryRow[]>("/api/products/inventory");
+export function getInventory(userId: string): Promise<InventoryRow[]> {
+  return request<InventoryRow[]>("/api/products/inventory", undefined, userId);
 }
 
-export function getAdminDashboard(): Promise<AdminDashboard> {
-  return request<AdminDashboard>("/api/cash/dashboard/admin");
+export function getAdminDashboard(userId: string): Promise<AdminDashboard> {
+  return request<AdminDashboard>("/api/cash/dashboard/admin", undefined, userId);
 }
 
-export function getCapitalSummary(): Promise<CapitalSummary> {
-  return request<CapitalSummary>("/api/cash/capital/summary");
+export function getCapitalSummary(userId: string): Promise<CapitalSummary> {
+  return request<CapitalSummary>("/api/cash/capital/summary", undefined, userId);
 }
 
-export function createSale(payload: {
-  shopId: string;
+export interface SalesDashboard {
   userId: string;
+  cashAtHand: number;
+  pendingTransfers: Array<{
+    id: string;
+    senderUserId: string;
+    receiverUserId: string;
+    amount: number;
+    status: string;
+    createdAt: string;
+  }>;
+  pendingBankActions: Array<{
+    id: string;
+    userId: string;
+    amount: number;
+    status: string;
+    createdAt: string;
+  }>;
+}
+
+export function getSalesDashboard(userId: string): Promise<SalesDashboard> {
+  return request<SalesDashboard>(`/api/cash/dashboard/sales/${userId}`, undefined, userId);
+}
+
+export function createSale(
+  userId: string,
+  payload: {
   paymentMethod: "CASH" | "MOBILE_MONEY" | "CARD" | "CREDIT";
   lines: Array<{ productId: string; quantity: number; unitPrice: number }>;
   notes?: string;
-}): Promise<void> {
+  }
+): Promise<void> {
   return request<void>("/api/sales", {
     method: "POST",
     body: JSON.stringify(payload)
-  });
+  }, userId);
 }
-

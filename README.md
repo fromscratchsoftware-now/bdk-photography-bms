@@ -67,7 +67,10 @@ npm run dev
 
 ## Core API Endpoints
 
+- Auth: all `/api/*` endpoints require an `x-user-id` header, except `GET /api/meta/seed` and `GET /api/health`.
+
 - `GET /api/meta/seed`
+- `GET /api/health`
 - `GET /api/products`
 - `POST /api/products`
 - `GET /api/products/inventory`
@@ -90,7 +93,7 @@ npm run dev
 ## Next Build Targets
 
 1. Persist data using PostgreSQL + Prisma migrations.
-2. Add authentication and role guards at API route level.
+2. Replace the current `x-user-id` header auth with real authentication (sessions/JWT) and secure password storage.
 3. Implement workshop batch module and transfer states (`Draft -> Shipped -> Received`).
 4. Add audit log table and write hooks for every mutating action.
 5. Add messaging providers (SMS/WhatsApp/Email) with template management and send logs.
