@@ -359,7 +359,17 @@ function phase1_handle(string $method, string $route): void {
 
   if ($method === "GET" && $route === "shops") {
     if ($roleName === "ADMIN") {
-      $shops = phase1_db_fetch_all($pdo, "SELECT id, name, code, notes, created_at, updated_at FROM shops ORDER BY name ASC", []);
+      $rows = phase1_db_fetch_all($pdo, "SELECT id, name, code, notes, created_at, updated_at FROM shops ORDER BY name ASC", []);
+      $shops = array_map(function ($row) {
+        return [
+          "id" => (string)($row["id"] ?? ""),
+          "name" => (string)($row["name"] ?? ""),
+          "code" => (string)($row["code"] ?? ""),
+          "notes" => $row["notes"] ?? null,
+          "createdAt" => (string)($row["created_at"] ?? ""),
+          "updatedAt" => (string)($row["updated_at"] ?? ""),
+        ];
+      }, $rows);
       json_response(200, ["data" => $shops]);
     }
 
