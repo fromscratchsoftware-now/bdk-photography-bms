@@ -5,7 +5,7 @@ Options -Indexes
 
   # Block access to source / repo internals.
   RewriteRule ^\\. - [F,L]
-  RewriteRule ^(apps|packages|docs|node_modules|data)/ - [F,L]
+  RewriteRule ^(apps|packages|docs|node_modules|data|scripts)/ - [F,L]
   RewriteRule ^(package\\.json|package-lock\\.json|tsconfig\\.base\\.json|README\\.md)$ - [F,L]
 
   # SPA fallback (ignore the API, even when deployed under a subdirectory like /test).

@@ -83,6 +83,85 @@ function get_header_value(string $name): ?string {
   return null;
 }
 
+function get_authorization_header(): ?string {
+  $direct = get_header_value("Authorization");
+  if ($direct) {
+    return $direct;
+  }
+  // Some hosting setups forward Authorization via this alternate key.
+  if (isset($_SERVER["REDIRECT_HTTP_AUTHORIZATION"]) && is_string($_SERVER["REDIRECT_HTTP_AUTHORIZATION"]) && $_SERVER["REDIRECT_HTTP_AUTHORIZATION"] !== "") {
+    return $_SERVER["REDIRECT_HTTP_AUTHORIZATION"];
+  }
+  return null;
+}
+
+function base64url_encode(string $data): string {
+  return rtrim(strtr(base64_encode($data), "+/", "-_"), "=");
+}
+
+function base64url_decode(string $data): string {
+  $decoded = strtr($data, "-_", "+/");
+  $pad = strlen($decoded) % 4;
+  if ($pad > 0) {
+    $decoded .= str_repeat("=", 4 - $pad);
+  }
+  $raw = base64_decode($decoded, true);
+  return $raw === false ? "" : $raw;
+}
+
+function jwt_secret(): string {
+  $secret = (string)(getenv("BDK_JWT_SECRET") ?: (getenv("JWT_SECRET") ?: ""));
+  if (strlen($secret) < 32) {
+    json_response(500, ["error" => "ConfigError", "message" => "Set BDK_JWT_SECRET (>=32 chars) in .env"]);
+  }
+  return $secret;
+}
+
+function jwt_ttl_seconds(): int {
+  $raw = (string)(getenv("BDK_JWT_TTL_SECONDS") ?: "");
+  $ttl = $raw !== "" ? (int)$raw : 43200; // 12h
+  return $ttl > 0 ? $ttl : 43200;
+}
+
+function jwt_sign(string $userId): string {
+  $header = ["alg" => "HS256", "typ" => "JWT"];
+  $now = time();
+  $payload = ["sub" => $userId, "iat" => $now, "exp" => $now + jwt_ttl_seconds()];
+
+  $encodedHeader = base64url_encode(json_encode($header, JSON_UNESCAPED_SLASHES));
+  $encodedPayload = base64url_encode(json_encode($payload, JSON_UNESCAPED_SLASHES));
+  $unsigned = $encodedHeader . "." . $encodedPayload;
+  $signature = hash_hmac("sha256", $unsigned, jwt_secret(), true);
+  return $unsigned . "." . base64url_encode($signature);
+}
+
+function jwt_verify(string $token): array {
+  $parts = explode(".", $token);
+  if (count($parts) !== 3) {
+    json_response(401, ["error" => "HttpError", "message" => "Invalid token"]);
+  }
+  [$encodedHeader, $encodedPayload, $encodedSignature] = $parts;
+  $unsigned = $encodedHeader . "." . $encodedPayload;
+  $expectedSignature = hash_hmac("sha256", $unsigned, jwt_secret(), true);
+  $signature = base64url_decode($encodedSignature);
+  if ($signature === "" || !hash_equals($expectedSignature, $signature)) {
+    json_response(401, ["error" => "HttpError", "message" => "Invalid token"]);
+  }
+
+  $payloadRaw = base64url_decode($encodedPayload);
+  $payload = json_decode($payloadRaw, true);
+  if (!is_array($payload) || !isset($payload["sub"]) || !is_string($payload["sub"])) {
+    json_response(401, ["error" => "HttpError", "message" => "Invalid token"]);
+  }
+
+  $exp = isset($payload["exp"]) ? (int)$payload["exp"] : 0;
+  if ($exp > 0 && time() > $exp) {
+    json_response(401, ["error" => "HttpError", "message" => "Token expired"]);
+  }
+
+  return $payload;
+}
+
 function should_use_mysql(): bool {
   $backend = strtolower((string)(getenv("BDK_STORAGE") ?: ""));
   if ($backend === "mysql") {
@@ -136,6 +215,222 @@ function mysql_ensure_state_table(PDO $pdo): void {
       "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP" .
     ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
   );
+}
+
+function phase1_db_fetch_one(PDO $pdo, string $sql, array $params): ?array {
+  $stmt = $pdo->prepare($sql);
+  $stmt->execute($params);
+  $row = $stmt->fetch();
+  return is_array($row) ? $row : null;
+}
+
+function phase1_db_fetch_all(PDO $pdo, string $sql, array $params): array {
+  $stmt = $pdo->prepare($sql);
+  $stmt->execute($params);
+  $rows = $stmt->fetchAll();
+  return is_array($rows) ? $rows : [];
+}
+
+function phase1_load_assignments(PDO $pdo, string $userId): array {
+  return phase1_db_fetch_all(
+    $pdo,
+    "SELECT a.id, a.shop_id, a.is_primary, a.assigned_at, a.unassigned_at, a.notes, a.created_at, a.updated_at, " .
+      "s.name AS shop_name, s.code AS shop_code " .
+    "FROM user_shop_assignment a " .
+    "JOIN shops s ON s.id = a.shop_id " .
+    "WHERE a.user_id = :user_id AND a.unassigned_at IS NULL " .
+    "ORDER BY a.is_primary DESC, a.assigned_at DESC",
+    [":user_id" => $userId]
+  );
+}
+
+function phase1_find_user_by_phone(PDO $pdo, string $phone): ?array {
+  return phase1_db_fetch_one(
+    $pdo,
+    "SELECT u.id, u.full_name, u.phone, u.password_hash, u.role_id, u.is_active, u.notes, u.created_at, u.updated_at, r.name AS role_name " .
+    "FROM users u JOIN roles r ON r.id = u.role_id WHERE u.phone = :phone LIMIT 1",
+    [":phone" => $phone]
+  );
+}
+
+function phase1_find_user_by_id(PDO $pdo, string $userId): ?array {
+  return phase1_db_fetch_one(
+    $pdo,
+    "SELECT u.id, u.full_name, u.phone, u.password_hash, u.role_id, u.is_active, u.notes, u.created_at, u.updated_at, r.name AS role_name " .
+    "FROM users u JOIN roles r ON r.id = u.role_id WHERE u.id = :id LIMIT 1",
+    [":id" => $userId]
+  );
+}
+
+function phase1_public_user(array $user, array $assignments): array {
+  return [
+    "id" => (string)$user["id"],
+    "fullName" => (string)$user["full_name"],
+    "mobileNumber" => (string)$user["phone"],
+    "role" => (string)$user["role_name"],
+    "notes" => $user["notes"] ?? null,
+    "createdAt" => (string)$user["created_at"],
+    "updatedAt" => (string)$user["updated_at"],
+    "shops" => array_map(function ($row) {
+      return [
+        "shopId" => (string)($row["shop_id"] ?? ""),
+        "code" => (string)($row["shop_code"] ?? ""),
+        "name" => (string)($row["shop_name"] ?? ""),
+        "isPrimary" => (bool)($row["is_primary"] ?? false),
+      ];
+    }, $assignments),
+  ];
+}
+
+function phase1_require_auth(PDO $pdo): array {
+  $authHeader = get_authorization_header();
+  if (!$authHeader) {
+    json_response(401, ["error" => "HttpError", "message" => "Missing Authorization header"]);
+  }
+
+  $token = "";
+  if (stripos($authHeader, "Bearer ") === 0) {
+    $token = trim(substr($authHeader, 7));
+  }
+  if ($token === "") {
+    json_response(401, ["error" => "HttpError", "message" => "Invalid Authorization header"]);
+  }
+
+  $payload = jwt_verify($token);
+  $userId = (string)($payload["sub"] ?? "");
+  if ($userId === "") {
+    json_response(401, ["error" => "HttpError", "message" => "Invalid token"]);
+  }
+
+  $user = phase1_find_user_by_id($pdo, $userId);
+  if (!$user || (int)($user["is_active"] ?? 0) !== 1) {
+    json_response(401, ["error" => "HttpError", "message" => "Invalid user"]);
+  }
+
+  $assignments = phase1_load_assignments($pdo, (string)$user["id"]);
+  return ["user" => $user, "assignments" => $assignments];
+}
+
+function phase1_require_role(string $roleName, array $allowed): void {
+  if (!in_array($roleName, $allowed, true)) {
+    json_response(403, ["error" => "HttpError", "message" => "Forbidden"]);
+  }
+}
+
+function phase1_handle(string $method, string $route): void {
+  $pdo = mysql_pdo();
+
+  if ($method === "GET" && $route === "health") {
+    json_response(200, ["status" => "ok", "service" => "bdk-api", "timestamp" => now_iso(), "mode" => "phase1"]);
+  }
+
+  if ($method === "POST" && $route === "auth/login") {
+    $body = read_json_body();
+    $mobile = isset($body["mobileNumber"]) && is_string($body["mobileNumber"]) ? normalize_mobile_number($body["mobileNumber"]) : "";
+    $password = isset($body["password"]) && is_string($body["password"]) ? $body["password"] : "";
+
+    if ($mobile === "" || $password === "") {
+      json_response(400, ["error" => "ValidationError", "message" => "mobileNumber and password are required"]);
+    }
+
+    $user = phase1_find_user_by_phone($pdo, $mobile);
+    if (!$user || (int)($user["is_active"] ?? 0) !== 1) {
+      json_response(401, ["error" => "HttpError", "message" => "Invalid credentials"]);
+    }
+
+    $hash = (string)($user["password_hash"] ?? "");
+    if ($hash === "" || !password_verify($password, $hash)) {
+      json_response(401, ["error" => "HttpError", "message" => "Invalid credentials"]);
+    }
+
+    $assignments = phase1_load_assignments($pdo, (string)$user["id"]);
+    $token = jwt_sign((string)$user["id"]);
+    json_response(200, ["data" => ["token" => $token, "user" => phase1_public_user($user, $assignments)]]);
+  }
+
+  $auth = phase1_require_auth($pdo);
+  $authUser = $auth["user"];
+  $roleName = (string)($authUser["role_name"] ?? "");
+  $assignments = $auth["assignments"];
+
+  if ($method === "GET" && $route === "auth/me") {
+    json_response(200, ["data" => phase1_public_user($authUser, $assignments)]);
+  }
+
+  if ($method === "GET" && $route === "shops") {
+    if ($roleName === "ADMIN") {
+      $shops = phase1_db_fetch_all($pdo, "SELECT id, name, code, notes, created_at, updated_at FROM shops ORDER BY name ASC", []);
+      json_response(200, ["data" => $shops]);
+    }
+
+    $shops = [];
+    foreach ($assignments as $row) {
+      $shops[] = [
+        "id" => (string)($row["shop_id"] ?? ""),
+        "name" => (string)($row["shop_name"] ?? ""),
+        "code" => (string)($row["shop_code"] ?? ""),
+      ];
+    }
+    json_response(200, ["data" => $shops]);
+  }
+
+  if ($method === "GET" && $route === "users") {
+    phase1_require_role($roleName, ["ADMIN", "MANAGER"]);
+
+    if ($roleName === "ADMIN") {
+      $rows = phase1_db_fetch_all(
+        $pdo,
+        "SELECT u.id, u.full_name, u.phone, u.is_active, u.notes, u.created_at, u.updated_at, r.name AS role_name " .
+        "FROM users u JOIN roles r ON r.id = u.role_id ORDER BY u.created_at DESC",
+        []
+      );
+      $users = array_map(function ($row) use ($pdo) {
+        $assignments = phase1_load_assignments($pdo, (string)$row["id"]);
+        return phase1_public_user($row, $assignments);
+      }, $rows);
+      json_response(200, ["data" => $users]);
+    }
+
+    // Manager: only sales users in the manager's shops.
+    $shopIds = [];
+    foreach ($assignments as $row) {
+      $shopId = (string)($row["shop_id"] ?? "");
+      if ($shopId !== "") {
+        $shopIds[] = $shopId;
+      }
+    }
+    if (count($shopIds) < 1) {
+      json_response(200, ["data" => []]);
+    }
+
+    $placeholders = [];
+    $params = [];
+    foreach ($shopIds as $idx => $shopId) {
+      $key = ":shop_" . (string)$idx;
+      $placeholders[] = $key;
+      $params[$key] = $shopId;
+    }
+
+    $rows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT DISTINCT u.id, u.full_name, u.phone, u.is_active, u.notes, u.created_at, u.updated_at, r.name AS role_name " .
+      "FROM users u " .
+      "JOIN roles r ON r.id = u.role_id " .
+      "JOIN user_shop_assignment a ON a.user_id = u.id AND a.unassigned_at IS NULL " .
+      "WHERE r.name = 'SALES' AND a.shop_id IN (" . implode(", ", $placeholders) . ") " .
+      "ORDER BY u.created_at DESC",
+      $params
+    );
+
+    $users = array_map(function ($row) use ($pdo) {
+      $assignments = phase1_load_assignments($pdo, (string)$row["id"]);
+      return phase1_public_user($row, $assignments);
+    }, $rows);
+
+    json_response(200, ["data" => $users]);
+  }
+
+  json_response(404, ["error" => "NotFound", "message" => "Route not found"]);
 }
 
 function seed_state(): array {
@@ -599,6 +894,11 @@ function create_id(string $prefix): string {
 
 $method = $_SERVER["REQUEST_METHOD"] ?? "GET";
 $route = api_path();
+
+$apiMode = strtolower((string)(getenv("BDK_API_MODE") ?: ""));
+if ($apiMode === "phase1") {
+  phase1_handle($method, $route);
+}
 
 // Public endpoints.
 if ($method === "GET" && $route === "health") {
