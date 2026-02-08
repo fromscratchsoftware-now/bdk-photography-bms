@@ -12,6 +12,7 @@
     "dev:api": "npm run dev -w @bdk/api",
     "dev:web": "npm run dev -w @bdk/web",
     "build": "npm run build -ws --if-present",
+    "test": "npm run test -ws --if-present",
     "typecheck": "npm run typecheck -ws --if-present"
   },
   "devDependencies": {

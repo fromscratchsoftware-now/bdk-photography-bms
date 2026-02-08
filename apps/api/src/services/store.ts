@@ -63,19 +63,27 @@ interface Invoice {
   createdAt: string;
 }
 
-const shops: Shop[] = [
+function deepClone<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function resetArray<T>(target: T[], seed: T[]): void {
+  target.splice(0, target.length, ...deepClone(seed));
+}
+
+const seedShops: Shop[] = [
   { id: "shop-kampala-main", name: "Kampala Main", code: "KLA" },
   { id: "shop-wandegeya", name: "Wandegeya", code: "WDG" }
 ];
 
-const users: User[] = [
+const seedUsers: User[] = [
   { id: "user-admin-1", fullName: "System Admin", role: "ADMIN" },
   { id: "user-manager-1", fullName: "Shop Manager", role: "MANAGER" },
   { id: "user-sales-1", fullName: "Sales One", role: "SALES", shopId: "shop-kampala-main" },
   { id: "user-sales-2", fullName: "Sales Two", role: "SALES", shopId: "shop-wandegeya" }
 ];
 
-const products: Product[] = [
+const seedProducts: Product[] = [
   {
     id: "prod-board-a4c",
     skuCode: "A4C-BOARD",
@@ -111,7 +119,7 @@ const products: Product[] = [
   }
 ];
 
-const inventoryRows: InventoryRow[] = [
+const seedInventoryRows: InventoryRow[] = [
   { shopId: "shop-kampala-main", productId: "prod-board-a4c", quantity: 200 },
   { shopId: "shop-kampala-main", productId: "prod-board-a3c", quantity: 80 },
   { shopId: "shop-kampala-main", productId: "prod-frame-basic", quantity: 25 },
@@ -119,6 +127,11 @@ const inventoryRows: InventoryRow[] = [
   { shopId: "shop-wandegeya", productId: "prod-board-a3c", quantity: 60 },
   { shopId: "shop-wandegeya", productId: "prod-frame-basic", quantity: 30 }
 ];
+
+const shops: Shop[] = deepClone(seedShops);
+const users: User[] = deepClone(seedUsers);
+const products: Product[] = deepClone(seedProducts);
+const inventoryRows: InventoryRow[] = deepClone(seedInventoryRows);
 
 const sales: Sale[] = [];
 const expenses: Expense[] = [];
@@ -130,6 +143,24 @@ const invoicePayments: InvoicePayment[] = [];
 
 let shopInvoiceCounters: Record<string, number> = {};
 let bankCash = 0;
+
+export function __resetForTests(): void {
+  resetArray(shops, seedShops);
+  resetArray(users, seedUsers);
+  resetArray(products, seedProducts);
+  resetArray(inventoryRows, seedInventoryRows);
+
+  sales.splice(0, sales.length);
+  expenses.splice(0, expenses.length);
+  transfers.splice(0, transfers.length);
+  bankActions.splice(0, bankActions.length);
+  customers.splice(0, customers.length);
+  invoices.splice(0, invoices.length);
+  invoicePayments.splice(0, invoicePayments.length);
+
+  shopInvoiceCounters = {};
+  bankCash = 0;
+}
 
 function createId(prefix: string): string {
   return `${prefix}-${crypto.randomUUID()}`;
