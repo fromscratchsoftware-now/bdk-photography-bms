@@ -125,6 +125,10 @@ function seed_state(): array {
     "expenses" => [],
     "transfers" => [],
     "bankActions" => [],
+    "customers" => [],
+    "invoices" => [],
+    "invoicePayments" => [],
+    "shopInvoiceCounters" => [],
     "bankCash" => 0,
   ];
 }
@@ -156,6 +160,7 @@ function load_state(): array {
   if (!is_array($decoded)) {
     return seed_state();
   }
+  ensure_state_migrations($decoded);
   return $decoded;
 }
 
@@ -184,6 +189,18 @@ function ensure_state_migrations(array &$state): void {
   }
   if (!isset($state["bankActions"]) || !is_array($state["bankActions"])) {
     $state["bankActions"] = [];
+  }
+  if (!isset($state["customers"]) || !is_array($state["customers"])) {
+    $state["customers"] = [];
+  }
+  if (!isset($state["invoices"]) || !is_array($state["invoices"])) {
+    $state["invoices"] = [];
+  }
+  if (!isset($state["invoicePayments"]) || !is_array($state["invoicePayments"])) {
+    $state["invoicePayments"] = [];
+  }
+  if (!isset($state["shopInvoiceCounters"]) || !is_array($state["shopInvoiceCounters"])) {
+    $state["shopInvoiceCounters"] = [];
   }
   if (!isset($state["bankCash"]) || !is_int($state["bankCash"])) {
     $state["bankCash"] = (int)($state["bankCash"] ?? 0);
@@ -271,6 +288,33 @@ function find_user_by_mobile(array $state, string $mobileNumber): ?array {
   return null;
 }
 
+function find_shop(array $state, string $shopId): ?array {
+  foreach ($state["shops"] as $shop) {
+    if (($shop["id"] ?? "") === $shopId) {
+      return $shop;
+    }
+  }
+  return null;
+}
+
+function find_product(array $state, string $productId): ?array {
+  foreach ($state["products"] as $product) {
+    if (($product["id"] ?? "") === $productId) {
+      return $product;
+    }
+  }
+  return null;
+}
+
+function find_customer(array $state, string $customerId): ?array {
+  foreach ($state["customers"] as $customer) {
+    if (($customer["id"] ?? "") === $customerId) {
+      return $customer;
+    }
+  }
+  return null;
+}
+
 function require_auth(array $state): array {
   $userId = get_header_value("x-user-id");
   if (!$userId) {
@@ -343,6 +387,10 @@ function api_path(): string {
 
 function now_iso(): string {
   return gmdate("c");
+}
+
+function today_ymd(): string {
+  return gmdate("Y-m-d");
 }
 
 function create_id(string $prefix): string {
@@ -459,8 +507,119 @@ if ($method === "GET" && $route === "products") {
   json_response(200, ["data" => $state["products"]]);
 }
 
+if ($method === "POST" && $route === "products") {
+  require_role($authUser, ["ADMIN"]);
+  $body = read_json_body();
+
+  $skuCode = isset($body["skuCode"]) && is_string($body["skuCode"]) ? trim($body["skuCode"]) : "";
+  $name = isset($body["name"]) && is_string($body["name"]) ? trim($body["name"]) : "";
+  $category = isset($body["category"]) && is_string($body["category"]) ? trim($body["category"]) : "";
+  $productType = isset($body["productType"]) && is_string($body["productType"]) ? trim($body["productType"]) : "";
+  $unitOfMeasure = isset($body["unitOfMeasure"]) && is_string($body["unitOfMeasure"]) ? trim($body["unitOfMeasure"]) : "";
+  $costPrice = isset($body["costPrice"]) ? (int)$body["costPrice"] : null;
+  $sellingPrice = isset($body["sellingPrice"]) ? (int)$body["sellingPrice"] : 0;
+  $active = isset($body["active"]) ? (bool)$body["active"] : true;
+
+  if ($skuCode === "" || $name === "" || $category === "" || $unitOfMeasure === "") {
+    json_response(400, ["error" => "ValidationError", "message" => "skuCode, name, category, and unitOfMeasure are required"]);
+  }
+  if (!in_array($productType, ["BOARD", "NON_BOARD"], true)) {
+    json_response(400, ["error" => "ValidationError", "message" => "Invalid productType"]);
+  }
+  if ($sellingPrice <= 0) {
+    json_response(400, ["error" => "ValidationError", "message" => "sellingPrice must be > 0"]);
+  }
+  if ($costPrice !== null && $costPrice < 0) {
+    json_response(400, ["error" => "ValidationError", "message" => "costPrice must be >= 0"]);
+  }
+
+  $product = with_state(function (&$s) use ($skuCode, $name, $category, $productType, $unitOfMeasure, $costPrice, $sellingPrice, $active) {
+    foreach ($s["products"] as $existing) {
+      if (strtolower((string)($existing["skuCode"] ?? "")) === strtolower($skuCode)) {
+        json_response(409, ["error" => "Conflict", "message" => "Duplicate SKU code"]);
+      }
+    }
+
+    $product = [
+      "id" => create_id("prod"),
+      "skuCode" => $skuCode,
+      "name" => $name,
+      "category" => $category,
+      "productType" => $productType,
+      "unitOfMeasure" => $unitOfMeasure,
+      "sellingPrice" => $sellingPrice,
+      "active" => $active,
+    ];
+    if ($costPrice !== null) {
+      $product["costPrice"] = $costPrice;
+    }
+
+    $s["products"][] = $product;
+    return $product;
+  });
+
+  json_response(201, ["data" => $product]);
+}
+
 if ($method === "GET" && $route === "products/inventory") {
   json_response(200, ["data" => $state["inventoryRows"]]);
+}
+
+if ($method === "POST" && $route === "products/inventory/receive") {
+  require_role($authUser, ["ADMIN"]);
+  $body = read_json_body();
+
+  $shopId = isset($body["shopId"]) && is_string($body["shopId"]) ? trim($body["shopId"]) : "";
+  $productId = isset($body["productId"]) && is_string($body["productId"]) ? trim($body["productId"]) : "";
+  $quantity = isset($body["quantity"]) ? (int)$body["quantity"] : 0;
+
+  if ($shopId === "" || $productId === "" || $quantity <= 0) {
+    json_response(400, ["error" => "ValidationError", "message" => "shopId, productId, and quantity (>0) are required"]);
+  }
+
+  $row = with_state(function (&$s) use ($shopId, $productId, $quantity) {
+    if (!find_shop($s, $shopId)) {
+      json_response(400, ["error" => "ValidationError", "message" => "Invalid shopId"]);
+    }
+    if (!find_product($s, $productId)) {
+      json_response(404, ["error" => "HttpError", "message" => "Product not found"]);
+    }
+
+    $rowIndex = null;
+    foreach ($s["inventoryRows"] as $idx => $row) {
+      if (($row["shopId"] ?? "") === $shopId && ($row["productId"] ?? "") === $productId) {
+        $rowIndex = $idx;
+        break;
+      }
+    }
+    if ($rowIndex === null) {
+      $created = ["shopId" => $shopId, "productId" => $productId, "quantity" => $quantity];
+      $s["inventoryRows"][] = $created;
+      return $created;
+    }
+    $s["inventoryRows"][$rowIndex]["quantity"] = (int)$s["inventoryRows"][$rowIndex]["quantity"] + $quantity;
+    return $s["inventoryRows"][$rowIndex];
+  });
+
+  json_response(201, ["data" => $row]);
+}
+
+if ($method === "GET" && $route === "sales") {
+  $role = (string)($authUser["role"] ?? "");
+  if ($role === "ADMIN") {
+    json_response(200, ["data" => $state["sales"]]);
+  }
+  if ($role === "SALES") {
+    $userId = (string)$authUser["id"];
+    $filtered = [];
+    foreach ($state["sales"] as $sale) {
+      if (($sale["userId"] ?? "") === $userId) {
+        $filtered[] = $sale;
+      }
+    }
+    json_response(200, ["data" => $filtered]);
+  }
+  json_response(403, ["error" => "HttpError", "message" => "Forbidden"]);
 }
 
 if ($method === "POST" && $route === "sales") {
@@ -554,6 +713,288 @@ if ($method === "POST" && $route === "sales") {
   });
 
   json_response(201, ["data" => $sale]);
+}
+
+if ($method === "GET" && $route === "cash/actions") {
+  $role = (string)($authUser["role"] ?? "");
+  $userId = (string)($authUser["id"] ?? "");
+
+  if ($role === "ADMIN") {
+    json_response(200, [
+      "data" => [
+        "expenses" => $state["expenses"],
+        "transfers" => $state["transfers"],
+        "bankActions" => $state["bankActions"],
+        "bankCash" => (int)($state["bankCash"] ?? 0),
+      ],
+    ]);
+  }
+
+  if ($role === "SALES") {
+    $expenses = [];
+    foreach ($state["expenses"] as $expense) {
+      if (($expense["recordedByUserId"] ?? "") === $userId) {
+        $expenses[] = $expense;
+      }
+    }
+    $transfers = [];
+    foreach ($state["transfers"] as $transfer) {
+      if (($transfer["senderUserId"] ?? "") === $userId || ($transfer["receiverUserId"] ?? "") === $userId) {
+        $transfers[] = $transfer;
+      }
+    }
+    $bankActions = [];
+    foreach ($state["bankActions"] as $action) {
+      if (($action["userId"] ?? "") === $userId) {
+        $bankActions[] = $action;
+      }
+    }
+    json_response(200, [
+      "data" => [
+        "expenses" => $expenses,
+        "transfers" => $transfers,
+        "bankActions" => $bankActions,
+        "bankCash" => (int)($state["bankCash"] ?? 0),
+      ],
+    ]);
+  }
+
+  json_response(403, ["error" => "HttpError", "message" => "Forbidden"]);
+}
+
+if ($method === "POST" && $route === "cash/expenses") {
+  $body = read_json_body();
+  $amount = isset($body["amount"]) ? (int)$body["amount"] : 0;
+  $category = isset($body["category"]) && is_string($body["category"]) ? trim($body["category"]) : "";
+  $date = isset($body["date"]) && is_string($body["date"]) ? trim($body["date"]) : "";
+  $notes = isset($body["notes"]) && is_string($body["notes"]) ? $body["notes"] : null;
+  $paidBy = isset($body["paidBy"]) && is_string($body["paidBy"]) ? trim($body["paidBy"]) : "";
+
+  if ($amount <= 0 || $category === "" || $paidBy === "") {
+    json_response(400, ["error" => "ValidationError", "message" => "amount (>0), category, and paidBy are required"]);
+  }
+  if ($date !== "" && !preg_match('/^\\d{4}-\\d{2}-\\d{2}$/', $date)) {
+    json_response(400, ["error" => "ValidationError", "message" => "date must be YYYY-MM-DD"]);
+  }
+  if (!in_array($paidBy, ["SALESPERSON_CASH", "ADMIN_BANK"], true)) {
+    json_response(400, ["error" => "ValidationError", "message" => "Invalid paidBy"]);
+  }
+
+  $role = (string)($authUser["role"] ?? "");
+  if ($paidBy === "SALESPERSON_CASH" && $role !== "SALES") {
+    json_response(403, ["error" => "HttpError", "message" => "Only sales users can record salesperson-cash expenses"]);
+  }
+  if ($paidBy === "ADMIN_BANK" && $role !== "ADMIN") {
+    json_response(403, ["error" => "HttpError", "message" => "Only admins can record admin/bank expenses"]);
+  }
+
+  $expense = with_state(function (&$s) use ($authUser, $amount, $category, $date, $notes, $paidBy) {
+    $userId = (string)$authUser["id"];
+    if ($paidBy === "SALESPERSON_CASH") {
+      $available = cash_at_hand($s, $userId);
+      if ($available < $amount) {
+        json_response(400, [
+          "error" => "BadRequest",
+          "message" => "Insufficient cash at hand. Available: " . $available . ", required: " . $amount,
+        ]);
+      }
+    } else {
+      $bankCash = (int)($s["bankCash"] ?? 0);
+      if ($bankCash < $amount) {
+        json_response(400, [
+          "error" => "BadRequest",
+          "message" => "Insufficient bank cash. Available: " . $bankCash . ", required: " . $amount,
+        ]);
+      }
+      $s["bankCash"] = $bankCash - $amount;
+    }
+
+    $expense = [
+      "id" => create_id("exp"),
+      "amount" => $amount,
+      "category" => $category,
+      "date" => $date !== "" ? $date : today_ymd(),
+      "notes" => $notes,
+      "paidBy" => $paidBy,
+      "recordedByUserId" => $userId,
+      "createdAt" => now_iso(),
+    ];
+    $s["expenses"][] = $expense;
+    return $expense;
+  });
+
+  json_response(201, ["data" => $expense]);
+}
+
+if ($method === "POST" && $route === "cash/transfers") {
+  require_role($authUser, ["SALES"]);
+  $body = read_json_body();
+  $receiverUserId = isset($body["receiverUserId"]) && is_string($body["receiverUserId"]) ? trim($body["receiverUserId"]) : "";
+  $amount = isset($body["amount"]) ? (int)$body["amount"] : 0;
+
+  if ($receiverUserId === "" || $amount <= 0) {
+    json_response(400, ["error" => "ValidationError", "message" => "receiverUserId and amount (>0) are required"]);
+  }
+  if ($receiverUserId === (string)$authUser["id"]) {
+    json_response(400, ["error" => "ValidationError", "message" => "Cannot transfer to the same user"]);
+  }
+
+  $transfer = with_state(function (&$s) use ($authUser, $receiverUserId, $amount) {
+    $receiver = find_user($s, $receiverUserId);
+    if (!$receiver || ($receiver["role"] ?? "") !== "SALES") {
+      json_response(400, ["error" => "ValidationError", "message" => "Receiver must be a valid SALES user"]);
+    }
+
+    $senderId = (string)$authUser["id"];
+    $available = cash_at_hand($s, $senderId);
+    if ($available < $amount) {
+      json_response(400, [
+        "error" => "BadRequest",
+        "message" => "Insufficient cash at hand. Available: " . $available . ", required: " . $amount,
+      ]);
+    }
+
+    $transfer = [
+      "id" => create_id("trf"),
+      "senderUserId" => $senderId,
+      "receiverUserId" => $receiverUserId,
+      "amount" => $amount,
+      "status" => "PENDING",
+      "createdAt" => now_iso(),
+    ];
+    $s["transfers"][] = $transfer;
+    return $transfer;
+  });
+
+  json_response(201, ["data" => $transfer]);
+}
+
+if ($method === "PATCH" && preg_match('/^cash\\/transfers\\/([^\\/]+)\\/decision$/', $route, $matches) === 1) {
+  require_role($authUser, ["SALES"]);
+  $transferId = (string)$matches[1];
+  $body = read_json_body();
+  $status = isset($body["status"]) && is_string($body["status"]) ? trim($body["status"]) : "";
+  if (!in_array($status, ["APPROVED", "REJECTED"], true)) {
+    json_response(400, ["error" => "ValidationError", "message" => "status must be APPROVED or REJECTED"]);
+  }
+
+  $updated = with_state(function (&$s) use ($authUser, $transferId, $status) {
+    $idx = null;
+    foreach ($s["transfers"] as $i => $t) {
+      if (($t["id"] ?? "") === $transferId) {
+        $idx = $i;
+        break;
+      }
+    }
+    if ($idx === null) {
+      json_response(404, ["error" => "HttpError", "message" => "Transfer not found"]);
+    }
+
+    $existing = $s["transfers"][$idx];
+    if (($existing["status"] ?? "") !== "PENDING") {
+      json_response(400, ["error" => "BadRequest", "message" => "Transfer is not pending"]);
+    }
+    if (($existing["receiverUserId"] ?? "") !== (string)$authUser["id"]) {
+      json_response(403, ["error" => "HttpError", "message" => "Only the receiver can approve/reject this transfer"]);
+    }
+
+    if ($status === "APPROVED") {
+      $senderId = (string)($existing["senderUserId"] ?? "");
+      $amount = (int)($existing["amount"] ?? 0);
+      $available = cash_at_hand($s, $senderId);
+      if ($available < $amount) {
+        json_response(400, [
+          "error" => "BadRequest",
+          "message" => "Sender has insufficient cash at hand for approval. Available: " . $available . ", required: " . $amount,
+        ]);
+      }
+    }
+
+    $s["transfers"][$idx]["status"] = $status;
+    $s["transfers"][$idx]["decidedAt"] = now_iso();
+    return $s["transfers"][$idx];
+  });
+
+  json_response(200, ["data" => $updated]);
+}
+
+if ($method === "POST" && $route === "cash/bank-actions") {
+  require_role($authUser, ["SALES"]);
+  $body = read_json_body();
+  $amount = isset($body["amount"]) ? (int)$body["amount"] : 0;
+  if ($amount <= 0) {
+    json_response(400, ["error" => "ValidationError", "message" => "amount (>0) is required"]);
+  }
+
+  $action = with_state(function (&$s) use ($authUser, $amount) {
+    $userId = (string)$authUser["id"];
+    $available = cash_at_hand($s, $userId);
+    if ($available < $amount) {
+      json_response(400, [
+        "error" => "BadRequest",
+        "message" => "Insufficient cash at hand. Available: " . $available . ", required: " . $amount,
+      ]);
+    }
+
+    $action = [
+      "id" => create_id("bank"),
+      "userId" => $userId,
+      "amount" => $amount,
+      "status" => "PENDING",
+      "createdAt" => now_iso(),
+    ];
+    $s["bankActions"][] = $action;
+    return $action;
+  });
+
+  json_response(201, ["data" => $action]);
+}
+
+if ($method === "PATCH" && preg_match('/^cash\\/bank-actions\\/([^\\/]+)\\/decision$/', $route, $matches) === 1) {
+  require_role($authUser, ["ADMIN"]);
+  $actionId = (string)$matches[1];
+  $body = read_json_body();
+  $status = isset($body["status"]) && is_string($body["status"]) ? trim($body["status"]) : "";
+  if (!in_array($status, ["APPROVED", "REJECTED"], true)) {
+    json_response(400, ["error" => "ValidationError", "message" => "status must be APPROVED or REJECTED"]);
+  }
+
+  $updated = with_state(function (&$s) use ($actionId, $status) {
+    $idx = null;
+    foreach ($s["bankActions"] as $i => $a) {
+      if (($a["id"] ?? "") === $actionId) {
+        $idx = $i;
+        break;
+      }
+    }
+    if ($idx === null) {
+      json_response(404, ["error" => "HttpError", "message" => "Bank action not found"]);
+    }
+
+    $existing = $s["bankActions"][$idx];
+    if (($existing["status"] ?? "") !== "PENDING") {
+      json_response(400, ["error" => "BadRequest", "message" => "Bank action is not pending"]);
+    }
+
+    if ($status === "APPROVED") {
+      $userId = (string)($existing["userId"] ?? "");
+      $amount = (int)($existing["amount"] ?? 0);
+      $available = cash_at_hand($s, $userId);
+      if ($available < $amount) {
+        json_response(400, [
+          "error" => "BadRequest",
+          "message" => "User has insufficient cash at hand for approval. Available: " . $available . ", required: " . $amount,
+        ]);
+      }
+      $s["bankCash"] = (int)($s["bankCash"] ?? 0) + $amount;
+    }
+
+    $s["bankActions"][$idx]["status"] = $status;
+    $s["bankActions"][$idx]["decidedAt"] = now_iso();
+    return $s["bankActions"][$idx];
+  });
+
+  json_response(200, ["data" => $updated]);
 }
 
 if ($method === "GET" && $route === "cash/dashboard/sales/" . ($authUser["id"] ?? "")) {
@@ -699,6 +1140,260 @@ if ($method === "GET" && $route === "cash/capital/summary") {
       "warnings" => $warnings,
     ],
   ]);
+}
+
+if ($method === "GET" && $route === "invoices/customers") {
+  json_response(200, ["data" => $state["customers"]]);
+}
+
+if ($method === "POST" && $route === "invoices/customers") {
+  $role = (string)($authUser["role"] ?? "");
+  if (!in_array($role, ["SALES", "ADMIN"], true)) {
+    json_response(403, ["error" => "HttpError", "message" => "Forbidden"]);
+  }
+
+  $body = read_json_body();
+  $mobileNumber = isset($body["mobileNumber"]) && is_string($body["mobileNumber"]) ? normalize_mobile_number($body["mobileNumber"]) : "";
+  $firstName = isset($body["firstName"]) && is_string($body["firstName"]) ? trim($body["firstName"]) : "";
+  $lastName = isset($body["lastName"]) && is_string($body["lastName"]) ? trim($body["lastName"]) : "";
+  $email = isset($body["email"]) && is_string($body["email"]) ? trim($body["email"]) : null;
+
+  if ($mobileNumber === "" || $firstName === "" || $lastName === "") {
+    json_response(400, ["error" => "ValidationError", "message" => "mobileNumber, firstName, and lastName are required"]);
+  }
+  if ($email !== null && $email !== "" && !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+    json_response(400, ["error" => "ValidationError", "message" => "Invalid email"]);
+  }
+
+  $customer = with_state(function (&$s) use ($mobileNumber, $firstName, $lastName, $email) {
+    foreach ($s["customers"] as $existing) {
+      if (($existing["mobileNumber"] ?? "") === $mobileNumber) {
+        json_response(409, ["error" => "Conflict", "message" => "Customer already exists with this mobile number"]);
+      }
+    }
+
+    $customer = [
+      "id" => create_id("cust"),
+      "mobileNumber" => $mobileNumber,
+      "firstName" => $firstName,
+      "lastName" => $lastName,
+    ];
+    if ($email !== null && $email !== "") {
+      $customer["email"] = $email;
+    }
+
+    $s["customers"][] = $customer;
+    return $customer;
+  });
+
+  json_response(201, ["data" => $customer]);
+}
+
+if ($method === "GET" && $route === "invoices") {
+  json_response(200, ["data" => $state["invoices"]]);
+}
+
+if ($method === "GET" && $route === "invoices/overdue") {
+  require_role($authUser, ["ADMIN", "MANAGER"]);
+  $today = today_ymd();
+  $overdue = [];
+  foreach ($state["invoices"] as $invoice) {
+    $due = $invoice["dueDate"] ?? null;
+    $balance = (int)($invoice["balance"] ?? 0);
+    $status = (string)($invoice["status"] ?? "");
+    if (is_string($due) && $due !== "" && $balance > 0 && $due < $today && $status !== "VOID") {
+      $overdue[] = $invoice;
+    }
+  }
+  json_response(200, ["data" => $overdue]);
+}
+
+if ($method === "POST" && $route === "invoices") {
+  require_role($authUser, ["SALES"]);
+  $shopId = $authUser["shopId"] ?? null;
+  if (!$shopId) {
+    json_response(400, ["error" => "BadRequest", "message" => "User is not assigned to a shop"]);
+  }
+
+  $body = read_json_body();
+  $customerId = isset($body["customerId"]) && is_string($body["customerId"]) ? trim($body["customerId"]) : "";
+  $status = isset($body["status"]) && is_string($body["status"]) ? trim($body["status"]) : "ISSUED";
+  $lines = $body["lines"] ?? null;
+  $dueDate = isset($body["dueDate"]) && is_string($body["dueDate"]) ? trim($body["dueDate"]) : null;
+  $notes = isset($body["notes"]) && is_string($body["notes"]) ? $body["notes"] : null;
+
+  if ($customerId === "" || !in_array($status, ["DRAFT", "ISSUED"], true) || !is_array($lines) || count($lines) < 1) {
+    json_response(400, ["error" => "ValidationError", "message" => "customerId, status (DRAFT|ISSUED), and lines[] are required"]);
+  }
+  if ($dueDate !== null && $dueDate !== "" && !preg_match('/^\\d{4}-\\d{2}-\\d{2}$/', $dueDate)) {
+    json_response(400, ["error" => "ValidationError", "message" => "dueDate must be YYYY-MM-DD"]);
+  }
+
+  $invoice = with_state(function (&$s) use ($shopId, $authUser, $customerId, $status, $lines, $dueDate, $notes) {
+    if (!find_shop($s, (string)$shopId)) {
+      json_response(400, ["error" => "ValidationError", "message" => "Invalid shopId"]);
+    }
+    if (!find_customer($s, $customerId)) {
+      json_response(400, ["error" => "ValidationError", "message" => "Customer not found"]);
+    }
+
+    $materialized = [];
+    $total = 0;
+    foreach ($lines as $line) {
+      $productId = $line["productId"] ?? "";
+      $qty = (int)($line["quantity"] ?? 0);
+      $unitPrice = (int)($line["unitPrice"] ?? 0);
+      if (!is_string($productId) || $productId === "" || $qty <= 0 || $unitPrice <= 0) {
+        json_response(400, ["error" => "ValidationError", "message" => "Invalid invoice line"]);
+      }
+      if (!find_product($s, $productId)) {
+        json_response(404, ["error" => "HttpError", "message" => "Product not found"]);
+      }
+
+      $lineTotal = $qty * $unitPrice;
+      $total += $lineTotal;
+      $materialized[] = [
+        "productId" => $productId,
+        "quantity" => $qty,
+        "unitPrice" => $unitPrice,
+        "lineTotal" => $lineTotal,
+      ];
+    }
+
+    $shop = find_shop($s, (string)$shopId);
+    $code = is_array($shop) ? (string)($shop["code"] ?? "SHOP") : "SHOP";
+    $counter = (int)($s["shopInvoiceCounters"][(string)$shopId] ?? 0) + 1;
+    $s["shopInvoiceCounters"][(string)$shopId] = $counter;
+    $invoiceNumber = $code . "-" . str_pad((string)$counter, 6, "0", STR_PAD_LEFT);
+
+    $invoice = [
+      "id" => create_id("inv"),
+      "invoiceNumber" => $invoiceNumber,
+      "shopId" => (string)$shopId,
+      "customerId" => $customerId,
+      "status" => $status,
+      "lines" => $materialized,
+      "totalAmount" => $total,
+      "paidAmount" => 0,
+      "balance" => $total,
+      "dueDate" => $dueDate !== null && $dueDate !== "" ? $dueDate : null,
+      "notes" => $notes,
+      "createdByUserId" => (string)$authUser["id"],
+      "createdAt" => now_iso(),
+    ];
+
+    $s["invoices"][] = $invoice;
+    return $invoice;
+  });
+
+  json_response(201, ["data" => $invoice]);
+}
+
+if ($method === "PATCH" && preg_match('/^invoices\\/([^\\/]+)\\/status$/', $route, $matches) === 1) {
+  require_role($authUser, ["ADMIN"]);
+  $invoiceId = (string)$matches[1];
+  $body = read_json_body();
+  $status = isset($body["status"]) && is_string($body["status"]) ? trim($body["status"]) : "";
+  if (!in_array($status, ["DRAFT", "ISSUED", "PARTIALLY_PAID", "PAID", "VOID"], true)) {
+    json_response(400, ["error" => "ValidationError", "message" => "Invalid status"]);
+  }
+
+  $invoice = with_state(function (&$s) use ($invoiceId, $status) {
+    $idx = null;
+    foreach ($s["invoices"] as $i => $inv) {
+      if (($inv["id"] ?? "") === $invoiceId) {
+        $idx = $i;
+        break;
+      }
+    }
+    if ($idx === null) {
+      json_response(404, ["error" => "HttpError", "message" => "Invoice not found"]);
+    }
+    $s["invoices"][$idx]["status"] = $status;
+    $s["invoices"][$idx]["updatedAt"] = now_iso();
+    return $s["invoices"][$idx];
+  });
+
+  json_response(200, ["data" => $invoice]);
+}
+
+if ($method === "GET" && preg_match('/^invoices\\/([^\\/]+)\\/payments$/', $route, $matches) === 1) {
+  $invoiceId = (string)$matches[1];
+  $payments = [];
+  foreach ($state["invoicePayments"] as $payment) {
+    if (($payment["invoiceId"] ?? "") === $invoiceId) {
+      $payments[] = $payment;
+    }
+  }
+  json_response(200, ["data" => $payments]);
+}
+
+if ($method === "POST" && preg_match('/^invoices\\/([^\\/]+)\\/payments$/', $route, $matches) === 1) {
+  $role = (string)($authUser["role"] ?? "");
+  if (!in_array($role, ["SALES", "ADMIN"], true)) {
+    json_response(403, ["error" => "HttpError", "message" => "Forbidden"]);
+  }
+
+  $invoiceId = (string)$matches[1];
+  $body = read_json_body();
+  $amount = isset($body["amount"]) ? (int)$body["amount"] : 0;
+  $paymentMethod = isset($body["method"]) && is_string($body["method"]) ? trim($body["method"]) : "";
+  $notes = isset($body["notes"]) && is_string($body["notes"]) ? $body["notes"] : null;
+
+  if ($amount <= 0 || !in_array($paymentMethod, ["CASH", "MOBILE_MONEY", "CARD"], true)) {
+    json_response(400, ["error" => "ValidationError", "message" => "amount (>0) and method are required"]);
+  }
+
+  $result = with_state(function (&$s) use ($invoiceId, $amount, $paymentMethod, $notes) {
+    $invoiceIdx = null;
+    foreach ($s["invoices"] as $i => $inv) {
+      if (($inv["id"] ?? "") === $invoiceId) {
+        $invoiceIdx = $i;
+        break;
+      }
+    }
+    if ($invoiceIdx === null) {
+      json_response(404, ["error" => "HttpError", "message" => "Invoice not found"]);
+    }
+
+    $invoice = $s["invoices"][$invoiceIdx];
+    if (($invoice["status"] ?? "") === "VOID") {
+      json_response(400, ["error" => "BadRequest", "message" => "Cannot accept payment for a void invoice"]);
+    }
+    $balance = (int)($invoice["balance"] ?? 0);
+    if ($amount > $balance) {
+      json_response(400, ["error" => "BadRequest", "message" => "Payment exceeds invoice balance"]);
+    }
+
+    $payment = [
+      "id" => create_id("pay"),
+      "invoiceId" => $invoiceId,
+      "amount" => $amount,
+      "method" => $paymentMethod,
+      "notes" => $notes,
+      "createdAt" => now_iso(),
+    ];
+    $s["invoicePayments"][] = $payment;
+
+    $paidAmount = (int)($invoice["paidAmount"] ?? 0) + $amount;
+    $totalAmount = (int)($invoice["totalAmount"] ?? 0);
+    $newBalance = $totalAmount - $paidAmount;
+
+    $invoice["paidAmount"] = $paidAmount;
+    $invoice["balance"] = $newBalance;
+    if ($newBalance <= 0) {
+      $invoice["status"] = "PAID";
+      $invoice["balance"] = 0;
+    } elseif ($paidAmount > 0) {
+      $invoice["status"] = "PARTIALLY_PAID";
+    }
+    $invoice["updatedAt"] = now_iso();
+
+    $s["invoices"][$invoiceIdx] = $invoice;
+    return ["invoice" => $invoice, "payment" => $payment];
+  });
+
+  json_response(201, ["data" => $result]);
 }
 
 json_response(404, ["error" => "HttpError", "message" => "Route not found"]);

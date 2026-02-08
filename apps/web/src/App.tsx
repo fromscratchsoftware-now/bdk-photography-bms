@@ -1,22 +1,47 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
-  CapitalSummary,
-  Product,
-  SalesDashboard,
   type AdminDashboard,
   type AuthUser,
+  type BankAction,
+  type CapitalSummary,
+  type CashActions,
+  type CashTransfer,
+  type Customer,
+  type Expense,
+  type InventoryRow,
+  type Invoice,
+  type InvoicePayment,
+  type Product,
+  type Sale,
+  type SalesDashboard,
+  type SeedMeta,
+  addInvoicePayment,
+  createBankAction,
+  createCustomer,
+  createExpense,
+  createInvoice,
+  createProduct,
   createSale,
+  createTransfer,
+  decideBankAction,
+  decideTransfer,
   getAdminDashboard,
   getCapitalSummary,
+  getCashActions,
   getInventory,
   getMe,
   getProducts,
   getSalesDashboard,
   getSeedMeta,
+  listCustomers,
+  listInvoicePayments,
+  listInvoices,
+  listOverdueInvoices,
+  listSales,
   login,
-  signup,
-  type InventoryRow,
-  type SeedMeta
+  receiveStock,
+  setInvoiceStatus,
+  signup
 } from "./lib/api";
 
 function currency(value: number): string {
@@ -31,6 +56,8 @@ type AuthState = {
   token: string;
   user: AuthUser;
 };
+
+type View = "dashboard" | "sales" | "invoices" | "cash" | "inventory" | "admin";
 
 const AUTH_STORAGE_KEY = "bdk.auth.v1";
 
@@ -81,13 +108,22 @@ function writeStoredAuth(auth: AuthState | null): void {
 
 export default function App(): JSX.Element {
   const [shops, setShops] = useState<SeedMeta["shops"]>([]);
+  const [seedUsers, setSeedUsers] = useState<SeedMeta["users"]>([]);
   const [auth, setAuth] = useState<AuthState | null>(() => readStoredAuth());
+  const [view, setView] = useState<View>("dashboard");
 
   const [products, setProducts] = useState<Product[]>([]);
   const [inventory, setInventory] = useState<InventoryRow[]>([]);
   const [adminDashboard, setAdminDashboard] = useState<AdminDashboard | null>(null);
   const [salesDashboard, setSalesDashboard] = useState<SalesDashboard | null>(null);
   const [capitalSummary, setCapitalSummary] = useState<CapitalSummary | null>(null);
+  const [sales, setSales] = useState<Sale[]>([]);
+  const [cashActions, setCashActions] = useState<CashActions | null>(null);
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [invoices, setInvoices] = useState<Invoice[]>([]);
+  const [overdueInvoices, setOverdueInvoices] = useState<Invoice[]>([]);
+  const [selectedInvoiceId, setSelectedInvoiceId] = useState<string>("");
+  const [invoicePayments, setInvoicePayments] = useState<InvoicePayment[]>([]);
 
   const [booting, setBooting] = useState(true);
   const [loadingData, setLoadingData] = useState(false);
@@ -97,10 +133,88 @@ export default function App(): JSX.Element {
   const [loginForm, setLoginForm] = useState({ mobileNumber: "", password: "" });
   const [signupForm, setSignupForm] = useState({ fullName: "", mobileNumber: "", password: "", shopId: "" });
 
-  const [saleForm, setSaleForm] = useState({
+  const [saleDraft, setSaleDraft] = useState<{
+    paymentMethod: "CASH" | "MOBILE_MONEY" | "CARD" | "CREDIT";
+    notes: string;
+    lines: Array<{ productId: string; quantity: number; unitPrice: number }>;
+  }>({
+    paymentMethod: "CASH",
+    notes: "",
+    lines: [{ productId: "", quantity: 1, unitPrice: 0 }]
+  });
+
+  const [expenseDraft, setExpenseDraft] = useState<{
+    amount: number;
+    category: string;
+    date: string;
+    notes: string;
+    paidBy: "SALESPERSON_CASH" | "ADMIN_BANK";
+  }>({
+    amount: 0,
+    category: "",
+    date: "",
+    notes: "",
+    paidBy: "SALESPERSON_CASH"
+  });
+
+  const [transferDraft, setTransferDraft] = useState<{ receiverUserId: string; amount: number }>({
+    receiverUserId: "",
+    amount: 0
+  });
+
+  const [bankDraft, setBankDraft] = useState<{ amount: number }>({ amount: 0 });
+
+  const [receiveDraft, setReceiveDraft] = useState<{ shopId: string; productId: string; quantity: number }>({
+    shopId: "",
     productId: "",
-    quantity: 1,
-    unitPrice: 0
+    quantity: 1
+  });
+
+  const [productDraft, setProductDraft] = useState<{
+    skuCode: string;
+    name: string;
+    category: string;
+    productType: "BOARD" | "NON_BOARD";
+    unitOfMeasure: string;
+    costPrice: string;
+    sellingPrice: string;
+    active: boolean;
+  }>({
+    skuCode: "",
+    name: "",
+    category: "",
+    productType: "BOARD",
+    unitOfMeasure: "piece",
+    costPrice: "",
+    sellingPrice: "",
+    active: true
+  });
+
+  const [customerDraft, setCustomerDraft] = useState<{ mobileNumber: string; firstName: string; lastName: string; email: string }>({
+    mobileNumber: "",
+    firstName: "",
+    lastName: "",
+    email: ""
+  });
+
+  const [invoiceDraft, setInvoiceDraft] = useState<{
+    customerId: string;
+    status: "DRAFT" | "ISSUED";
+    dueDate: string;
+    notes: string;
+    lines: Array<{ productId: string; quantity: number; unitPrice: number }>;
+  }>({
+    customerId: "",
+    status: "ISSUED",
+    dueDate: "",
+    notes: "",
+    lines: [{ productId: "", quantity: 1, unitPrice: 0 }]
+  });
+
+  const [paymentDraft, setPaymentDraft] = useState<{ amount: number; method: "CASH" | "MOBILE_MONEY" | "CARD"; notes: string }>({
+    amount: 0,
+    method: "CASH",
+    notes: ""
   });
 
   const authUser = auth?.user ?? null;
@@ -121,18 +235,73 @@ export default function App(): JSX.Element {
     return map;
   }, [products]);
 
-  async function refreshDataForAuth(nextAuth: AuthState): Promise<void> {
+  const customerLookup = useMemo(() => {
+    const map = new Map<string, Customer>();
+    for (const item of customers) {
+      map.set(item.id, item);
+    }
+    return map;
+  }, [customers]);
+
+  const userLookup = useMemo(() => {
+    const map = new Map<string, SeedMeta["users"][number]>();
+    for (const item of seedUsers) {
+      map.set(item.id, item);
+    }
+    return map;
+  }, [seedUsers]);
+
+  async function refreshCoreForAuth(nextAuth: AuthState): Promise<void> {
     const userId = nextAuth.token;
 
     const [productData, inventoryData] = await Promise.all([getProducts(userId), getInventory(userId)]);
     setProducts(productData);
     setInventory(inventoryData);
 
-    if (!saleForm.productId && productData.length > 0) {
-      setSaleForm((previous) => ({
+    if (productData.length > 0) {
+      setSaleDraft((previous) => {
+        if (previous.lines.length === 0) {
+          return {
+            ...previous,
+            lines: [{ productId: productData[0].id, quantity: 1, unitPrice: productData[0].sellingPrice }]
+          };
+        }
+        const first = previous.lines[0];
+        if (first && !first.productId) {
+          const nextLines = [...previous.lines];
+          nextLines[0] = {
+            ...first,
+            productId: productData[0].id,
+            unitPrice: productData[0].sellingPrice || first.unitPrice
+          };
+          return { ...previous, lines: nextLines };
+        }
+        return previous;
+      });
+
+      setInvoiceDraft((previous) => {
+        if (previous.lines.length === 0) {
+          return {
+            ...previous,
+            lines: [{ productId: productData[0].id, quantity: 1, unitPrice: productData[0].sellingPrice }]
+          };
+        }
+        const first = previous.lines[0];
+        if (first && !first.productId) {
+          const nextLines = [...previous.lines];
+          nextLines[0] = {
+            ...first,
+            productId: productData[0].id,
+            unitPrice: productData[0].sellingPrice || first.unitPrice
+          };
+          return { ...previous, lines: nextLines };
+        }
+        return previous;
+      });
+
+      setReceiveDraft((previous) => ({
         ...previous,
-        productId: productData[0].id,
-        unitPrice: productData[0].sellingPrice
+        productId: previous.productId || productData[0].id
       }));
     }
 
@@ -157,15 +326,59 @@ export default function App(): JSX.Element {
     setCapitalSummary(null);
   }
 
+  async function refreshOperationalData(nextAuth: AuthState): Promise<void> {
+    const userId = nextAuth.token;
+
+    const tasks: Array<Promise<unknown>> = [];
+
+    // These endpoints are safe for all authenticated roles.
+    tasks.push(
+      listCustomers(userId).then((data) => setCustomers(data)).catch(() => setCustomers([]))
+    );
+    tasks.push(
+      listInvoices(userId).then((data) => setInvoices(data)).catch(() => setInvoices([]))
+    );
+    tasks.push(
+      getCashActions(userId).then((data) => setCashActions(data)).catch(() => setCashActions(null))
+    );
+
+    if (nextAuth.user.role === "ADMIN" || nextAuth.user.role === "SALES") {
+      tasks.push(
+        listSales(userId).then((data) => setSales(data)).catch(() => setSales([]))
+      );
+    } else {
+      setSales([]);
+    }
+
+    if (nextAuth.user.role === "ADMIN" || nextAuth.user.role === "MANAGER") {
+      tasks.push(
+        listOverdueInvoices(userId).then((data) => setOverdueInvoices(data)).catch(() => setOverdueInvoices([]))
+      );
+    } else {
+      setOverdueInvoices([]);
+    }
+
+    await Promise.all(tasks);
+  }
+
   function clearSession(message?: string): void {
     setAuth(null);
     writeStoredAuth(null);
+    setView("dashboard");
+    setSeedUsers([]);
     setProducts([]);
     setInventory([]);
     setAdminDashboard(null);
     setSalesDashboard(null);
     setCapitalSummary(null);
-    setSaleForm({ productId: "", quantity: 1, unitPrice: 0 });
+    setSales([]);
+    setCashActions(null);
+    setCustomers([]);
+    setInvoices([]);
+    setOverdueInvoices([]);
+    setSelectedInvoiceId("");
+    setInvoicePayments([]);
+    setSaleDraft({ paymentMethod: "CASH", notes: "", lines: [{ productId: "", quantity: 1, unitPrice: 0 }] });
     setSuccess(null);
     if (message) {
       setError(message);
@@ -185,7 +398,12 @@ export default function App(): JSX.Element {
           return;
         }
         setShops(seed.shops);
+        setSeedUsers(seed.users);
         setSignupForm((previous) => ({
+          ...previous,
+          shopId: previous.shopId || seed.shops[0]?.id || ""
+        }));
+        setReceiveDraft((previous) => ({
           ...previous,
           shopId: previous.shopId || seed.shops[0]?.id || ""
         }));
@@ -212,7 +430,8 @@ export default function App(): JSX.Element {
         setAuth(nextAuth);
         writeStoredAuth(nextAuth);
         setLoadingData(true);
-        await refreshDataForAuth(nextAuth);
+        await refreshCoreForAuth(nextAuth);
+        await refreshOperationalData(nextAuth);
       } catch {
         if (!cancelled) {
           clearSession("Session expired. Please login again.");
@@ -241,7 +460,8 @@ export default function App(): JSX.Element {
       const nextAuth: AuthState = { token: response.token, user: response.user };
       setAuth(nextAuth);
       writeStoredAuth(nextAuth);
-      await refreshDataForAuth(nextAuth);
+      await refreshCoreForAuth(nextAuth);
+      await refreshOperationalData(nextAuth);
       setSuccess("Logged in successfully.");
     } catch (caught: unknown) {
       setError(caught instanceof Error ? caught.message : "Login failed");
@@ -261,7 +481,8 @@ export default function App(): JSX.Element {
       const nextAuth: AuthState = { token: response.token, user: response.user };
       setAuth(nextAuth);
       writeStoredAuth(nextAuth);
-      await refreshDataForAuth(nextAuth);
+      await refreshCoreForAuth(nextAuth);
+      await refreshOperationalData(nextAuth);
       setSuccess("Account created successfully.");
       setSignupForm((previous) => ({ ...previous, password: "" }));
     } catch (caught: unknown) {
@@ -284,22 +505,351 @@ export default function App(): JSX.Element {
         throw new Error("Only sales users can record sales");
       }
 
+      const lines = saleDraft.lines.filter((line) => line.productId && line.quantity > 0 && line.unitPrice > 0);
+      if (lines.length < 1) {
+        throw new Error("Add at least one sale line");
+      }
+
       await createSale(auth.token, {
-        paymentMethod: "CASH",
-        lines: [
-          {
-            productId: saleForm.productId,
-            quantity: saleForm.quantity,
-            unitPrice: saleForm.unitPrice
-          }
-        ]
+        paymentMethod: saleDraft.paymentMethod,
+        notes: saleDraft.notes.trim() ? saleDraft.notes.trim() : undefined,
+        lines
       });
 
       setSuccess("Sale recorded successfully");
       setLoadingData(true);
-      await refreshDataForAuth(auth);
+      await refreshCoreForAuth(auth);
+      await refreshOperationalData(auth);
     } catch (caught: unknown) {
       setError(caught instanceof Error ? caught.message : "Failed to record sale");
+    } finally {
+      setLoadingData(false);
+    }
+  }
+
+  async function submitExpense(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    setError(null);
+    setSuccess(null);
+
+    try {
+      if (!auth || !authUser) {
+        throw new Error("Please login first");
+      }
+      const payload = {
+        amount: Number(expenseDraft.amount),
+        category: expenseDraft.category.trim(),
+        paidBy: expenseDraft.paidBy,
+        date: expenseDraft.date.trim() ? expenseDraft.date.trim() : undefined,
+        notes: expenseDraft.notes.trim() ? expenseDraft.notes.trim() : undefined
+      } as const;
+
+      await createExpense(auth.token, payload);
+      setSuccess("Expense saved.");
+      setExpenseDraft((prev) => ({ ...prev, amount: 0, category: "", notes: "" }));
+      setLoadingData(true);
+      await refreshCoreForAuth(auth);
+      await refreshOperationalData(auth);
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to save expense");
+    } finally {
+      setLoadingData(false);
+    }
+  }
+
+  async function submitTransfer(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    setError(null);
+    setSuccess(null);
+
+    try {
+      if (!auth || !authUser) {
+        throw new Error("Please login first");
+      }
+      if (authUser.role !== "SALES") {
+        throw new Error("Only sales users can transfer cash");
+      }
+      await createTransfer(auth.token, {
+        receiverUserId: transferDraft.receiverUserId,
+        amount: Number(transferDraft.amount)
+      });
+      setSuccess("Transfer created (pending approval).");
+      setTransferDraft({ receiverUserId: "", amount: 0 });
+      setLoadingData(true);
+      await refreshCoreForAuth(auth);
+      await refreshOperationalData(auth);
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to create transfer");
+    } finally {
+      setLoadingData(false);
+    }
+  }
+
+  async function submitBanking(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    setError(null);
+    setSuccess(null);
+
+    try {
+      if (!auth || !authUser) {
+        throw new Error("Please login first");
+      }
+      if (authUser.role !== "SALES") {
+        throw new Error("Only sales users can bank cash");
+      }
+      await createBankAction(auth.token, { amount: Number(bankDraft.amount) });
+      setSuccess("Banking request submitted (pending admin approval).");
+      setBankDraft({ amount: 0 });
+      setLoadingData(true);
+      await refreshCoreForAuth(auth);
+      await refreshOperationalData(auth);
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to submit banking");
+    } finally {
+      setLoadingData(false);
+    }
+  }
+
+  async function decideTransferAction(transfer: CashTransfer, status: "APPROVED" | "REJECTED"): Promise<void> {
+    setError(null);
+    setSuccess(null);
+    try {
+      if (!auth) {
+        throw new Error("Please login first");
+      }
+      await decideTransfer(auth.token, transfer.id, { status });
+      setSuccess(`Transfer ${status.toLowerCase()}.`);
+      setLoadingData(true);
+      await refreshCoreForAuth(auth);
+      await refreshOperationalData(auth);
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to decide transfer");
+    } finally {
+      setLoadingData(false);
+    }
+  }
+
+  async function decideBankingAction(action: BankAction, status: "APPROVED" | "REJECTED"): Promise<void> {
+    setError(null);
+    setSuccess(null);
+    try {
+      if (!auth) {
+        throw new Error("Please login first");
+      }
+      await decideBankAction(auth.token, action.id, { status });
+      setSuccess(`Banking ${status.toLowerCase()}.`);
+      setLoadingData(true);
+      await refreshCoreForAuth(auth);
+      await refreshOperationalData(auth);
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to decide banking");
+    } finally {
+      setLoadingData(false);
+    }
+  }
+
+  async function submitReceiveStock(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    setError(null);
+    setSuccess(null);
+
+    try {
+      if (!auth || !authUser) {
+        throw new Error("Please login first");
+      }
+      if (authUser.role !== "ADMIN") {
+        throw new Error("Only admins can receive stock");
+      }
+      await receiveStock(auth.token, {
+        shopId: receiveDraft.shopId,
+        productId: receiveDraft.productId,
+        quantity: Number(receiveDraft.quantity)
+      });
+      setSuccess("Stock received.");
+      setReceiveDraft((prev) => ({ ...prev, quantity: 1 }));
+      setLoadingData(true);
+      await refreshCoreForAuth(auth);
+      await refreshOperationalData(auth);
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to receive stock");
+    } finally {
+      setLoadingData(false);
+    }
+  }
+
+  async function submitCreateProduct(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    setError(null);
+    setSuccess(null);
+
+    try {
+      if (!auth || !authUser) {
+        throw new Error("Please login first");
+      }
+      if (authUser.role !== "ADMIN") {
+        throw new Error("Only admins can create products");
+      }
+
+      const sellingPrice = Number(productDraft.sellingPrice);
+      if (!sellingPrice || sellingPrice <= 0) {
+        throw new Error("Selling price must be > 0");
+      }
+
+      const costPrice = productDraft.costPrice.trim() ? Number(productDraft.costPrice) : undefined;
+      if (costPrice !== undefined && Number.isNaN(costPrice)) {
+        throw new Error("Cost price must be a number");
+      }
+
+      await createProduct(auth.token, {
+        skuCode: productDraft.skuCode.trim(),
+        name: productDraft.name.trim(),
+        category: productDraft.category.trim(),
+        productType: productDraft.productType,
+        unitOfMeasure: productDraft.unitOfMeasure.trim(),
+        costPrice,
+        sellingPrice,
+        active: productDraft.active
+      });
+
+      setSuccess("Product created.");
+      setProductDraft((prev) => ({ ...prev, skuCode: "", name: "", category: "", costPrice: "", sellingPrice: "" }));
+      setLoadingData(true);
+      await refreshCoreForAuth(auth);
+      await refreshOperationalData(auth);
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to create product");
+    } finally {
+      setLoadingData(false);
+    }
+  }
+
+  async function submitCreateCustomer(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    setError(null);
+    setSuccess(null);
+
+    try {
+      if (!auth) {
+        throw new Error("Please login first");
+      }
+      await createCustomer(auth.token, {
+        mobileNumber: customerDraft.mobileNumber,
+        firstName: customerDraft.firstName.trim(),
+        lastName: customerDraft.lastName.trim(),
+        email: customerDraft.email.trim() ? customerDraft.email.trim() : undefined
+      });
+      setSuccess("Customer created.");
+      setCustomerDraft({ mobileNumber: "", firstName: "", lastName: "", email: "" });
+      setLoadingData(true);
+      await refreshOperationalData(auth);
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to create customer");
+    } finally {
+      setLoadingData(false);
+    }
+  }
+
+  async function submitCreateInvoice(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    setError(null);
+    setSuccess(null);
+
+    try {
+      if (!auth || !authUser) {
+        throw new Error("Please login first");
+      }
+      if (authUser.role !== "SALES") {
+        throw new Error("Only sales users can create invoices");
+      }
+      const lines = invoiceDraft.lines.filter((line) => line.productId && line.quantity > 0 && line.unitPrice > 0);
+      if (!invoiceDraft.customerId) {
+        throw new Error("Select a customer");
+      }
+      if (lines.length < 1) {
+        throw new Error("Add at least one invoice line");
+      }
+
+      await createInvoice(auth.token, {
+        customerId: invoiceDraft.customerId,
+        status: invoiceDraft.status,
+        dueDate: invoiceDraft.dueDate.trim() ? invoiceDraft.dueDate.trim() : undefined,
+        notes: invoiceDraft.notes.trim() ? invoiceDraft.notes.trim() : undefined,
+        lines
+      });
+
+      setSuccess("Invoice created.");
+      setInvoiceDraft((prev) => ({ ...prev, notes: "", dueDate: "" }));
+      setLoadingData(true);
+      await refreshOperationalData(auth);
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to create invoice");
+    } finally {
+      setLoadingData(false);
+    }
+  }
+
+  async function selectInvoice(invoiceId: string): Promise<void> {
+    setSelectedInvoiceId(invoiceId);
+    setInvoicePayments([]);
+    setError(null);
+    setSuccess(null);
+    if (!auth || !invoiceId) {
+      return;
+    }
+    try {
+      setLoadingData(true);
+      const payments = await listInvoicePayments(auth.token, invoiceId);
+      setInvoicePayments(payments);
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to load invoice payments");
+    } finally {
+      setLoadingData(false);
+    }
+  }
+
+  async function submitInvoicePayment(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    setError(null);
+    setSuccess(null);
+
+    try {
+      if (!auth || !selectedInvoiceId) {
+        throw new Error("Select an invoice first");
+      }
+      await addInvoicePayment(auth.token, selectedInvoiceId, {
+        amount: Number(paymentDraft.amount),
+        method: paymentDraft.method,
+        notes: paymentDraft.notes.trim() ? paymentDraft.notes.trim() : undefined
+      });
+      setSuccess("Payment added.");
+      setPaymentDraft((prev) => ({ ...prev, amount: 0, notes: "" }));
+      setLoadingData(true);
+      await refreshOperationalData(auth);
+      const payments = await listInvoicePayments(auth.token, selectedInvoiceId);
+      setInvoicePayments(payments);
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to add payment");
+    } finally {
+      setLoadingData(false);
+    }
+  }
+
+  async function voidInvoice(invoiceId: string): Promise<void> {
+    setError(null);
+    setSuccess(null);
+    try {
+      if (!auth || !authUser) {
+        throw new Error("Please login first");
+      }
+      if (authUser.role !== "ADMIN") {
+        throw new Error("Only admins can void invoices");
+      }
+      await setInvoiceStatus(auth.token, invoiceId, { status: "VOID" });
+      setSuccess("Invoice updated.");
+      setLoadingData(true);
+      await refreshOperationalData(auth);
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to update invoice");
     } finally {
       setLoadingData(false);
     }
@@ -427,151 +977,1026 @@ export default function App(): JSX.Element {
             </div>
           </section>
 
-          <section className="grid">
+          <nav className="tabs" aria-label="Primary">
+            <button type="button" className={view === "dashboard" ? "tab isActive" : "tab"} onClick={() => setView("dashboard")}>
+              Dashboard
+            </button>
+            {(authUser?.role === "SALES" || authUser?.role === "ADMIN") ? (
+              <button type="button" className={view === "sales" ? "tab isActive" : "tab"} onClick={() => setView("sales")}>
+                Sales
+              </button>
+            ) : null}
+            <button type="button" className={view === "invoices" ? "tab isActive" : "tab"} onClick={() => setView("invoices")}>
+              Invoices
+            </button>
+            <button type="button" className={view === "cash" ? "tab isActive" : "tab"} onClick={() => setView("cash")}>
+              Cash
+            </button>
+            <button type="button" className={view === "inventory" ? "tab isActive" : "tab"} onClick={() => setView("inventory")}>
+              Inventory
+            </button>
             {authUser?.role === "ADMIN" ? (
-              <>
+              <button type="button" className={view === "admin" ? "tab isActive" : "tab"} onClick={() => setView("admin")}>
+                Admin
+              </button>
+            ) : null}
+          </nav>
+
+          {view === "dashboard" ? (
+            <>
+              <section className="grid">
+                {authUser?.role === "ADMIN" ? (
+                  <>
+                    <article className="card">
+                      <h2>Capital Snapshot</h2>
+                      <p className="metric">{currency(capitalSummary?.businessCapital ?? 0)}</p>
+                      <ul className="stack">
+                        <li>Total cash at hand: {currency(capitalSummary?.totalCashAtHand ?? 0)}</li>
+                        <li>Cash in bank: {currency(capitalSummary?.bankCash ?? 0)}</li>
+                        <li>Inventory value: {currency(capitalSummary?.totalInventoryValue ?? 0)}</li>
+                      </ul>
+                      {(capitalSummary?.warnings.length ?? 0) > 0 ? (
+                        <div className="note">{capitalSummary?.warnings.join(" ")}</div>
+                      ) : null}
+                    </article>
+
+                    <article className="card">
+                      <h2>Cash Dashboard</h2>
+                      <p className="metric">{currency(adminDashboard?.totalCashAtHand ?? 0)}</p>
+                      <ul className="stack">
+                        <li>Bank cash: {currency(adminDashboard?.bankCash ?? 0)}</li>
+                        <li>Pending transfers: {adminDashboard?.pendingTransfers ?? 0}</li>
+                        <li>Pending banking approvals: {adminDashboard?.pendingBankActions ?? 0}</li>
+                      </ul>
+                    </article>
+                  </>
+                ) : null}
+
+                {authUser?.role === "SALES" ? (
+                  <article className="card">
+                    <h2>My Cash</h2>
+                    <p className="metric">{currency(salesDashboard?.cashAtHand ?? 0)}</p>
+                    <ul className="stack">
+                      <li>Pending transfers: {salesDashboard?.pendingTransfers.length ?? 0}</li>
+                      <li>Pending banking: {salesDashboard?.pendingBankActions.length ?? 0}</li>
+                    </ul>
+                  </article>
+                ) : null}
+
+                {(authUser?.role === "ADMIN" || authUser?.role === "MANAGER") ? (
+                  <article className="card">
+                    <h2>Overdue Invoices</h2>
+                    <p className="metric">{overdueInvoices.length}</p>
+                    <p className="hint">Customers with outstanding balances past the due date.</p>
+                  </article>
+                ) : null}
+              </section>
+
+              <section className="card">
+                <h2>Inventory by Shop and SKU</h2>
+                <div className="tableWrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Shop</th>
+                        <th>SKU</th>
+                        <th>Stock On Hand</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {inventory.map((row) => {
+                        const shopName = shopLookup.get(row.shopId) ?? row.shopId;
+                        const sku = productLookup.get(row.productId)?.skuCode ?? row.productId;
+                        return (
+                          <tr key={`${row.shopId}-${row.productId}`}>
+                            <td>{shopName}</td>
+                            <td>{sku}</td>
+                            <td>{row.quantity}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </>
+          ) : null}
+
+          {view === "sales" ? (
+            <>
+              {authUser?.role === "SALES" ? (
+                <section className="card">
+                  <h2>Record Sale</h2>
+                  <form className="form" onSubmit={submitSale}>
+                    <label>
+                      Payment Method
+                      <select
+                        value={saleDraft.paymentMethod}
+                        onChange={(event) =>
+                          setSaleDraft((prev) => ({ ...prev, paymentMethod: event.target.value as Sale["paymentMethod"] }))
+                        }
+                        required
+                      >
+                        <option value="CASH">Cash</option>
+                        <option value="MOBILE_MONEY">Mobile Money</option>
+                        <option value="CARD">Card</option>
+                        <option value="CREDIT">Credit</option>
+                      </select>
+                    </label>
+                    <label>
+                      Notes (optional)
+                      <input value={saleDraft.notes} onChange={(event) => setSaleDraft((prev) => ({ ...prev, notes: event.target.value }))} />
+                    </label>
+                    <div className="lines">
+                      <div className="linesHead">Items</div>
+                      {saleDraft.lines.map((line, idx) => {
+                        const product = productLookup.get(line.productId);
+                        return (
+                          <div key={idx} className="lineRow">
+                            <select
+                              value={line.productId}
+                              onChange={(event) => {
+                                const selected = productLookup.get(event.target.value);
+                                setSaleDraft((prev) => {
+                                  const next = [...prev.lines];
+                                  next[idx] = {
+                                    ...next[idx],
+                                    productId: event.target.value,
+                                    unitPrice: selected?.sellingPrice ?? next[idx].unitPrice
+                                  };
+                                  return { ...prev, lines: next };
+                                });
+                              }}
+                              required
+                            >
+                              <option value="" disabled>
+                                Select product
+                              </option>
+                              {products.map((p) => (
+                                <option key={p.id} value={p.id}>
+                                  {p.skuCode} - {p.name}
+                                </option>
+                              ))}
+                            </select>
+                            <input
+                              type="number"
+                              min={1}
+                              value={line.quantity}
+                              onChange={(event) => {
+                                const qty = Number(event.target.value);
+                                setSaleDraft((prev) => {
+                                  const next = [...prev.lines];
+                                  next[idx] = { ...next[idx], quantity: qty };
+                                  return { ...prev, lines: next };
+                                });
+                              }}
+                              required
+                              aria-label="Quantity"
+                            />
+                            <input
+                              type="number"
+                              min={1}
+                              value={line.unitPrice}
+                              onChange={(event) => {
+                                const unitPrice = Number(event.target.value);
+                                setSaleDraft((prev) => {
+                                  const next = [...prev.lines];
+                                  next[idx] = { ...next[idx], unitPrice };
+                                  return { ...prev, lines: next };
+                                });
+                              }}
+                              required
+                              aria-label="Unit price"
+                            />
+                            <div className="lineTotal">{currency(line.quantity * line.unitPrice)}</div>
+                            <button
+                              type="button"
+                              data-variant="ghost"
+                              onClick={() =>
+                                setSaleDraft((prev) => ({
+                                  ...prev,
+                                  lines: prev.lines.length > 1 ? prev.lines.filter((_l, i) => i !== idx) : prev.lines
+                                }))
+                              }
+                              disabled={saleDraft.lines.length <= 1}
+                            >
+                              Remove
+                            </button>
+                            {idx === 0 && product ? <div className="lineHint">Default: {currency(product.sellingPrice)}</div> : null}
+                          </div>
+                        );
+                      })}
+                      <button
+                        type="button"
+                        data-variant="ghost"
+                        onClick={() =>
+                          setSaleDraft((prev) => ({
+                            ...prev,
+                            lines: [
+                              ...prev.lines,
+                              { productId: products[0]?.id ?? "", quantity: 1, unitPrice: products[0]?.sellingPrice ?? 0 }
+                            ]
+                          }))
+                        }
+                      >
+                        Add item
+                      </button>
+                    </div>
+                    <button type="submit" disabled={loadingData}>
+                      {loadingData ? "Saving..." : "Save Sale"}
+                    </button>
+                  </form>
+                </section>
+              ) : null}
+
+              <section className="card">
+                <h2>Sales List</h2>
+                <div className="tableWrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Date</th>
+                        <th>Shop</th>
+                        <th>By</th>
+                        <th>Method</th>
+                        <th>Subtotal</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sales.slice().reverse().slice(0, 25).map((sale) => (
+                        <tr key={sale.id}>
+                          <td>{new Date(sale.createdAt).toLocaleString()}</td>
+                          <td>{shopLookup.get(sale.shopId) ?? sale.shopId}</td>
+                          <td>{userLookup.get(sale.userId)?.fullName ?? sale.userId}</td>
+                          <td>{sale.paymentMethod}</td>
+                          <td>{currency(sale.subtotal)}</td>
+                        </tr>
+                      ))}
+                      {sales.length === 0 ? (
+                        <tr>
+                          <td colSpan={5}>No sales found.</td>
+                        </tr>
+                      ) : null}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </>
+          ) : null}
+
+          {view === "cash" ? (
+            <>
+              <section className="grid">
                 <article className="card">
-                  <h2>Capital Snapshot</h2>
-                  <p className="metric">{currency(capitalSummary?.businessCapital ?? 0)}</p>
+                  <h2>Balances</h2>
+                  {authUser?.role === "SALES" ? (
+                    <p className="metric">{currency(salesDashboard?.cashAtHand ?? 0)}</p>
+                  ) : (
+                    <p className="metric">{currency(adminDashboard?.bankCash ?? cashActions?.bankCash ?? 0)}</p>
+                  )}
                   <ul className="stack">
-                    <li>Total cash at hand: {currency(capitalSummary?.totalCashAtHand ?? 0)}</li>
-                    <li>Cash in bank: {currency(capitalSummary?.bankCash ?? 0)}</li>
-                    <li>Inventory value: {currency(capitalSummary?.totalInventoryValue ?? 0)}</li>
+                    <li>Bank cash: {currency(adminDashboard?.bankCash ?? cashActions?.bankCash ?? 0)}</li>
+                    {authUser?.role === "SALES" ? <li>My cash at hand: {currency(salesDashboard?.cashAtHand ?? 0)}</li> : null}
                   </ul>
-                  {(capitalSummary?.warnings.length ?? 0) > 0 ? (
-                    <div className="note">{capitalSummary?.warnings.join(" ")}</div>
-                  ) : null}
+                </article>
+
+                {authUser?.role === "ADMIN" ? (
+                  <article className="card">
+                    <h2>Banking Approvals</h2>
+                    <p className="metric">
+                      {(cashActions?.bankActions ?? []).filter((a) => a.status === "PENDING").length}
+                    </p>
+                    <p className="hint">Approve or reject pending banking deposits.</p>
+                  </article>
+                ) : null}
+              </section>
+
+              <section className="grid">
+                <article className="card">
+                  <h2>Record Expense</h2>
+                  <form className="form" onSubmit={submitExpense}>
+                    <label>
+                      Payment Source
+                      <select
+                        value={expenseDraft.paidBy}
+                        onChange={(event) =>
+                          setExpenseDraft((prev) => ({ ...prev, paidBy: event.target.value as Expense["paidBy"] }))
+                        }
+                        required
+                      >
+                        {authUser?.role === "SALES" ? <option value="SALESPERSON_CASH">Salesperson Cash</option> : null}
+                        {authUser?.role === "ADMIN" ? <option value="ADMIN_BANK">Admin/Bank</option> : null}
+                      </select>
+                    </label>
+                    <label>
+                      Amount (UGX)
+                      <input
+                        type="number"
+                        min={1}
+                        value={expenseDraft.amount || ""}
+                        onChange={(event) => setExpenseDraft((prev) => ({ ...prev, amount: Number(event.target.value) }))}
+                        required
+                      />
+                    </label>
+                    <label>
+                      Category
+                      <input value={expenseDraft.category} onChange={(event) => setExpenseDraft((prev) => ({ ...prev, category: event.target.value }))} required />
+                    </label>
+                    <label>
+                      Date (optional, YYYY-MM-DD)
+                      <input value={expenseDraft.date} onChange={(event) => setExpenseDraft((prev) => ({ ...prev, date: event.target.value }))} />
+                    </label>
+                    <label>
+                      Notes (optional)
+                      <input value={expenseDraft.notes} onChange={(event) => setExpenseDraft((prev) => ({ ...prev, notes: event.target.value }))} />
+                    </label>
+                    <button type="submit" disabled={loadingData}>
+                      {loadingData ? "Saving..." : "Save Expense"}
+                    </button>
+                  </form>
+                </article>
+
+                {authUser?.role === "SALES" ? (
+                  <article className="card">
+                    <h2>Transfer Cash</h2>
+                    <form className="form" onSubmit={submitTransfer}>
+                      <label>
+                        To (Sales User)
+                        <select
+                          value={transferDraft.receiverUserId}
+                          onChange={(event) => setTransferDraft((prev) => ({ ...prev, receiverUserId: event.target.value }))}
+                          required
+                        >
+                          <option value="" disabled>
+                            Select receiver
+                          </option>
+                          {seedUsers
+                            .filter((u) => u.role === "SALES" && u.id !== auth.token)
+                            .map((u) => (
+                              <option key={u.id} value={u.id}>
+                                {u.fullName} ({shopLookup.get(u.shopId ?? "") ?? u.shopId ?? "No shop"})
+                              </option>
+                            ))}
+                        </select>
+                      </label>
+                      <label>
+                        Amount (UGX)
+                        <input
+                          type="number"
+                          min={1}
+                          value={transferDraft.amount || ""}
+                          onChange={(event) => setTransferDraft((prev) => ({ ...prev, amount: Number(event.target.value) }))}
+                          required
+                        />
+                      </label>
+                      <button type="submit" disabled={loadingData}>
+                        {loadingData ? "Submitting..." : "Create Transfer"}
+                      </button>
+                    </form>
+
+                    <div className="divider" />
+
+                    <h3 className="subhead">Pending Incoming Transfers</h3>
+                    {(cashActions?.transfers ?? [])
+                      .filter((t) => t.status === "PENDING" && t.receiverUserId === auth.token)
+                      .map((t) => (
+                        <div key={t.id} className="approvalRow">
+                          <div>
+                            From: <strong>{userLookup.get(t.senderUserId)?.fullName ?? t.senderUserId}</strong>
+                            <br />
+                            Amount: <strong>{currency(t.amount)}</strong>
+                          </div>
+                          <div className="approvalActions">
+                            <button type="button" onClick={() => decideTransferAction(t, "APPROVED")} disabled={loadingData}>
+                              Approve
+                            </button>
+                            <button type="button" data-variant="ghost" onClick={() => decideTransferAction(t, "REJECTED")} disabled={loadingData}>
+                              Reject
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    {(cashActions?.transfers ?? []).filter((t) => t.status === "PENDING" && t.receiverUserId === auth.token).length === 0 ? (
+                      <p className="hint">No pending transfers for you.</p>
+                    ) : null}
+                  </article>
+                ) : null}
+
+                {authUser?.role === "SALES" ? (
+                  <article className="card">
+                    <h2>Bank Cash</h2>
+                    <form className="form" onSubmit={submitBanking}>
+                      <label>
+                        Amount (UGX)
+                        <input
+                          type="number"
+                          min={1}
+                          value={bankDraft.amount || ""}
+                          onChange={(event) => setBankDraft({ amount: Number(event.target.value) })}
+                          required
+                        />
+                      </label>
+                      <button type="submit" disabled={loadingData}>
+                        {loadingData ? "Submitting..." : "Submit for Approval"}
+                      </button>
+                    </form>
+                  </article>
+                ) : null}
+
+                {authUser?.role === "ADMIN" ? (
+                  <article className="card">
+                    <h2>Approve Banking</h2>
+                    {(cashActions?.bankActions ?? [])
+                      .filter((a) => a.status === "PENDING")
+                      .slice()
+                      .reverse()
+                      .map((a) => (
+                        <div key={a.id} className="approvalRow">
+                          <div>
+                            User: <strong>{userLookup.get(a.userId)?.fullName ?? a.userId}</strong>
+                            <br />
+                            Amount: <strong>{currency(a.amount)}</strong>
+                          </div>
+                          <div className="approvalActions">
+                            <button type="button" onClick={() => decideBankingAction(a, "APPROVED")} disabled={loadingData}>
+                              Approve
+                            </button>
+                            <button type="button" data-variant="ghost" onClick={() => decideBankingAction(a, "REJECTED")} disabled={loadingData}>
+                              Reject
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    {(cashActions?.bankActions ?? []).filter((a) => a.status === "PENDING").length === 0 ? (
+                      <p className="hint">No pending banking approvals.</p>
+                    ) : null}
+                  </article>
+                ) : null}
+              </section>
+
+              <section className="card">
+                <h2>Recent Cash Actions</h2>
+                <div className="tableWrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Type</th>
+                        <th>Info</th>
+                        <th>Status</th>
+                        <th>Amount</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(cashActions?.expenses ?? []).slice().reverse().slice(0, 10).map((e) => (
+                        <tr key={e.id}>
+                          <td>Expense</td>
+                          <td>
+                            {e.category} ({e.paidBy})
+                          </td>
+                          <td>Saved</td>
+                          <td>{currency(e.amount)}</td>
+                        </tr>
+                      ))}
+                      {(cashActions?.transfers ?? []).slice().reverse().slice(0, 10).map((t) => (
+                        <tr key={t.id}>
+                          <td>Transfer</td>
+                          <td>
+                            {userLookup.get(t.senderUserId)?.fullName ?? t.senderUserId} → {userLookup.get(t.receiverUserId)?.fullName ?? t.receiverUserId}
+                          </td>
+                          <td>{t.status}</td>
+                          <td>{currency(t.amount)}</td>
+                        </tr>
+                      ))}
+                      {(cashActions?.bankActions ?? []).slice().reverse().slice(0, 10).map((a) => (
+                        <tr key={a.id}>
+                          <td>Banking</td>
+                          <td>{userLookup.get(a.userId)?.fullName ?? a.userId}</td>
+                          <td>{a.status}</td>
+                          <td>{currency(a.amount)}</td>
+                        </tr>
+                      ))}
+                      {!cashActions ? (
+                        <tr>
+                          <td colSpan={4}>No actions yet.</td>
+                        </tr>
+                      ) : null}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </>
+          ) : null}
+
+          {view === "invoices" ? (
+            <>
+              <section className="grid">
+                <article className="card">
+                  <h2>Customers</h2>
+                  <form className="form" onSubmit={submitCreateCustomer}>
+                    <label>
+                      Mobile Number
+                      <input value={customerDraft.mobileNumber} onChange={(event) => setCustomerDraft((prev) => ({ ...prev, mobileNumber: event.target.value }))} required />
+                    </label>
+                    <label>
+                      First Name
+                      <input value={customerDraft.firstName} onChange={(event) => setCustomerDraft((prev) => ({ ...prev, firstName: event.target.value }))} required />
+                    </label>
+                    <label>
+                      Last Name
+                      <input value={customerDraft.lastName} onChange={(event) => setCustomerDraft((prev) => ({ ...prev, lastName: event.target.value }))} required />
+                    </label>
+                    <label>
+                      Email (optional)
+                      <input value={customerDraft.email} onChange={(event) => setCustomerDraft((prev) => ({ ...prev, email: event.target.value }))} />
+                    </label>
+                    <button type="submit" disabled={loadingData}>
+                      {loadingData ? "Saving..." : "Create Customer"}
+                    </button>
+                  </form>
+                </article>
+
+                {authUser?.role === "SALES" ? (
+                  <article className="card">
+                    <h2>Create Invoice</h2>
+                    <form className="form" onSubmit={submitCreateInvoice}>
+                      <label>
+                        Customer
+                        <select
+                          value={invoiceDraft.customerId}
+                          onChange={(event) => setInvoiceDraft((prev) => ({ ...prev, customerId: event.target.value }))}
+                          required
+                        >
+                          <option value="" disabled>
+                            Select customer
+                          </option>
+                          {customers.map((c) => (
+                            <option key={c.id} value={c.id}>
+                              {c.firstName} {c.lastName} ({c.mobileNumber})
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label>
+                        Status
+                        <select
+                          value={invoiceDraft.status}
+                          onChange={(event) => setInvoiceDraft((prev) => ({ ...prev, status: event.target.value as "DRAFT" | "ISSUED" }))}
+                          required
+                        >
+                          <option value="ISSUED">Issued</option>
+                          <option value="DRAFT">Draft</option>
+                        </select>
+                      </label>
+                      <label>
+                        Due Date (optional, YYYY-MM-DD)
+                        <input value={invoiceDraft.dueDate} onChange={(event) => setInvoiceDraft((prev) => ({ ...prev, dueDate: event.target.value }))} />
+                      </label>
+                      <label>
+                        Notes (optional)
+                        <input value={invoiceDraft.notes} onChange={(event) => setInvoiceDraft((prev) => ({ ...prev, notes: event.target.value }))} />
+                      </label>
+                      <div className="lines">
+                        <div className="linesHead">Lines</div>
+                        {invoiceDraft.lines.map((line, idx) => (
+                          <div key={idx} className="lineRow">
+                            <select
+                              value={line.productId}
+                              onChange={(event) => {
+                                const selected = productLookup.get(event.target.value);
+                                setInvoiceDraft((prev) => {
+                                  const next = [...prev.lines];
+                                  next[idx] = {
+                                    ...next[idx],
+                                    productId: event.target.value,
+                                    unitPrice: selected?.sellingPrice ?? next[idx].unitPrice
+                                  };
+                                  return { ...prev, lines: next };
+                                });
+                              }}
+                              required
+                            >
+                              <option value="" disabled>
+                                Select product
+                              </option>
+                              {products.map((p) => (
+                                <option key={p.id} value={p.id}>
+                                  {p.skuCode} - {p.name}
+                                </option>
+                              ))}
+                            </select>
+                            <input
+                              type="number"
+                              min={1}
+                              value={line.quantity}
+                              onChange={(event) => {
+                                const quantity = Number(event.target.value);
+                                setInvoiceDraft((prev) => {
+                                  const next = [...prev.lines];
+                                  next[idx] = { ...next[idx], quantity };
+                                  return { ...prev, lines: next };
+                                });
+                              }}
+                              required
+                              aria-label="Quantity"
+                            />
+                            <input
+                              type="number"
+                              min={1}
+                              value={line.unitPrice}
+                              onChange={(event) => {
+                                const unitPrice = Number(event.target.value);
+                                setInvoiceDraft((prev) => {
+                                  const next = [...prev.lines];
+                                  next[idx] = { ...next[idx], unitPrice };
+                                  return { ...prev, lines: next };
+                                });
+                              }}
+                              required
+                              aria-label="Unit price"
+                            />
+                            <div className="lineTotal">{currency(line.quantity * line.unitPrice)}</div>
+                            <button
+                              type="button"
+                              data-variant="ghost"
+                              onClick={() =>
+                                setInvoiceDraft((prev) => ({
+                                  ...prev,
+                                  lines: prev.lines.length > 1 ? prev.lines.filter((_l, i) => i !== idx) : prev.lines
+                                }))
+                              }
+                              disabled={invoiceDraft.lines.length <= 1}
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        ))}
+                        <button
+                          type="button"
+                          data-variant="ghost"
+                          onClick={() =>
+                            setInvoiceDraft((prev) => ({
+                              ...prev,
+                              lines: [
+                                ...prev.lines,
+                                { productId: products[0]?.id ?? "", quantity: 1, unitPrice: products[0]?.sellingPrice ?? 0 }
+                              ]
+                            }))
+                          }
+                        >
+                          Add line
+                        </button>
+                      </div>
+                      <button type="submit" disabled={loadingData}>
+                        {loadingData ? "Saving..." : "Create Invoice"}
+                      </button>
+                    </form>
+                  </article>
+                ) : null}
+              </section>
+
+              <section className="card">
+                <h2>Invoices</h2>
+                <div className="tableWrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>#</th>
+                        <th>Customer</th>
+                        <th>Status</th>
+                        <th>Balance</th>
+                        <th>Due</th>
+                        <th>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {invoices.slice().reverse().slice(0, 30).map((inv) => {
+                        const cust = customerLookup.get(inv.customerId);
+                        return (
+                          <tr key={inv.id} className={inv.id === selectedInvoiceId ? "isSelected" : ""}>
+                            <td>{inv.invoiceNumber}</td>
+                            <td>{cust ? `${cust.firstName} ${cust.lastName}` : inv.customerId}</td>
+                            <td>{inv.status}</td>
+                            <td>{currency(inv.balance)}</td>
+                            <td>{inv.dueDate ?? "-"}</td>
+                            <td>
+                              <button type="button" data-variant="ghost" onClick={() => selectInvoice(inv.id)}>
+                                View
+                              </button>
+                              {authUser?.role === "ADMIN" && inv.status !== "VOID" ? (
+                                <button type="button" data-variant="ghost" onClick={() => voidInvoice(inv.id)}>
+                                  Void
+                                </button>
+                              ) : null}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                      {invoices.length === 0 ? (
+                        <tr>
+                          <td colSpan={6}>No invoices yet.</td>
+                        </tr>
+                      ) : null}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
+              {selectedInvoiceId ? (
+                <section className="grid">
+                  <article className="card">
+                    <h2>Invoice Payments</h2>
+                    <div className="tableWrap">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>Date</th>
+                            <th>Method</th>
+                            <th>Amount</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {invoicePayments.slice().reverse().map((p) => (
+                            <tr key={p.id}>
+                              <td>{new Date(p.createdAt).toLocaleString()}</td>
+                              <td>{p.method}</td>
+                              <td>{currency(p.amount)}</td>
+                            </tr>
+                          ))}
+                          {invoicePayments.length === 0 ? (
+                            <tr>
+                              <td colSpan={3}>No payments yet.</td>
+                            </tr>
+                          ) : null}
+                        </tbody>
+                      </table>
+                    </div>
+                  </article>
+
+                  <article className="card">
+                    <h2>Add Payment</h2>
+                    <form className="form" onSubmit={submitInvoicePayment}>
+                      <label>
+                        Amount (UGX)
+                        <input
+                          type="number"
+                          min={1}
+                          value={paymentDraft.amount || ""}
+                          onChange={(event) => setPaymentDraft((prev) => ({ ...prev, amount: Number(event.target.value) }))}
+                          required
+                        />
+                      </label>
+                      <label>
+                        Method
+                        <select
+                          value={paymentDraft.method}
+                          onChange={(event) => setPaymentDraft((prev) => ({ ...prev, method: event.target.value as InvoicePayment["method"] }))}
+                          required
+                        >
+                          <option value="CASH">Cash</option>
+                          <option value="MOBILE_MONEY">Mobile Money</option>
+                          <option value="CARD">Card</option>
+                        </select>
+                      </label>
+                      <label>
+                        Notes (optional)
+                        <input value={paymentDraft.notes} onChange={(event) => setPaymentDraft((prev) => ({ ...prev, notes: event.target.value }))} />
+                      </label>
+                      <button type="submit" disabled={loadingData}>
+                        {loadingData ? "Saving..." : "Add Payment"}
+                      </button>
+                    </form>
+                  </article>
+                </section>
+              ) : null}
+
+              {(authUser?.role === "ADMIN" || authUser?.role === "MANAGER") ? (
+                <section className="card">
+                  <h2>Overdue</h2>
+                  <div className="tableWrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>#</th>
+                          <th>Customer</th>
+                          <th>Balance</th>
+                          <th>Due</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {overdueInvoices.map((inv) => {
+                          const cust = customerLookup.get(inv.customerId);
+                          return (
+                            <tr key={inv.id}>
+                              <td>{inv.invoiceNumber}</td>
+                              <td>{cust ? `${cust.firstName} ${cust.lastName}` : inv.customerId}</td>
+                              <td>{currency(inv.balance)}</td>
+                              <td>{inv.dueDate ?? "-"}</td>
+                            </tr>
+                          );
+                        })}
+                        {overdueInvoices.length === 0 ? (
+                          <tr>
+                            <td colSpan={4}>No overdue invoices.</td>
+                          </tr>
+                        ) : null}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              ) : null}
+            </>
+          ) : null}
+
+          {view === "inventory" ? (
+            <>
+              {authUser?.role === "ADMIN" ? (
+                <section className="card">
+                  <h2>Receive Stock</h2>
+                  <form className="form" onSubmit={submitReceiveStock}>
+                    <label>
+                      Shop
+                      <select
+                        value={receiveDraft.shopId}
+                        onChange={(event) => setReceiveDraft((prev) => ({ ...prev, shopId: event.target.value }))}
+                        required
+                      >
+                        <option value="" disabled>
+                          Select shop
+                        </option>
+                        {shops.map((shop) => (
+                          <option key={shop.id} value={shop.id}>
+                            {shop.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Product
+                      <select
+                        value={receiveDraft.productId}
+                        onChange={(event) => setReceiveDraft((prev) => ({ ...prev, productId: event.target.value }))}
+                        required
+                      >
+                        <option value="" disabled>
+                          Select product
+                        </option>
+                        {products.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.skuCode} - {p.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Quantity
+                      <input
+                        type="number"
+                        min={1}
+                        value={receiveDraft.quantity}
+                        onChange={(event) => setReceiveDraft((prev) => ({ ...prev, quantity: Number(event.target.value) }))}
+                        required
+                      />
+                    </label>
+                    <button type="submit" disabled={loadingData}>
+                      {loadingData ? "Saving..." : "Receive"}
+                    </button>
+                  </form>
+                </section>
+              ) : null}
+
+              <section className="card">
+                <h2>Inventory</h2>
+                <div className="tableWrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Shop</th>
+                        <th>SKU</th>
+                        <th>Stock On Hand</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {inventory.map((row) => {
+                        const shopName = shopLookup.get(row.shopId) ?? row.shopId;
+                        const sku = productLookup.get(row.productId)?.skuCode ?? row.productId;
+                        return (
+                          <tr key={`${row.shopId}-${row.productId}`}>
+                            <td>{shopName}</td>
+                            <td>{sku}</td>
+                            <td>{row.quantity}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </>
+          ) : null}
+
+          {view === "admin" && authUser?.role === "ADMIN" ? (
+            <>
+              <section className="grid">
+                <article className="card">
+                  <h2>Create Product</h2>
+                  <form className="form" onSubmit={submitCreateProduct}>
+                    <label>
+                      SKU Code
+                      <input value={productDraft.skuCode} onChange={(event) => setProductDraft((prev) => ({ ...prev, skuCode: event.target.value }))} required />
+                    </label>
+                    <label>
+                      Name
+                      <input value={productDraft.name} onChange={(event) => setProductDraft((prev) => ({ ...prev, name: event.target.value }))} required />
+                    </label>
+                    <label>
+                      Category
+                      <input value={productDraft.category} onChange={(event) => setProductDraft((prev) => ({ ...prev, category: event.target.value }))} required />
+                    </label>
+                    <label>
+                      Type
+                      <select value={productDraft.productType} onChange={(event) => setProductDraft((prev) => ({ ...prev, productType: event.target.value as "BOARD" | "NON_BOARD" }))}>
+                        <option value="BOARD">Board</option>
+                        <option value="NON_BOARD">Non-board</option>
+                      </select>
+                    </label>
+                    <label>
+                      Unit
+                      <input value={productDraft.unitOfMeasure} onChange={(event) => setProductDraft((prev) => ({ ...prev, unitOfMeasure: event.target.value }))} required />
+                    </label>
+                    <label>
+                      Cost Price (optional)
+                      <input value={productDraft.costPrice} onChange={(event) => setProductDraft((prev) => ({ ...prev, costPrice: event.target.value }))} />
+                    </label>
+                    <label>
+                      Selling Price
+                      <input value={productDraft.sellingPrice} onChange={(event) => setProductDraft((prev) => ({ ...prev, sellingPrice: event.target.value }))} required />
+                    </label>
+                    <label className="checkbox">
+                      <input type="checkbox" checked={productDraft.active} onChange={(event) => setProductDraft((prev) => ({ ...prev, active: event.target.checked }))} />
+                      Active
+                    </label>
+                    <button type="submit" disabled={loadingData}>
+                      {loadingData ? "Saving..." : "Create"}
+                    </button>
+                  </form>
                 </article>
 
                 <article className="card">
-                  <h2>Cash Dashboard</h2>
-                  <p className="metric">{currency(adminDashboard?.totalCashAtHand ?? 0)}</p>
-                  <ul className="stack">
-                    <li>Banked cash total: {currency(adminDashboard?.bankCash ?? 0)}</li>
-                    <li>Pending transfers: {adminDashboard?.pendingTransfers ?? 0}</li>
-                    <li>Pending banking approvals: {adminDashboard?.pendingBankActions ?? 0}</li>
-                  </ul>
+                  <h2>Users</h2>
+                  <div className="tableWrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Name</th>
+                          <th>Role</th>
+                          <th>Shop</th>
+                          <th>Mobile</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {seedUsers.map((u) => (
+                          <tr key={u.id}>
+                            <td>{u.fullName}</td>
+                            <td>{u.role}</td>
+                            <td>{u.shopId ? shopLookup.get(u.shopId) ?? u.shopId : "-"}</td>
+                            <td>{u.mobileNumber ?? "-"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </article>
-              </>
-            ) : null}
+              </section>
 
-            {authUser?.role === "SALES" ? (
-              <article className="card">
-                <h2>My Cash</h2>
-                <p className="metric">{currency(salesDashboard?.cashAtHand ?? 0)}</p>
-                <ul className="stack">
-                  <li>Pending transfers: {salesDashboard?.pendingTransfers.length ?? 0}</li>
-                  <li>Pending banking: {salesDashboard?.pendingBankActions.length ?? 0}</li>
-                </ul>
-              </article>
-            ) : null}
-          </section>
-
-          {authUser?.role === "SALES" ? (
-            <section className="card">
-              <h2>Record Cash Sale</h2>
-              <form className="form form--three" onSubmit={submitSale}>
-                <label>
-                  Product
-                  <select
-                    value={saleForm.productId}
-                    onChange={(event) => {
-                      const selected = productLookup.get(event.target.value);
-                      setSaleForm((previous) => ({
-                        ...previous,
-                        productId: event.target.value,
-                        unitPrice: selected?.sellingPrice ?? previous.unitPrice
-                      }));
-                    }}
-                    required
-                  >
-                    {products.map((product) => (
-                      <option key={product.id} value={product.id}>
-                        {product.skuCode} - {product.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Quantity
-                  <input
-                    type="number"
-                    min={1}
-                    value={saleForm.quantity}
-                    onChange={(event) => setSaleForm((previous) => ({ ...previous, quantity: Number(event.target.value) }))}
-                    required
-                  />
-                </label>
-                <label>
-                  Unit Price (UGX)
-                  <input
-                    type="number"
-                    min={1}
-                    value={saleForm.unitPrice}
-                    onChange={(event) => setSaleForm((previous) => ({ ...previous, unitPrice: Number(event.target.value) }))}
-                    required
-                  />
-                </label>
-                <button type="submit" disabled={loadingData}>
-                  {loadingData ? "Saving..." : "Save Sale"}
-                </button>
-              </form>
-            </section>
-          ) : null}
-
-          {authUser?.role === "ADMIN" ? (
-            <section className="card">
-              <h2>Sales User Cash at Hand</h2>
-              <div className="tableWrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>User</th>
-                      <th>Role</th>
-                      <th>Cash at Hand</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(adminDashboard?.users ?? []).map((row) => (
-                      <tr key={row.userId}>
-                        <td>{row.fullName}</td>
-                        <td>{row.role}</td>
-                        <td>{currency(row.cashAtHand)}</td>
+              <section className="card">
+                <h2>Products</h2>
+                <div className="tableWrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>SKU</th>
+                        <th>Name</th>
+                        <th>Type</th>
+                        <th>Price</th>
+                        <th>Active</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </section>
+                    </thead>
+                    <tbody>
+                      {products.map((p) => (
+                        <tr key={p.id}>
+                          <td>{p.skuCode}</td>
+                          <td>{p.name}</td>
+                          <td>{p.productType}</td>
+                          <td>{currency(p.sellingPrice)}</td>
+                          <td>{String(p.active ?? true)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </>
           ) : null}
-
-          <section className="card">
-            <h2>Inventory by Shop and SKU</h2>
-            <div className="tableWrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Shop</th>
-                    <th>SKU</th>
-                    <th>Stock On Hand</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {inventory.map((row) => {
-                    const shopName = shopLookup.get(row.shopId) ?? row.shopId;
-                    const sku = productLookup.get(row.productId)?.skuCode ?? row.productId;
-                    return (
-                      <tr key={`${row.shopId}-${row.productId}`}>
-                        <td>{shopName}</td>
-                        <td>{sku}</td>
-                        <td>{row.quantity}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </section>
         </>
       )}
     </main>

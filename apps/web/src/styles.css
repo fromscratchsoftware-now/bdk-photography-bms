@@ -354,6 +354,142 @@ th {
   color: var(--muted);
 }
 
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  align-items: center;
+  padding: 0.35rem 0.25rem;
+}
+
+.tab {
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 999px;
+  padding: 0.55rem 0.85rem;
+  background: rgba(255, 255, 255, 0.72);
+  color: rgba(15, 23, 42, 0.92);
+  font-weight: 650;
+  box-shadow: none;
+}
+
+.tab:hover {
+  transform: translateY(-1px);
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 12px 26px rgba(15, 23, 42, 0.1);
+}
+
+.tab.isActive {
+  background: linear-gradient(135deg, rgba(11, 61, 50, 0.18), rgba(31, 122, 90, 0.12));
+  border-color: rgba(31, 122, 90, 0.34);
+}
+
+.hint {
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.divider {
+  height: 1px;
+  background: rgba(15, 23, 42, 0.1);
+  margin: 0.9rem 0;
+}
+
+.subhead {
+  margin: 0.2rem 0 0.65rem;
+  font-family: var(--font-display);
+  font-weight: 620;
+  letter-spacing: -0.01em;
+}
+
+.lines {
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.6);
+  padding: 0.85rem;
+  display: grid;
+  gap: 0.7rem;
+}
+
+.linesHead {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+}
+
+.lineRow {
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.75rem;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.lineRow select,
+.lineRow input {
+  width: 100%;
+}
+
+.lineTotal {
+  font-family: var(--font-display);
+  font-weight: 620;
+}
+
+.lineHint {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.approvalRow {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.85rem;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  background: rgba(255, 255, 255, 0.7);
+  margin-top: 0.75rem;
+}
+
+.approvalActions {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.checkbox {
+  display: flex !important;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.checkbox input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+}
+
+tr.isSelected td {
+  background: rgba(31, 122, 90, 0.08);
+}
+
+@media (min-width: 840px) {
+  .lineRow {
+    grid-template-columns: 1.8fr 0.6fr 0.8fr 0.8fr auto;
+    align-items: center;
+  }
+
+  .lineTotal {
+    text-align: right;
+  }
+
+  .approvalRow {
+    grid-template-columns: 1fr auto;
+    align-items: center;
+  }
+}
+
 @media (min-width: 840px) {
   .page {
     padding: 1.5rem;
