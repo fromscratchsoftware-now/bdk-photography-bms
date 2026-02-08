@@ -27,6 +27,19 @@ export interface SeedMeta {
   users: Array<{ id: string; fullName: string; role: string; shopId?: string }>;
 }
 
+export interface AuthUser {
+  id: string;
+  fullName: string;
+  role: "ADMIN" | "MANAGER" | "SALES";
+  shopId?: string;
+  mobileNumber?: string;
+}
+
+export interface AuthResponse {
+  token: string;
+  user: AuthUser;
+}
+
 export interface Product {
   id: string;
   skuCode: string;
@@ -59,6 +72,29 @@ export interface CapitalSummary {
 
 export function getSeedMeta(): Promise<SeedMeta> {
   return request<SeedMeta>("api/meta/seed");
+}
+
+export function signup(payload: {
+  fullName: string;
+  mobileNumber: string;
+  password: string;
+  shopId: string;
+}): Promise<AuthResponse> {
+  return request<AuthResponse>("api/auth/signup", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function login(payload: { mobileNumber: string; password: string }): Promise<AuthResponse> {
+  return request<AuthResponse>("api/auth/login", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function getMe(userId: string): Promise<AuthUser> {
+  return request<AuthUser>("api/auth/me", undefined, userId);
 }
 
 export function getProducts(userId: string): Promise<Product[]> {

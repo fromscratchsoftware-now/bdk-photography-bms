@@ -12,6 +12,13 @@ function json_response(int $status, $payload): void {
   exit;
 }
 
+function normalize_mobile_number(string $mobile): string {
+  $trimmed = trim($mobile);
+  // Keep digits only; simplifies matching and avoids format drift.
+  $digits = preg_replace('/\\D+/', '', $trimmed);
+  return is_string($digits) ? $digits : "";
+}
+
 function read_json_body(): array {
   $raw = file_get_contents("php://input");
   if ($raw === false || $raw === "") {
@@ -33,16 +40,43 @@ function get_header_value(string $name): ?string {
 }
 
 function seed_state(): array {
+  $defaultPassword = "bdk1234";
   return [
     "shops" => [
       ["id" => "shop-kampala-main", "name" => "Kampala Main", "code" => "KLA"],
       ["id" => "shop-wandegeya", "name" => "Wandegeya", "code" => "WDG"],
     ],
     "users" => [
-      ["id" => "user-admin-1", "fullName" => "System Admin", "role" => "ADMIN"],
-      ["id" => "user-manager-1", "fullName" => "Shop Manager", "role" => "MANAGER"],
-      ["id" => "user-sales-1", "fullName" => "Sales One", "role" => "SALES", "shopId" => "shop-kampala-main"],
-      ["id" => "user-sales-2", "fullName" => "Sales Two", "role" => "SALES", "shopId" => "shop-wandegeya"],
+      [
+        "id" => "user-admin-1",
+        "fullName" => "System Admin",
+        "role" => "ADMIN",
+        "mobileNumber" => normalize_mobile_number("0700000000"),
+        "passwordHash" => password_hash($defaultPassword, PASSWORD_DEFAULT),
+      ],
+      [
+        "id" => "user-manager-1",
+        "fullName" => "Shop Manager",
+        "role" => "MANAGER",
+        "mobileNumber" => normalize_mobile_number("0700000001"),
+        "passwordHash" => password_hash($defaultPassword, PASSWORD_DEFAULT),
+      ],
+      [
+        "id" => "user-sales-1",
+        "fullName" => "Sales One",
+        "role" => "SALES",
+        "shopId" => "shop-kampala-main",
+        "mobileNumber" => normalize_mobile_number("0700000002"),
+        "passwordHash" => password_hash($defaultPassword, PASSWORD_DEFAULT),
+      ],
+      [
+        "id" => "user-sales-2",
+        "fullName" => "Sales Two",
+        "role" => "SALES",
+        "shopId" => "shop-wandegeya",
+        "mobileNumber" => normalize_mobile_number("0700000003"),
+        "passwordHash" => password_hash($defaultPassword, PASSWORD_DEFAULT),
+      ],
     ],
     "products" => [
       [
@@ -103,6 +137,13 @@ function state_path(): string {
   return $dataDir . "/state.json";
 }
 
+function public_user(array $user): array {
+  // Never expose credential material.
+  $copy = $user;
+  unset($copy["passwordHash"]);
+  return $copy;
+}
+
 function load_state(): array {
   $path = state_path();
   if (!file_exists($path)) {
@@ -116,6 +157,68 @@ function load_state(): array {
     return seed_state();
   }
   return $decoded;
+}
+
+function ensure_state_migrations(array &$state): void {
+  // Add missing top-level keys for forward compatibility.
+  if (!isset($state["shops"]) || !is_array($state["shops"])) {
+    $state["shops"] = [];
+  }
+  if (!isset($state["users"]) || !is_array($state["users"])) {
+    $state["users"] = [];
+  }
+  if (!isset($state["products"]) || !is_array($state["products"])) {
+    $state["products"] = [];
+  }
+  if (!isset($state["inventoryRows"]) || !is_array($state["inventoryRows"])) {
+    $state["inventoryRows"] = [];
+  }
+  if (!isset($state["sales"]) || !is_array($state["sales"])) {
+    $state["sales"] = [];
+  }
+  if (!isset($state["expenses"]) || !is_array($state["expenses"])) {
+    $state["expenses"] = [];
+  }
+  if (!isset($state["transfers"]) || !is_array($state["transfers"])) {
+    $state["transfers"] = [];
+  }
+  if (!isset($state["bankActions"]) || !is_array($state["bankActions"])) {
+    $state["bankActions"] = [];
+  }
+  if (!isset($state["bankCash"]) || !is_int($state["bankCash"])) {
+    $state["bankCash"] = (int)($state["bankCash"] ?? 0);
+  }
+
+  // Existing deployments predate auth; assign default credentials to legacy users
+  // so login works without requiring manual migrations.
+  $defaultPassword = "bdk1234";
+  foreach ($state["users"] as $idx => $user) {
+    if (!is_array($user)) {
+      continue;
+    }
+    $id = isset($user["id"]) && is_string($user["id"]) ? $user["id"] : "";
+
+    if (!isset($user["mobileNumber"]) || !is_string($user["mobileNumber"]) || $user["mobileNumber"] === "") {
+      // Known seed IDs.
+      if ($id === "user-admin-1") {
+        $user["mobileNumber"] = normalize_mobile_number("0700000000");
+      } elseif ($id === "user-manager-1") {
+        $user["mobileNumber"] = normalize_mobile_number("0700000001");
+      } elseif ($id === "user-sales-1") {
+        $user["mobileNumber"] = normalize_mobile_number("0700000002");
+      } elseif ($id === "user-sales-2") {
+        $user["mobileNumber"] = normalize_mobile_number("0700000003");
+      }
+    } else {
+      $user["mobileNumber"] = normalize_mobile_number($user["mobileNumber"]);
+    }
+
+    if (!isset($user["passwordHash"]) || !is_string($user["passwordHash"]) || $user["passwordHash"] === "") {
+      $user["passwordHash"] = password_hash($defaultPassword, PASSWORD_DEFAULT);
+    }
+
+    $state["users"][$idx] = $user;
+  }
 }
 
 function with_state(callable $mutator) {
@@ -136,6 +239,8 @@ function with_state(callable $mutator) {
     $state = seed_state();
   }
 
+  ensure_state_migrations($state);
+
   $result = $mutator($state);
 
   ftruncate($fp, 0);
@@ -151,6 +256,15 @@ function with_state(callable $mutator) {
 function find_user(array $state, string $userId): ?array {
   foreach ($state["users"] as $user) {
     if (($user["id"] ?? "") === $userId) {
+      return $user;
+    }
+  }
+  return null;
+}
+
+function find_user_by_mobile(array $state, string $mobileNumber): ?array {
+  foreach ($state["users"] as $user) {
+    if (($user["mobileNumber"] ?? "") === $mobileNumber) {
       return $user;
     }
   }
@@ -247,11 +361,99 @@ if ($method === "GET" && $route === "health") {
 
 if ($method === "GET" && $route === "meta/seed") {
   $state = load_state();
-  json_response(200, ["data" => ["shops" => $state["shops"], "users" => $state["users"]]]);
+  $users = [];
+  foreach ($state["users"] as $user) {
+    if (is_array($user)) {
+      $users[] = public_user($user);
+    }
+  }
+  json_response(200, ["data" => ["shops" => $state["shops"], "users" => $users]]);
+}
+
+if ($method === "POST" && $route === "auth/signup") {
+  $body = read_json_body();
+
+  $fullName = isset($body["fullName"]) && is_string($body["fullName"]) ? trim($body["fullName"]) : "";
+  $mobileNumber = isset($body["mobileNumber"]) && is_string($body["mobileNumber"]) ? normalize_mobile_number($body["mobileNumber"]) : "";
+  $password = isset($body["password"]) && is_string($body["password"]) ? $body["password"] : "";
+  $shopId = isset($body["shopId"]) && is_string($body["shopId"]) ? trim($body["shopId"]) : "";
+
+  if ($fullName === "" || $mobileNumber === "" || $password === "" || $shopId === "") {
+    json_response(400, ["error" => "ValidationError", "message" => "fullName, mobileNumber, password, and shopId are required"]);
+  }
+  if (strlen($password) < 6) {
+    json_response(400, ["error" => "ValidationError", "message" => "Password must be at least 6 characters"]);
+  }
+
+  $result = with_state(function (&$s) use ($fullName, $mobileNumber, $password, $shopId) {
+    // Validate shop exists.
+    $shopExists = false;
+    foreach ($s["shops"] as $shop) {
+      if (($shop["id"] ?? "") === $shopId) {
+        $shopExists = true;
+        break;
+      }
+    }
+    if (!$shopExists) {
+      json_response(400, ["error" => "ValidationError", "message" => "Invalid shopId"]);
+    }
+
+    // Enforce unique mobile number.
+    foreach ($s["users"] as $existing) {
+      if (($existing["mobileNumber"] ?? "") === $mobileNumber) {
+        json_response(409, ["error" => "Conflict", "message" => "Mobile number is already registered"]);
+      }
+    }
+
+    $user = [
+      "id" => create_id("user"),
+      "fullName" => $fullName,
+      "role" => "SALES",
+      "shopId" => $shopId,
+      "mobileNumber" => $mobileNumber,
+      "passwordHash" => password_hash($password, PASSWORD_DEFAULT),
+      "createdAt" => now_iso(),
+    ];
+
+    $s["users"][] = $user;
+    return ["token" => $user["id"], "user" => public_user($user)];
+  });
+
+  json_response(201, ["data" => $result]);
+}
+
+if ($method === "POST" && $route === "auth/login") {
+  $body = read_json_body();
+  $mobileNumber = isset($body["mobileNumber"]) && is_string($body["mobileNumber"]) ? normalize_mobile_number($body["mobileNumber"]) : "";
+  $password = isset($body["password"]) && is_string($body["password"]) ? $body["password"] : "";
+
+  if ($mobileNumber === "" || $password === "") {
+    json_response(400, ["error" => "ValidationError", "message" => "mobileNumber and password are required"]);
+  }
+
+  $result = with_state(function (&$s) use ($mobileNumber, $password) {
+    $user = find_user_by_mobile($s, $mobileNumber);
+    if (!$user) {
+      json_response(401, ["error" => "HttpError", "message" => "Invalid credentials"]);
+    }
+
+    $hash = $user["passwordHash"] ?? "";
+    if (!is_string($hash) || $hash === "" || !password_verify($password, $hash)) {
+      json_response(401, ["error" => "HttpError", "message" => "Invalid credentials"]);
+    }
+
+    return ["token" => $user["id"], "user" => public_user($user)];
+  });
+
+  json_response(200, ["data" => $result]);
 }
 
 $state = load_state();
 $authUser = require_auth($state);
+
+if ($method === "GET" && $route === "auth/me") {
+  json_response(200, ["data" => public_user($authUser)]);
+}
 
 if ($method === "GET" && $route === "products") {
   json_response(200, ["data" => $state["products"]]);
@@ -500,4 +702,3 @@ if ($method === "GET" && $route === "cash/capital/summary") {
 }
 
 json_response(404, ["error" => "HttpError", "message" => "Route not found"]);
-
