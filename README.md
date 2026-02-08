@@ -37,6 +37,15 @@ bdk-photography-bms/
 
 Prerequisite: `Node.js 20+` and `npm 10+`.
 
+### Demo Logins (Seeded)
+
+All seeded accounts share the same password: `bdk1234`.
+
+- Admin: `0700000000`
+- Manager: `0700000001`
+- Sales One: `0700000002`
+- Sales Two: `0700000003`
+
 ### 1) Install dependencies
 
 ```bash
@@ -67,7 +76,11 @@ npm run dev
 
 ## Core API Endpoints
 
-- Auth: all `/api/*` endpoints require an `x-user-id` header, except `GET /api/meta/seed` and `GET /api/health`.
+- Auth:
+  - `POST /api/auth/signup` (creates a `SALES` user, returns `{ token, user }`)
+  - `POST /api/auth/login` (returns `{ token, user }`)
+  - `GET /api/auth/me` (requires `x-user-id`)
+  - Most other `/api/*` endpoints require an `x-user-id` header, except `GET /api/meta/seed` and `GET /api/health`.
 
 - `GET /api/meta/seed`
 - `GET /api/health`
