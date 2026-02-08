@@ -1,0 +1,16 @@
+Options -Indexes
+
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+
+  # Block access to source / repo internals.
+  RewriteRule ^\\. - [F,L]
+  RewriteRule ^(apps|packages|docs|node_modules|data)/ - [F,L]
+  RewriteRule ^(package\\.json|package-lock\\.json|tsconfig\\.base\\.json|README\\.md)$ - [F,L]
+
+  # SPA fallback (ignore the API, even when deployed under a subdirectory like /test).
+  RewriteCond %{REQUEST_URI} !/api/ [NC]
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{REQUEST_FILENAME} !-d
+  RewriteRule ^ index.html [L]
+</IfModule>

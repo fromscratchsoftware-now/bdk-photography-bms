@@ -1,7 +1,13 @@
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:4000";
+const rawApiBase = import.meta.env.VITE_API_BASE_URL ?? import.meta.env.BASE_URL;
+const API_BASE = rawApiBase.endsWith("/") ? rawApiBase : `${rawApiBase}/`;
+
+function buildUrl(path: string): string {
+  const normalized = path.replace(/^\//, "");
+  return `${API_BASE}${normalized}`;
+}
 
 async function request<T>(path: string, init?: RequestInit, userId?: string): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
+  const response = await fetch(buildUrl(path), {
     headers: {
       "Content-Type": "application/json",
       ...(userId ? { "x-user-id": userId } : {})
@@ -52,23 +58,23 @@ export interface CapitalSummary {
 }
 
 export function getSeedMeta(): Promise<SeedMeta> {
-  return request<SeedMeta>("/api/meta/seed");
+  return request<SeedMeta>("api/meta/seed");
 }
 
 export function getProducts(userId: string): Promise<Product[]> {
-  return request<Product[]>("/api/products", undefined, userId);
+  return request<Product[]>("api/products", undefined, userId);
 }
 
 export function getInventory(userId: string): Promise<InventoryRow[]> {
-  return request<InventoryRow[]>("/api/products/inventory", undefined, userId);
+  return request<InventoryRow[]>("api/products/inventory", undefined, userId);
 }
 
 export function getAdminDashboard(userId: string): Promise<AdminDashboard> {
-  return request<AdminDashboard>("/api/cash/dashboard/admin", undefined, userId);
+  return request<AdminDashboard>("api/cash/dashboard/admin", undefined, userId);
 }
 
 export function getCapitalSummary(userId: string): Promise<CapitalSummary> {
-  return request<CapitalSummary>("/api/cash/capital/summary", undefined, userId);
+  return request<CapitalSummary>("api/cash/capital/summary", undefined, userId);
 }
 
 export interface SalesDashboard {
@@ -92,7 +98,7 @@ export interface SalesDashboard {
 }
 
 export function getSalesDashboard(userId: string): Promise<SalesDashboard> {
-  return request<SalesDashboard>(`/api/cash/dashboard/sales/${userId}`, undefined, userId);
+  return request<SalesDashboard>(`api/cash/dashboard/sales/${userId}`, undefined, userId);
 }
 
 export function createSale(
@@ -103,7 +109,7 @@ export function createSale(
   notes?: string;
   }
 ): Promise<void> {
-  return request<void>("/api/sales", {
+  return request<void>("api/sales", {
     method: "POST",
     body: JSON.stringify(payload)
   }, userId);
