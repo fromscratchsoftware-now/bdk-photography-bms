@@ -21,6 +21,7 @@ import {
   createExpense,
   createInvoice,
   createProduct,
+  createUser,
   createSale,
   createTransfer,
   decideBankAction,
@@ -40,8 +41,7 @@ import {
   listSales,
   login,
   receiveStock,
-  setInvoiceStatus,
-  signup
+  setInvoiceStatus
 } from "./lib/api";
 
 function currency(value: number): string {
@@ -131,7 +131,19 @@ export default function App(): JSX.Element {
   const [success, setSuccess] = useState<string | null>(null);
 
   const [loginForm, setLoginForm] = useState({ mobileNumber: "", password: "" });
-  const [signupForm, setSignupForm] = useState({ fullName: "", mobileNumber: "", password: "", shopId: "" });
+  const [newUserDraft, setNewUserDraft] = useState<{
+    fullName: string;
+    role: "ADMIN" | "MANAGER" | "SALES";
+    shopId: string;
+    mobileNumber: string;
+    password: string;
+  }>({
+    fullName: "",
+    role: "SALES",
+    shopId: "",
+    mobileNumber: "",
+    password: ""
+  });
 
   const [saleDraft, setSaleDraft] = useState<{
     paymentMethod: "CASH" | "MOBILE_MONEY" | "CARD" | "CREDIT";
@@ -354,13 +366,13 @@ export default function App(): JSX.Element {
 
     const tasks: Array<Promise<unknown>> = [];
 
-    // Keep shops/users fresh (signups can add users).
+    // Keep shops/users fresh (used for shop lookups and transfer targets).
     tasks.push(
-      getSeedMeta()
+      getSeedMeta(userId)
         .then((seed) => {
           setShops(seed.shops);
           setSeedUsers(seed.users);
-          setSignupForm((previous) => ({
+          setNewUserDraft((previous) => ({
             ...previous,
             shopId: previous.shopId || seed.shops[0]?.id || ""
           }));
@@ -406,6 +418,7 @@ export default function App(): JSX.Element {
     setAuth(null);
     writeStoredAuth(null);
     setView("dashboard");
+    setShops([]);
     setSeedUsers([]);
     setProducts([]);
     setInventory([]);
@@ -420,6 +433,8 @@ export default function App(): JSX.Element {
     setSelectedInvoiceId("");
     setInvoicePayments([]);
     setSaleDraft({ paymentMethod: "CASH", notes: "", lines: [{ productId: "", quantity: 1, unitPrice: 0 }] });
+    setNewUserDraft({ fullName: "", role: "SALES", shopId: "", mobileNumber: "", password: "" });
+    setReceiveDraft({ shopId: "", productId: "", quantity: 1 });
     setSuccess(null);
     if (message) {
       setError(message);
@@ -432,27 +447,6 @@ export default function App(): JSX.Element {
     (async () => {
       setBooting(true);
       setError(null);
-
-      try {
-        const seed = await getSeedMeta();
-        if (cancelled) {
-          return;
-        }
-        setShops(seed.shops);
-        setSeedUsers(seed.users);
-        setSignupForm((previous) => ({
-          ...previous,
-          shopId: previous.shopId || seed.shops[0]?.id || ""
-        }));
-        setReceiveDraft((previous) => ({
-          ...previous,
-          shopId: previous.shopId || seed.shops[0]?.id || ""
-        }));
-      } catch (caught: unknown) {
-        if (!cancelled) {
-          setError(caught instanceof Error ? caught.message : "Failed to load shops");
-        }
-      }
 
       const stored = readStoredAuth();
       if (!stored) {
@@ -511,23 +505,58 @@ export default function App(): JSX.Element {
     }
   }
 
-  async function submitSignup(event: FormEvent<HTMLFormElement>): Promise<void> {
+  async function submitCreateUser(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     setError(null);
     setSuccess(null);
     setLoadingData(true);
 
     try {
-      const response = await signup(signupForm);
-      const nextAuth: AuthState = { token: response.token, user: response.user };
-      setAuth(nextAuth);
-      writeStoredAuth(nextAuth);
-      await refreshCoreForAuth(nextAuth);
-      await refreshOperationalData(nextAuth);
-      setSuccess("Account created successfully.");
-      setSignupForm((previous) => ({ ...previous, password: "" }));
+      if (!auth || !authUser) {
+        throw new Error("Please login first");
+      }
+      if (authUser.role !== "ADMIN") {
+        throw new Error("Only admins can create users");
+      }
+
+      const payload = {
+        fullName: newUserDraft.fullName.trim(),
+        role: newUserDraft.role,
+        mobileNumber: newUserDraft.mobileNumber.trim(),
+        password: newUserDraft.password
+      } as {
+        fullName: string;
+        role: "ADMIN" | "MANAGER" | "SALES";
+        shopId?: string;
+        mobileNumber: string;
+        password: string;
+      };
+
+      if (!payload.fullName || !payload.mobileNumber || !payload.password) {
+        throw new Error("Full name, mobile number, and password are required");
+      }
+      if (payload.password.length < 6) {
+        throw new Error("Password must be at least 6 characters");
+      }
+
+      if (payload.role === "SALES") {
+        if (!newUserDraft.shopId) {
+          throw new Error("Select a shop for the sales user");
+        }
+        payload.shopId = newUserDraft.shopId;
+      }
+
+      const created = await createUser(auth.token, payload);
+      setSuccess(`User created: ${created.fullName}`);
+      setNewUserDraft((previous) => ({
+        ...previous,
+        fullName: "",
+        mobileNumber: "",
+        password: ""
+      }));
+      await refreshOperationalData(auth);
     } catch (caught: unknown) {
-      setError(caught instanceof Error ? caught.message : "Signup failed");
+      setError(caught instanceof Error ? caught.message : "Failed to create user");
     } finally {
       setLoadingData(false);
     }
@@ -944,60 +973,7 @@ export default function App(): JSX.Element {
                 {loadingData ? "Signing in..." : "Sign In"}
               </button>
             </form>
-          </article>
-
-          <article className="card">
-            <h2>Sign Up (Sales)</h2>
-            <form className="form" onSubmit={submitSignup}>
-              <label>
-                Full Name
-                <input
-                  value={signupForm.fullName}
-                  onChange={(event) => setSignupForm((prev) => ({ ...prev, fullName: event.target.value }))}
-                  autoComplete="name"
-                  required
-                />
-              </label>
-              <label>
-                Mobile Number
-                <input
-                  value={signupForm.mobileNumber}
-                  onChange={(event) => setSignupForm((prev) => ({ ...prev, mobileNumber: event.target.value }))}
-                  autoComplete="tel"
-                  required
-                />
-              </label>
-              <label>
-                Password
-                <input
-                  type="password"
-                  value={signupForm.password}
-                  onChange={(event) => setSignupForm((prev) => ({ ...prev, password: event.target.value }))}
-                  autoComplete="new-password"
-                  required
-                />
-              </label>
-              <label>
-                Shop
-                <select
-                  value={signupForm.shopId}
-                  onChange={(event) => setSignupForm((prev) => ({ ...prev, shopId: event.target.value }))}
-                  required
-                >
-                  <option value="" disabled>
-                    Select a shop
-                  </option>
-                  {shops.map((shop) => (
-                    <option key={shop.id} value={shop.id}>
-                      {shop.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <button type="submit" disabled={loadingData}>
-                {loadingData ? "Creating..." : "Create Account"}
-              </button>
-            </form>
+            <p className="hint">New users are created by an Admin after logging in.</p>
           </article>
         </section>
       ) : (
@@ -1996,6 +1972,67 @@ export default function App(): JSX.Element {
           {view === "admin" && authUser?.role === "ADMIN" ? (
             <>
               <section className="grid">
+                <article className="card">
+                  <h2>Create User</h2>
+                  <form className="form" onSubmit={submitCreateUser}>
+                    <label>
+                      Full Name
+                      <input value={newUserDraft.fullName} onChange={(event) => setNewUserDraft((prev) => ({ ...prev, fullName: event.target.value }))} autoComplete="name" required />
+                    </label>
+                    <label>
+                      Role
+                      <select
+                        value={newUserDraft.role}
+                        onChange={(event) =>
+                          setNewUserDraft((prev) => {
+                            const role = event.target.value as "ADMIN" | "MANAGER" | "SALES";
+                            return {
+                              ...prev,
+                              role,
+                              shopId: role === "SALES" ? prev.shopId || shops[0]?.id || "" : ""
+                            };
+                          })
+                        }
+                      >
+                        <option value="SALES">Sales</option>
+                        <option value="MANAGER">Manager</option>
+                        <option value="ADMIN">Admin</option>
+                      </select>
+                    </label>
+                    <label>
+                      Mobile Number
+                      <input value={newUserDraft.mobileNumber} onChange={(event) => setNewUserDraft((prev) => ({ ...prev, mobileNumber: event.target.value }))} autoComplete="tel" required />
+                    </label>
+                    <label>
+                      Password
+                      <input type="password" value={newUserDraft.password} onChange={(event) => setNewUserDraft((prev) => ({ ...prev, password: event.target.value }))} autoComplete="new-password" required />
+                    </label>
+                    {newUserDraft.role === "SALES" ? (
+                      <label>
+                        Shop
+                        <select
+                          value={newUserDraft.shopId}
+                          onChange={(event) => setNewUserDraft((prev) => ({ ...prev, shopId: event.target.value }))}
+                          required
+                        >
+                          <option value="" disabled>
+                            Select a shop
+                          </option>
+                          {shops.map((shop) => (
+                            <option key={shop.id} value={shop.id}>
+                              {shop.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+                    <button type="submit" disabled={loadingData}>
+                      {loadingData ? "Creating..." : "Create User"}
+                    </button>
+                  </form>
+                  <p className="hint">The user can log in immediately with the mobile number + password.</p>
+                </article>
+
                 <article className="card">
                   <h2>Create Product</h2>
                   <form className="form" onSubmit={submitCreateProduct}>

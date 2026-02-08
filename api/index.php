@@ -412,69 +412,6 @@ if ($method === "GET" && $route === "health") {
   json_response(200, ["status" => "ok", "service" => "bdk-api", "timestamp" => now_iso()]);
 }
 
-if ($method === "GET" && $route === "meta/seed") {
-  $state = load_state();
-  $users = [];
-  foreach ($state["users"] as $user) {
-    if (is_array($user)) {
-      $users[] = public_user($user);
-    }
-  }
-  json_response(200, ["data" => ["shops" => $state["shops"], "users" => $users]]);
-}
-
-if ($method === "POST" && $route === "auth/signup") {
-  $body = read_json_body();
-
-  $fullName = isset($body["fullName"]) && is_string($body["fullName"]) ? trim($body["fullName"]) : "";
-  $mobileNumber = isset($body["mobileNumber"]) && is_string($body["mobileNumber"]) ? normalize_mobile_number($body["mobileNumber"]) : "";
-  $password = isset($body["password"]) && is_string($body["password"]) ? $body["password"] : "";
-  $shopId = isset($body["shopId"]) && is_string($body["shopId"]) ? trim($body["shopId"]) : "";
-
-  if ($fullName === "" || $mobileNumber === "" || $password === "" || $shopId === "") {
-    json_response(400, ["error" => "ValidationError", "message" => "fullName, mobileNumber, password, and shopId are required"]);
-  }
-  if (strlen($password) < 6) {
-    json_response(400, ["error" => "ValidationError", "message" => "Password must be at least 6 characters"]);
-  }
-
-  $result = with_state(function (&$s) use ($fullName, $mobileNumber, $password, $shopId) {
-    // Validate shop exists.
-    $shopExists = false;
-    foreach ($s["shops"] as $shop) {
-      if (($shop["id"] ?? "") === $shopId) {
-        $shopExists = true;
-        break;
-      }
-    }
-    if (!$shopExists) {
-      json_response(400, ["error" => "ValidationError", "message" => "Invalid shopId"]);
-    }
-
-    // Enforce unique mobile number.
-    foreach ($s["users"] as $existing) {
-      if (($existing["mobileNumber"] ?? "") === $mobileNumber) {
-        json_response(409, ["error" => "Conflict", "message" => "Mobile number is already registered"]);
-      }
-    }
-
-    $user = [
-      "id" => create_id("user"),
-      "fullName" => $fullName,
-      "role" => "SALES",
-      "shopId" => $shopId,
-      "mobileNumber" => $mobileNumber,
-      "passwordHash" => password_hash($password, PASSWORD_DEFAULT),
-      "createdAt" => now_iso(),
-    ];
-
-    $s["users"][] = $user;
-    return ["token" => $user["id"], "user" => public_user($user)];
-  });
-
-  json_response(201, ["data" => $result]);
-}
-
 if ($method === "POST" && $route === "auth/login") {
   $body = read_json_body();
   $mobileNumber = isset($body["mobileNumber"]) && is_string($body["mobileNumber"]) ? normalize_mobile_number($body["mobileNumber"]) : "";
@@ -506,6 +443,75 @@ $authUser = require_auth($state);
 
 if ($method === "GET" && $route === "auth/me") {
   json_response(200, ["data" => public_user($authUser)]);
+}
+
+if ($method === "GET" && $route === "meta/seed") {
+  $users = [];
+  foreach ($state["users"] as $user) {
+    if (is_array($user)) {
+      $users[] = public_user($user);
+    }
+  }
+  json_response(200, ["data" => ["shops" => $state["shops"], "users" => $users]]);
+}
+
+if ($method === "POST" && $route === "admin/users") {
+  require_role($authUser, ["ADMIN"]);
+  $body = read_json_body();
+
+  $fullName = isset($body["fullName"]) && is_string($body["fullName"]) ? trim($body["fullName"]) : "";
+  $role = isset($body["role"]) && is_string($body["role"]) ? strtoupper(trim($body["role"])) : "";
+  $shopId = isset($body["shopId"]) && is_string($body["shopId"]) ? trim($body["shopId"]) : "";
+  $mobileNumber = isset($body["mobileNumber"]) && is_string($body["mobileNumber"])
+    ? normalize_mobile_number($body["mobileNumber"])
+    : "";
+  $password = isset($body["password"]) && is_string($body["password"]) ? $body["password"] : "";
+
+  if ($fullName === "" || $role === "" || $mobileNumber === "" || $password === "") {
+    json_response(400, ["error" => "ValidationError", "message" => "fullName, role, mobileNumber, and password are required"]);
+  }
+  if (!in_array($role, ["ADMIN", "MANAGER", "SALES"], true)) {
+    json_response(400, ["error" => "ValidationError", "message" => "Invalid role"]);
+  }
+  if (strlen($password) < 6) {
+    json_response(400, ["error" => "ValidationError", "message" => "password must be at least 6 characters"]);
+  }
+
+  if ($role === "SALES") {
+    if ($shopId === "") {
+      json_response(400, ["error" => "ValidationError", "message" => "shopId is required for SALES users"]);
+    }
+    if (!find_shop($state, $shopId)) {
+      json_response(404, ["error" => "NotFound", "message" => "Shop not found"]);
+    }
+  } else {
+    // Only SALES users are assigned to a shop in v1.
+    $shopId = "";
+  }
+
+  $user = with_state(function (&$s) use ($fullName, $role, $shopId, $mobileNumber, $password) {
+    $existing = find_user_by_mobile($s, $mobileNumber);
+    if ($existing) {
+      json_response(409, ["error" => "Conflict", "message" => "Mobile number is already registered"]);
+    }
+
+    $user = [
+      "id" => create_id("user"),
+      "fullName" => $fullName,
+      "role" => $role,
+      "mobileNumber" => $mobileNumber,
+      "passwordHash" => password_hash($password, PASSWORD_DEFAULT),
+      "createdAt" => now_iso(),
+    ];
+    if ($role === "SALES") {
+      $user["shopId"] = $shopId;
+    }
+
+    $s["users"][] = $user;
+    return $user;
+  });
+
+  json_response(201, ["data" => public_user($user)]);
 }
 
 if ($method === "GET" && $route === "products") {

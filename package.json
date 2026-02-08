@@ -8,13 +8,13 @@
     "packages/*"
   ],
   "scripts": {
-    "predev": "npm run build -w @bdk/shared",
-    "dev": "concurrently \"npm run dev -w @bdk/api\" \"npm run dev -w @bdk/web\"",
-    "dev:api": "npm run build -w @bdk/shared && npm run dev -w @bdk/api",
-    "dev:web": "npm run dev -w @bdk/web",
-    "build": "npm run build -ws --if-present",
-    "test": "npm run test -ws --if-present",
-    "typecheck": "npm run typecheck -ws --if-present"
+    "predev": "npm -w @bdk/shared run build",
+    "dev": "concurrently \"npm -w @bdk/api run dev\" \"npm -w @bdk/web run dev\"",
+    "dev:api": "npm -w @bdk/shared run build && npm -w @bdk/api run dev",
+    "dev:web": "npm -w @bdk/web run dev",
+    "build": "npm -w @bdk/shared run build && npm -w @bdk/api run build && npm -w @bdk/web run build",
+    "test": "npm -w @bdk/api run test",
+    "typecheck": "npm -w @bdk/shared run typecheck && npm -w @bdk/api run typecheck && npm -w @bdk/web run typecheck"
   },
   "devDependencies": {
     "concurrently": "^9.2.1",
