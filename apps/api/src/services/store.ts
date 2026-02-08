@@ -9,13 +9,19 @@ import type {
   SaleLine,
   Shop
 } from "@bdk/shared";
+import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 
 interface User {
   id: string;
   fullName: string;
   role: Role;
   shopId?: string;
+  mobileNumber: string;
+  passwordHash: string;
+  createdAt?: string;
 }
+
+type PublicUser = Omit<User, "passwordHash">;
 
 interface InventoryRow {
   shopId: string;
@@ -76,11 +82,65 @@ const seedShops: Shop[] = [
   { id: "shop-wandegeya", name: "Wandegeya", code: "WDG" }
 ];
 
+function normalizeMobileNumber(mobileNumber: string): string {
+  return mobileNumber.trim().replace(/\D+/g, "");
+}
+
+function hashPassword(password: string): string {
+  const salt = randomBytes(16);
+  const key = scryptSync(password, salt, 32);
+  return `scrypt$${salt.toString("base64")}$${key.toString("base64")}`;
+}
+
+function verifyPassword(password: string, storedHash: string): boolean {
+  const parts = storedHash.split("$");
+  if (parts.length !== 3 || parts[0] !== "scrypt") {
+    return false;
+  }
+  const salt = Buffer.from(parts[1], "base64");
+  const expected = Buffer.from(parts[2], "base64");
+  const actual = scryptSync(password, salt, expected.length);
+  return timingSafeEqual(expected, actual);
+}
+
+function toPublicUser(user: User): PublicUser {
+  const { passwordHash: _secret, ...rest } = user;
+  return rest;
+}
+
+const defaultSeedPassword = "bdk1234";
+
 const seedUsers: User[] = [
-  { id: "user-admin-1", fullName: "System Admin", role: "ADMIN" },
-  { id: "user-manager-1", fullName: "Shop Manager", role: "MANAGER" },
-  { id: "user-sales-1", fullName: "Sales One", role: "SALES", shopId: "shop-kampala-main" },
-  { id: "user-sales-2", fullName: "Sales Two", role: "SALES", shopId: "shop-wandegeya" }
+  {
+    id: "user-admin-1",
+    fullName: "System Admin",
+    role: "ADMIN",
+    mobileNumber: normalizeMobileNumber("0700000000"),
+    passwordHash: hashPassword(defaultSeedPassword)
+  },
+  {
+    id: "user-manager-1",
+    fullName: "Shop Manager",
+    role: "MANAGER",
+    mobileNumber: normalizeMobileNumber("0700000001"),
+    passwordHash: hashPassword(defaultSeedPassword)
+  },
+  {
+    id: "user-sales-1",
+    fullName: "Sales One",
+    role: "SALES",
+    shopId: "shop-kampala-main",
+    mobileNumber: normalizeMobileNumber("0700000002"),
+    passwordHash: hashPassword(defaultSeedPassword)
+  },
+  {
+    id: "user-sales-2",
+    fullName: "Sales Two",
+    role: "SALES",
+    shopId: "shop-wandegeya",
+    mobileNumber: normalizeMobileNumber("0700000003"),
+    passwordHash: hashPassword(defaultSeedPassword)
+  }
 ];
 
 const seedProducts: Product[] = [
@@ -163,7 +223,7 @@ export function __resetForTests(): void {
 }
 
 function createId(prefix: string): string {
-  return `${prefix}-${crypto.randomUUID()}`;
+  return `${prefix}-${randomUUID()}`;
 }
 
 function requireShop(shopId: string): Shop {
@@ -186,6 +246,49 @@ export type AuthUser = User;
 
 export function getAuthUser(userId: string): AuthUser {
   return requireUser(userId);
+}
+
+export function listPublicUsers(): PublicUser[] {
+  return users.map(toPublicUser);
+}
+
+export function loginWithPassword(input: { mobileNumber: string; password: string }): { token: string; user: PublicUser } | null {
+  const mobileNumber = normalizeMobileNumber(input.mobileNumber);
+  const user = users.find((item) => item.mobileNumber === mobileNumber);
+  if (!user) {
+    return null;
+  }
+  if (!verifyPassword(input.password, user.passwordHash)) {
+    return null;
+  }
+  return { token: user.id, user: toPublicUser(user) };
+}
+
+export function signupSalesUser(input: {
+  fullName: string;
+  mobileNumber: string;
+  password: string;
+  shopId: string;
+}): { token: string; user: PublicUser } {
+  requireShop(input.shopId);
+  const mobileNumber = normalizeMobileNumber(input.mobileNumber);
+  if (!mobileNumber) {
+    throw new Error("Invalid mobileNumber");
+  }
+  if (users.some((item) => item.mobileNumber === mobileNumber)) {
+    throw new Error("Mobile number is already registered");
+  }
+  const user: User = {
+    id: createId("user"),
+    fullName: input.fullName.trim(),
+    role: "SALES",
+    shopId: input.shopId,
+    mobileNumber,
+    passwordHash: hashPassword(input.password),
+    createdAt: new Date().toISOString()
+  };
+  users.push(user);
+  return { token: user.id, user: toPublicUser(user) };
 }
 
 function requireProduct(productId: string): Product {
@@ -271,8 +374,9 @@ function materializeSaleLines(lines: Array<{ productId: string; quantity: number
   }));
 }
 
-export function listSeedData(): { shops: Shop[]; users: User[] } {
-  return { shops, users };
+export function listSeedData(): { shops: Shop[]; users: PublicUser[] } {
+  // Only return public-safe fields.
+  return { shops, users: listPublicUsers() };
 }
 
 export function listProducts(): Product[] {

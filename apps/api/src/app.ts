@@ -2,6 +2,7 @@ import cors from "cors";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { ZodError } from "zod";
 import { requireAuth } from "./middleware/auth.js";
+import { authRouter } from "./routes/auth.js";
 import { cashRouter } from "./routes/cash.js";
 import { healthRouter } from "./routes/health.js";
 import { invoicesRouter } from "./routes/invoices.js";
@@ -27,6 +28,7 @@ app.get("/api/meta/seed", (_req, res) => {
 });
 
 app.use("/api/health", healthRouter);
+app.use("/api/auth", authRouter);
 
 // Everything else requires auth in v1.
 app.use("/api", requireAuth);
