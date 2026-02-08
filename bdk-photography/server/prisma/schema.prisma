@@ -1,0 +1,117 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum RoleName {
+  ADMIN
+  MANAGER
+  SALES
+}
+
+model Role {
+  id          String    @id @default(cuid())
+  name        RoleName  @unique
+  description String?   @db.Text
+  notes       String?   @db.Text
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  users User[]
+
+  @@map("roles")
+}
+
+model Shop {
+  id        String   @id @default(cuid())
+  name      String
+  code      String   @unique
+  notes     String?  @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  assignments        UserShopAssignment[]
+  reconciliationLocks ReconciliationLock[]
+
+  @@map("shops")
+}
+
+model User {
+  id           String    @id @default(cuid())
+  fullName     String    @map("full_name")
+  phone        String    @unique
+  passwordHash String    @map("password_hash")
+  isActive     Boolean   @default(true) @map("is_active")
+  notes        String?   @db.Text
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  roleId String @map("role_id")
+  role   Role   @relation(fields: [roleId], references: [id])
+
+  assignments        UserShopAssignment[]
+  auditLogs          AuditLog[]           @relation("audit_actor")
+  reconciliationLocks ReconciliationLock[] @relation("recon_locker")
+
+  @@index([roleId])
+  @@map("users")
+}
+
+model UserShopAssignment {
+  id           String    @id @default(cuid())
+  userId       String    @map("user_id")
+  shopId       String    @map("shop_id")
+  isPrimary    Boolean   @default(false) @map("is_primary")
+  assignedAt   DateTime  @default(now()) @map("assigned_at")
+  unassignedAt DateTime? @map("unassigned_at")
+  notes        String?   @db.Text
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id])
+  shop Shop @relation(fields: [shopId], references: [id])
+
+  @@index([userId])
+  @@index([shopId])
+  @@map("user_shop_assignment")
+}
+
+model AuditLog {
+  id          String    @id @default(cuid())
+  actorUserId String?   @map("actor_user_id")
+  action      String
+  entityType  String    @map("entity_type")
+  entityId    String?   @map("entity_id")
+  beforeJson  Json?     @map("before_json")
+  afterJson   Json?     @map("after_json")
+  notes       String?   @db.Text
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  actor User? @relation("audit_actor", fields: [actorUserId], references: [id])
+
+  @@index([actorUserId])
+  @@index([entityType, entityId])
+  @@map("audit_logs")
+}
+
+model ReconciliationLock {
+  id             String    @id @default(cuid())
+  shopId         String    @map("shop_id")
+  lockDate       DateTime  @db.Date @map("lock_date")
+  lockedByUserId String?   @map("locked_by_user_id")
+  notes          String?   @db.Text
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  shop      Shop  @relation(fields: [shopId], references: [id])
+  lockedBy  User? @relation("recon_locker", fields: [lockedByUserId], references: [id])
+
+  @@unique([shopId, lockDate])
+  @@index([lockedByUserId])
+  @@map("reconciliation_locks")
+}
