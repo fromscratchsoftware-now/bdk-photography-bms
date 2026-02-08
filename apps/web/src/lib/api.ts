@@ -1,5 +1,19 @@
-const rawApiBase = import.meta.env.VITE_API_BASE_URL ?? import.meta.env.BASE_URL;
-const API_BASE = rawApiBase.endsWith("/") ? rawApiBase : `${rawApiBase}/`;
+function computeBaseUrl(): string {
+  if (typeof window === "undefined") {
+    return "/";
+  }
+
+  // When deployed under a subdirectory like `/test/`, we want API calls relative to that base.
+  // Examples:
+  // - `/test/` => base `/test/`
+  // - `/test/inventory` => base `/test/`
+  const path = window.location.pathname || "/";
+  const idx = path.lastIndexOf("/");
+  const base = idx >= 0 ? path.slice(0, idx + 1) : "/";
+  return base.endsWith("/") ? base : `${base}/`;
+}
+
+const API_BASE = computeBaseUrl();
 
 function buildUrl(path: string): string {
   const normalized = path.replace(/^\//, "");
@@ -83,4 +97,3 @@ export function listShops(token: string): Promise<Shop[]> {
 export function listUsers(token: string): Promise<AuthUser[]> {
   return request<AuthUser[]>("api/users", undefined, token);
 }
-
