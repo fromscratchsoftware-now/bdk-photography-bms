@@ -413,7 +413,7 @@ export default function App(): JSX.Element {
         <>
           <section className="card">
             <h2>Signed In</h2>
-            <div className="form">
+            <div className="meta">
               <div>
                 <strong>User:</strong> {authUser?.fullName} ({authUser?.role})
               </div>
@@ -421,7 +421,7 @@ export default function App(): JSX.Element {
                 <strong>Shop:</strong>{" "}
                 {authUser?.shopId ? shopLookup.get(authUser.shopId) ?? authUser.shopId : "N/A"}
               </div>
-              <button type="button" onClick={() => clearSession()}>
+              <button type="button" data-variant="ghost" onClick={() => clearSession()}>
                 Log out
               </button>
             </div>
@@ -470,7 +470,7 @@ export default function App(): JSX.Element {
           {authUser?.role === "SALES" ? (
             <section className="card">
               <h2>Record Cash Sale</h2>
-              <form className="form" onSubmit={submitSale}>
+              <form className="form form--three" onSubmit={submitSale}>
                 <label>
                   Product
                   <select
@@ -577,4 +577,3 @@ export default function App(): JSX.Element {
     </main>
   );
 }
-
