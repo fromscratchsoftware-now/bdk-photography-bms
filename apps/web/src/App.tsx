@@ -219,6 +219,24 @@ export default function App(): JSX.Element {
 
   const authUser = auth?.user ?? null;
 
+  useEffect(() => {
+    if (!authUser) {
+      return;
+    }
+    if (view === "admin" && authUser.role !== "ADMIN") {
+      setView("dashboard");
+      return;
+    }
+    if (view === "sales" && authUser.role !== "ADMIN" && authUser.role !== "SALES") {
+      setView("dashboard");
+      return;
+    }
+    if (view === "cash" && authUser.role !== "ADMIN" && authUser.role !== "SALES") {
+      setView("dashboard");
+      return;
+    }
+  }, [authUser, view]);
+
   const shopLookup = useMemo(() => {
     const map = new Map<string, string>();
     for (const shop of shops) {
@@ -257,6 +275,11 @@ export default function App(): JSX.Element {
     const [productData, inventoryData] = await Promise.all([getProducts(userId), getInventory(userId)]);
     setProducts(productData);
     setInventory(inventoryData);
+
+    setExpenseDraft((previous) => ({
+      ...previous,
+      paidBy: nextAuth.user.role === "ADMIN" ? "ADMIN_BANK" : "SALESPERSON_CASH"
+    }));
 
     if (productData.length > 0) {
       setSaleDraft((previous) => {
@@ -330,6 +353,24 @@ export default function App(): JSX.Element {
     const userId = nextAuth.token;
 
     const tasks: Array<Promise<unknown>> = [];
+
+    // Keep shops/users fresh (signups can add users).
+    tasks.push(
+      getSeedMeta()
+        .then((seed) => {
+          setShops(seed.shops);
+          setSeedUsers(seed.users);
+          setSignupForm((previous) => ({
+            ...previous,
+            shopId: previous.shopId || seed.shops[0]?.id || ""
+          }));
+          setReceiveDraft((previous) => ({
+            ...previous,
+            shopId: previous.shopId || seed.shops[0]?.id || ""
+          }));
+        })
+        .catch(() => undefined)
+    );
 
     // These endpoints are safe for all authenticated roles.
     tasks.push(
@@ -989,9 +1030,11 @@ export default function App(): JSX.Element {
             <button type="button" className={view === "invoices" ? "tab isActive" : "tab"} onClick={() => setView("invoices")}>
               Invoices
             </button>
-            <button type="button" className={view === "cash" ? "tab isActive" : "tab"} onClick={() => setView("cash")}>
-              Cash
-            </button>
+            {(authUser?.role === "SALES" || authUser?.role === "ADMIN") ? (
+              <button type="button" className={view === "cash" ? "tab isActive" : "tab"} onClick={() => setView("cash")}>
+                Cash
+              </button>
+            ) : null}
             <button type="button" className={view === "inventory" ? "tab isActive" : "tab"} onClick={() => setView("inventory")}>
               Inventory
             </button>
@@ -1492,27 +1535,76 @@ export default function App(): JSX.Element {
               <section className="grid">
                 <article className="card">
                   <h2>Customers</h2>
-                  <form className="form" onSubmit={submitCreateCustomer}>
-                    <label>
-                      Mobile Number
-                      <input value={customerDraft.mobileNumber} onChange={(event) => setCustomerDraft((prev) => ({ ...prev, mobileNumber: event.target.value }))} required />
-                    </label>
-                    <label>
-                      First Name
-                      <input value={customerDraft.firstName} onChange={(event) => setCustomerDraft((prev) => ({ ...prev, firstName: event.target.value }))} required />
-                    </label>
-                    <label>
-                      Last Name
-                      <input value={customerDraft.lastName} onChange={(event) => setCustomerDraft((prev) => ({ ...prev, lastName: event.target.value }))} required />
-                    </label>
-                    <label>
-                      Email (optional)
-                      <input value={customerDraft.email} onChange={(event) => setCustomerDraft((prev) => ({ ...prev, email: event.target.value }))} />
-                    </label>
-                    <button type="submit" disabled={loadingData}>
-                      {loadingData ? "Saving..." : "Create Customer"}
-                    </button>
-                  </form>
+                  {(authUser?.role === "SALES" || authUser?.role === "ADMIN") ? (
+                    <form className="form" onSubmit={submitCreateCustomer}>
+                      <label>
+                        Mobile Number
+                        <input
+                          value={customerDraft.mobileNumber}
+                          onChange={(event) => setCustomerDraft((prev) => ({ ...prev, mobileNumber: event.target.value }))}
+                          required
+                        />
+                      </label>
+                      <label>
+                        First Name
+                        <input
+                          value={customerDraft.firstName}
+                          onChange={(event) => setCustomerDraft((prev) => ({ ...prev, firstName: event.target.value }))}
+                          required
+                        />
+                      </label>
+                      <label>
+                        Last Name
+                        <input
+                          value={customerDraft.lastName}
+                          onChange={(event) => setCustomerDraft((prev) => ({ ...prev, lastName: event.target.value }))}
+                          required
+                        />
+                      </label>
+                      <label>
+                        Email (optional)
+                        <input
+                          value={customerDraft.email}
+                          onChange={(event) => setCustomerDraft((prev) => ({ ...prev, email: event.target.value }))}
+                        />
+                      </label>
+                      <button type="submit" disabled={loadingData}>
+                        {loadingData ? "Saving..." : "Create Customer"}
+                      </button>
+                    </form>
+                  ) : (
+                    <p className="hint">Only sales and admin users can create customers.</p>
+                  )}
+
+                  <div className="divider" />
+
+                  <div className="tableWrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Name</th>
+                          <th>Mobile</th>
+                          <th>Email</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {customers.slice().reverse().slice(0, 12).map((c) => (
+                          <tr key={c.id}>
+                            <td>
+                              {c.firstName} {c.lastName}
+                            </td>
+                            <td>{c.mobileNumber}</td>
+                            <td>{c.email ?? "-"}</td>
+                          </tr>
+                        ))}
+                        {customers.length === 0 ? (
+                          <tr>
+                            <td colSpan={3}>No customers yet.</td>
+                          </tr>
+                        ) : null}
+                      </tbody>
+                    </table>
+                  </div>
                 </article>
 
                 {authUser?.role === "SALES" ? (
@@ -1732,40 +1824,47 @@ export default function App(): JSX.Element {
                     </div>
                   </article>
 
-                  <article className="card">
-                    <h2>Add Payment</h2>
-                    <form className="form" onSubmit={submitInvoicePayment}>
-                      <label>
-                        Amount (UGX)
-                        <input
-                          type="number"
-                          min={1}
-                          value={paymentDraft.amount || ""}
-                          onChange={(event) => setPaymentDraft((prev) => ({ ...prev, amount: Number(event.target.value) }))}
-                          required
-                        />
-                      </label>
-                      <label>
-                        Method
-                        <select
-                          value={paymentDraft.method}
-                          onChange={(event) => setPaymentDraft((prev) => ({ ...prev, method: event.target.value as InvoicePayment["method"] }))}
-                          required
-                        >
-                          <option value="CASH">Cash</option>
-                          <option value="MOBILE_MONEY">Mobile Money</option>
-                          <option value="CARD">Card</option>
-                        </select>
-                      </label>
-                      <label>
-                        Notes (optional)
-                        <input value={paymentDraft.notes} onChange={(event) => setPaymentDraft((prev) => ({ ...prev, notes: event.target.value }))} />
-                      </label>
-                      <button type="submit" disabled={loadingData}>
-                        {loadingData ? "Saving..." : "Add Payment"}
-                      </button>
-                    </form>
-                  </article>
+                  {(authUser?.role === "SALES" || authUser?.role === "ADMIN") ? (
+                    <article className="card">
+                      <h2>Add Payment</h2>
+                      <form className="form" onSubmit={submitInvoicePayment}>
+                        <label>
+                          Amount (UGX)
+                          <input
+                            type="number"
+                            min={1}
+                            value={paymentDraft.amount || ""}
+                            onChange={(event) => setPaymentDraft((prev) => ({ ...prev, amount: Number(event.target.value) }))}
+                            required
+                          />
+                        </label>
+                        <label>
+                          Method
+                          <select
+                            value={paymentDraft.method}
+                            onChange={(event) =>
+                              setPaymentDraft((prev) => ({ ...prev, method: event.target.value as InvoicePayment["method"] }))
+                            }
+                            required
+                          >
+                            <option value="CASH">Cash</option>
+                            <option value="MOBILE_MONEY">Mobile Money</option>
+                            <option value="CARD">Card</option>
+                          </select>
+                        </label>
+                        <label>
+                          Notes (optional)
+                          <input
+                            value={paymentDraft.notes}
+                            onChange={(event) => setPaymentDraft((prev) => ({ ...prev, notes: event.target.value }))}
+                          />
+                        </label>
+                        <button type="submit" disabled={loadingData}>
+                          {loadingData ? "Saving..." : "Add Payment"}
+                        </button>
+                      </form>
+                    </article>
+                  ) : null}
                 </section>
               ) : null}
 

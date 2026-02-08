@@ -8,6 +8,11 @@ declare(strict_types=1);
 function json_response(int $status, $payload): void {
   http_response_code($status);
   header("Content-Type: application/json; charset=utf-8");
+  // Shared hosting often enables aggressive proxy caching. Never cache API responses.
+  header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
+  header("Pragma: no-cache");
+  header("Expires: 0");
+  header("X-Content-Type-Options: nosniff");
   echo json_encode($payload, JSON_UNESCAPED_SLASHES);
   exit;
 }

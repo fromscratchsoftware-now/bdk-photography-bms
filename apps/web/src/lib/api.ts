@@ -6,12 +6,21 @@ function buildUrl(path: string): string {
   return `${API_BASE}${normalized}`;
 }
 
+function addCacheBust(url: string): string {
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}_ts=${Date.now()}`;
+}
+
 async function request<T>(path: string, init?: RequestInit, userId?: string): Promise<T> {
-  const response = await fetch(buildUrl(path), {
+  const method = (init?.method ?? "GET").toUpperCase();
+  const url = method === "GET" ? addCacheBust(buildUrl(path)) : buildUrl(path);
+
+  const response = await fetch(url, {
     headers: {
       "Content-Type": "application/json",
       ...(userId ? { "x-user-id": userId } : {})
     },
+    cache: "no-store",
     ...init
   });
 
