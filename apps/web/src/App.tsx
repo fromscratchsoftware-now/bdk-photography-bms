@@ -631,7 +631,7 @@ export default function App(): JSX.Element {
         <p className="eyebrow">BDK Photography</p>
         <h1>Business Management System</h1>
         <p className="subtitle">
-          Phase 1 foundation: authentication (JWT), role-based access, and shop visibility.
+          Phases 1-3: authentication (JWT), master data, customers, invoices, and installment payments.
         </p>
 
         <div className="divider" style={{ background: "rgba(255,255,255,0.22)" }} />
