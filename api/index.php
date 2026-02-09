@@ -231,6 +231,32 @@ function phase1_db_fetch_all(PDO $pdo, string $sql, array $params): array {
   return is_array($rows) ? $rows : [];
 }
 
+function phase1_db_execute(PDO $pdo, string $sql, array $params): int {
+  $stmt = $pdo->prepare($sql);
+  $stmt->execute($params);
+  return (int)$stmt->rowCount();
+}
+
+function phase1_audit_log(PDO $pdo, ?string $actorUserId, string $action, string $entityType, ?string $entityId, $before, $after, ?string $notes = null): void {
+  $beforeJson = $before === null ? null : json_encode($before, JSON_UNESCAPED_SLASHES);
+  $afterJson = $after === null ? null : json_encode($after, JSON_UNESCAPED_SLASHES);
+
+  $stmt = $pdo->prepare(
+    "INSERT INTO audit_logs (id, actor_user_id, action, entity_type, entity_id, before_json, after_json, notes) " .
+    "VALUES (:id, :actor_user_id, :action, :entity_type, :entity_id, :before_json, :after_json, :notes)"
+  );
+  $stmt->execute([
+    ":id" => create_id("audit"),
+    ":actor_user_id" => $actorUserId,
+    ":action" => $action,
+    ":entity_type" => $entityType,
+    ":entity_id" => $entityId,
+    ":before_json" => $beforeJson,
+    ":after_json" => $afterJson,
+    ":notes" => $notes,
+  ]);
+}
+
 function phase1_load_assignments(PDO $pdo, string $userId): array {
   return phase1_db_fetch_all(
     $pdo,
@@ -438,6 +464,674 @@ function phase1_handle(string $method, string $route): void {
     }, $rows);
 
     json_response(200, ["data" => $users]);
+  }
+
+  if ($method === "GET" && $route === "expense-categories") {
+    phase1_require_role($roleName, ["ADMIN"]);
+    $rows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT id, name, is_active, notes, created_at, updated_at FROM expense_categories ORDER BY name ASC",
+      []
+    );
+    $categories = array_map(function ($row) {
+      return [
+        "id" => (string)($row["id"] ?? ""),
+        "name" => (string)($row["name"] ?? ""),
+        "isActive" => (int)($row["is_active"] ?? 0) === 1,
+        "notes" => $row["notes"] ?? null,
+        "createdAt" => (string)($row["created_at"] ?? ""),
+        "updatedAt" => (string)($row["updated_at"] ?? ""),
+      ];
+    }, $rows);
+    json_response(200, ["data" => $categories]);
+  }
+
+  if ($method === "POST" && $route === "expense-categories") {
+    phase1_require_role($roleName, ["ADMIN"]);
+    $body = read_json_body();
+
+    $name = isset($body["name"]) && is_string($body["name"]) ? trim($body["name"]) : "";
+    $notes = isset($body["notes"]) && is_string($body["notes"]) ? trim($body["notes"]) : null;
+    $isActive = array_key_exists("isActive", $body) ? (bool)$body["isActive"] : true;
+
+    if ($name === "") {
+      json_response(400, ["error" => "ValidationError", "message" => "name is required"]);
+    }
+
+    $id = create_id("expcat");
+
+    try {
+      $stmt = $pdo->prepare("INSERT INTO expense_categories (id, name, is_active, notes) VALUES (:id, :name, :is_active, :notes)");
+      $stmt->execute([
+        ":id" => $id,
+        ":name" => $name,
+        ":is_active" => $isActive ? 1 : 0,
+        ":notes" => $notes !== "" ? $notes : null,
+      ]);
+    } catch (PDOException $error) {
+      $info = $error->errorInfo;
+      $code = is_array($info) && isset($info[1]) ? (int)$info[1] : 0;
+      if ($code === 1062) {
+        json_response(400, ["error" => "ValidationError", "message" => "Expense category name already exists"]);
+      }
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to create expense category"]);
+    }
+
+    $row = phase1_db_fetch_one(
+      $pdo,
+      "SELECT id, name, is_active, notes, created_at, updated_at FROM expense_categories WHERE id = :id LIMIT 1",
+      [":id" => $id]
+    );
+    if (!$row) {
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to read created expense category"]);
+    }
+
+    $public = [
+      "id" => (string)$row["id"],
+      "name" => (string)$row["name"],
+      "isActive" => (int)$row["is_active"] === 1,
+      "notes" => $row["notes"] ?? null,
+      "createdAt" => (string)$row["created_at"],
+      "updatedAt" => (string)$row["updated_at"],
+    ];
+    phase1_audit_log($pdo, (string)($authUser["id"] ?? null), "CREATE", "expense_category", (string)$row["id"], null, $public);
+    json_response(201, ["data" => $public]);
+  }
+
+  if ($method === "PATCH" && preg_match('/^expense-categories\\/([^\\/]+)$/', $route, $matches) === 1) {
+    phase1_require_role($roleName, ["ADMIN"]);
+    $id = (string)$matches[1];
+    $body = read_json_body();
+
+    $existing = phase1_db_fetch_one(
+      $pdo,
+      "SELECT id, name, is_active, notes, created_at, updated_at FROM expense_categories WHERE id = :id LIMIT 1",
+      [":id" => $id]
+    );
+    if (!$existing) {
+      json_response(404, ["error" => "HttpError", "message" => "Expense category not found"]);
+    }
+
+    $updates = [];
+    $params = [":id" => $id];
+
+    if (array_key_exists("name", $body)) {
+      $value = is_string($body["name"]) ? trim($body["name"]) : "";
+      if ($value === "") {
+        json_response(400, ["error" => "ValidationError", "message" => "name cannot be empty"]);
+      }
+      $updates[] = "name = :name";
+      $params[":name"] = $value;
+    }
+    if (array_key_exists("notes", $body)) {
+      $notesValue = $body["notes"];
+      if ($notesValue !== null && !is_string($notesValue)) {
+        json_response(400, ["error" => "ValidationError", "message" => "notes must be a string or null"]);
+      }
+      $updates[] = "notes = :notes";
+      $params[":notes"] = is_string($notesValue) && trim($notesValue) !== "" ? trim($notesValue) : null;
+    }
+    if (array_key_exists("isActive", $body)) {
+      $updates[] = "is_active = :is_active";
+      $params[":is_active"] = (bool)$body["isActive"] ? 1 : 0;
+    }
+
+    if (count($updates) < 1) {
+      json_response(400, ["error" => "ValidationError", "message" => "No fields to update"]);
+    }
+
+    try {
+      phase1_db_execute($pdo, "UPDATE expense_categories SET " . implode(", ", $updates) . ", updated_at = NOW() WHERE id = :id", $params);
+    } catch (PDOException $error) {
+      $info = $error->errorInfo;
+      $code = is_array($info) && isset($info[1]) ? (int)$info[1] : 0;
+      if ($code === 1062) {
+        json_response(400, ["error" => "ValidationError", "message" => "Expense category name already exists"]);
+      }
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to update expense category"]);
+    }
+
+    $row = phase1_db_fetch_one(
+      $pdo,
+      "SELECT id, name, is_active, notes, created_at, updated_at FROM expense_categories WHERE id = :id LIMIT 1",
+      [":id" => $id]
+    );
+    if (!$row) {
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to read updated expense category"]);
+    }
+
+    $beforePublic = [
+      "id" => (string)$existing["id"],
+      "name" => (string)$existing["name"],
+      "isActive" => (int)$existing["is_active"] === 1,
+      "notes" => $existing["notes"] ?? null,
+      "createdAt" => (string)$existing["created_at"],
+      "updatedAt" => (string)$existing["updated_at"],
+    ];
+    $afterPublic = [
+      "id" => (string)$row["id"],
+      "name" => (string)$row["name"],
+      "isActive" => (int)$row["is_active"] === 1,
+      "notes" => $row["notes"] ?? null,
+      "createdAt" => (string)$row["created_at"],
+      "updatedAt" => (string)$row["updated_at"],
+    ];
+
+    phase1_audit_log($pdo, (string)($authUser["id"] ?? null), "UPDATE", "expense_category", (string)$row["id"], $beforePublic, $afterPublic);
+    json_response(200, ["data" => $afterPublic]);
+  }
+
+  if ($method === "GET" && $route === "product-categories") {
+    phase1_require_role($roleName, ["ADMIN"]);
+    $rows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT id, name, is_active, notes, created_at, updated_at FROM product_categories ORDER BY name ASC",
+      []
+    );
+    $categories = array_map(function ($row) {
+      return [
+        "id" => (string)($row["id"] ?? ""),
+        "name" => (string)($row["name"] ?? ""),
+        "isActive" => (int)($row["is_active"] ?? 0) === 1,
+        "notes" => $row["notes"] ?? null,
+        "createdAt" => (string)($row["created_at"] ?? ""),
+        "updatedAt" => (string)($row["updated_at"] ?? ""),
+      ];
+    }, $rows);
+    json_response(200, ["data" => $categories]);
+  }
+
+  if ($method === "POST" && $route === "product-categories") {
+    phase1_require_role($roleName, ["ADMIN"]);
+    $body = read_json_body();
+
+    $name = isset($body["name"]) && is_string($body["name"]) ? trim($body["name"]) : "";
+    $notes = isset($body["notes"]) && is_string($body["notes"]) ? trim($body["notes"]) : null;
+    $isActive = array_key_exists("isActive", $body) ? (bool)$body["isActive"] : true;
+
+    if ($name === "") {
+      json_response(400, ["error" => "ValidationError", "message" => "name is required"]);
+    }
+
+    $id = create_id("prodcat");
+
+    try {
+      $stmt = $pdo->prepare("INSERT INTO product_categories (id, name, is_active, notes) VALUES (:id, :name, :is_active, :notes)");
+      $stmt->execute([
+        ":id" => $id,
+        ":name" => $name,
+        ":is_active" => $isActive ? 1 : 0,
+        ":notes" => $notes !== "" ? $notes : null,
+      ]);
+    } catch (PDOException $error) {
+      $info = $error->errorInfo;
+      $code = is_array($info) && isset($info[1]) ? (int)$info[1] : 0;
+      if ($code === 1062) {
+        json_response(400, ["error" => "ValidationError", "message" => "Product category name already exists"]);
+      }
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to create product category"]);
+    }
+
+    $row = phase1_db_fetch_one(
+      $pdo,
+      "SELECT id, name, is_active, notes, created_at, updated_at FROM product_categories WHERE id = :id LIMIT 1",
+      [":id" => $id]
+    );
+    if (!$row) {
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to read created product category"]);
+    }
+
+    $public = [
+      "id" => (string)$row["id"],
+      "name" => (string)$row["name"],
+      "isActive" => (int)$row["is_active"] === 1,
+      "notes" => $row["notes"] ?? null,
+      "createdAt" => (string)$row["created_at"],
+      "updatedAt" => (string)$row["updated_at"],
+    ];
+    phase1_audit_log($pdo, (string)($authUser["id"] ?? null), "CREATE", "product_category", (string)$row["id"], null, $public);
+    json_response(201, ["data" => $public]);
+  }
+
+  if ($method === "PATCH" && preg_match('/^product-categories\\/([^\\/]+)$/', $route, $matches) === 1) {
+    phase1_require_role($roleName, ["ADMIN"]);
+    $id = (string)$matches[1];
+    $body = read_json_body();
+
+    $existing = phase1_db_fetch_one(
+      $pdo,
+      "SELECT id, name, is_active, notes, created_at, updated_at FROM product_categories WHERE id = :id LIMIT 1",
+      [":id" => $id]
+    );
+    if (!$existing) {
+      json_response(404, ["error" => "HttpError", "message" => "Product category not found"]);
+    }
+
+    $updates = [];
+    $params = [":id" => $id];
+
+    if (array_key_exists("name", $body)) {
+      $value = is_string($body["name"]) ? trim($body["name"]) : "";
+      if ($value === "") {
+        json_response(400, ["error" => "ValidationError", "message" => "name cannot be empty"]);
+      }
+      $updates[] = "name = :name";
+      $params[":name"] = $value;
+    }
+    if (array_key_exists("notes", $body)) {
+      $notesValue = $body["notes"];
+      if ($notesValue !== null && !is_string($notesValue)) {
+        json_response(400, ["error" => "ValidationError", "message" => "notes must be a string or null"]);
+      }
+      $updates[] = "notes = :notes";
+      $params[":notes"] = is_string($notesValue) && trim($notesValue) !== "" ? trim($notesValue) : null;
+    }
+    if (array_key_exists("isActive", $body)) {
+      $updates[] = "is_active = :is_active";
+      $params[":is_active"] = (bool)$body["isActive"] ? 1 : 0;
+    }
+
+    if (count($updates) < 1) {
+      json_response(400, ["error" => "ValidationError", "message" => "No fields to update"]);
+    }
+
+    try {
+      phase1_db_execute($pdo, "UPDATE product_categories SET " . implode(", ", $updates) . ", updated_at = NOW() WHERE id = :id", $params);
+    } catch (PDOException $error) {
+      $info = $error->errorInfo;
+      $code = is_array($info) && isset($info[1]) ? (int)$info[1] : 0;
+      if ($code === 1062) {
+        json_response(400, ["error" => "ValidationError", "message" => "Product category name already exists"]);
+      }
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to update product category"]);
+    }
+
+    $row = phase1_db_fetch_one(
+      $pdo,
+      "SELECT id, name, is_active, notes, created_at, updated_at FROM product_categories WHERE id = :id LIMIT 1",
+      [":id" => $id]
+    );
+    if (!$row) {
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to read updated product category"]);
+    }
+
+    $beforePublic = [
+      "id" => (string)$existing["id"],
+      "name" => (string)$existing["name"],
+      "isActive" => (int)$existing["is_active"] === 1,
+      "notes" => $existing["notes"] ?? null,
+      "createdAt" => (string)$existing["created_at"],
+      "updatedAt" => (string)$existing["updated_at"],
+    ];
+    $afterPublic = [
+      "id" => (string)$row["id"],
+      "name" => (string)$row["name"],
+      "isActive" => (int)$row["is_active"] === 1,
+      "notes" => $row["notes"] ?? null,
+      "createdAt" => (string)$row["created_at"],
+      "updatedAt" => (string)$row["updated_at"],
+    ];
+
+    phase1_audit_log($pdo, (string)($authUser["id"] ?? null), "UPDATE", "product_category", (string)$row["id"], $beforePublic, $afterPublic);
+    json_response(200, ["data" => $afterPublic]);
+  }
+
+  if ($method === "GET" && $route === "products") {
+    phase1_require_role($roleName, ["ADMIN"]);
+    $rows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT p.id, p.sku_code, p.name, p.category_id, c.name AS category_name, p.product_type, p.unit_of_measure, " .
+        "p.cost_price, p.selling_price, p.is_active, p.board_size_code, p.yield_per_sheet, p.notes, p.created_at, p.updated_at " .
+      "FROM products p JOIN product_categories c ON c.id = p.category_id " .
+      "ORDER BY p.name ASC",
+      []
+    );
+    $products = array_map(function ($row) {
+      return [
+        "id" => (string)($row["id"] ?? ""),
+        "skuCode" => (string)($row["sku_code"] ?? ""),
+        "name" => (string)($row["name"] ?? ""),
+        "categoryId" => (string)($row["category_id"] ?? ""),
+        "categoryName" => (string)($row["category_name"] ?? ""),
+        "productType" => (string)($row["product_type"] ?? ""),
+        "unitOfMeasure" => (string)($row["unit_of_measure"] ?? ""),
+        "costPrice" => $row["cost_price"] === null ? null : (int)$row["cost_price"],
+        "sellingPrice" => (int)($row["selling_price"] ?? 0),
+        "isActive" => (int)($row["is_active"] ?? 0) === 1,
+        "boardSizeCode" => $row["board_size_code"] === null ? null : (string)$row["board_size_code"],
+        "yieldPerSheet" => $row["yield_per_sheet"] === null ? null : (int)$row["yield_per_sheet"],
+        "notes" => $row["notes"] ?? null,
+        "createdAt" => (string)($row["created_at"] ?? ""),
+        "updatedAt" => (string)($row["updated_at"] ?? ""),
+      ];
+    }, $rows);
+    json_response(200, ["data" => $products]);
+  }
+
+  if ($method === "POST" && $route === "products") {
+    phase1_require_role($roleName, ["ADMIN"]);
+    $body = read_json_body();
+
+    $skuCode = isset($body["skuCode"]) && is_string($body["skuCode"]) ? trim($body["skuCode"]) : "";
+    $name = isset($body["name"]) && is_string($body["name"]) ? trim($body["name"]) : "";
+    $categoryId = isset($body["categoryId"]) && is_string($body["categoryId"]) ? trim($body["categoryId"]) : "";
+    $productType = isset($body["productType"]) && is_string($body["productType"]) ? trim($body["productType"]) : "";
+    $unitOfMeasure = isset($body["unitOfMeasure"]) && is_string($body["unitOfMeasure"]) ? trim($body["unitOfMeasure"]) : "";
+    $sellingPrice = isset($body["sellingPrice"]) ? (int)$body["sellingPrice"] : 0;
+    $costPrice = array_key_exists("costPrice", $body) ? ($body["costPrice"] === null ? null : (int)$body["costPrice"]) : null;
+    $isActive = array_key_exists("isActive", $body) ? (bool)$body["isActive"] : true;
+    $boardSizeCode = array_key_exists("boardSizeCode", $body) && is_string($body["boardSizeCode"]) ? trim($body["boardSizeCode"]) : null;
+    $notes = array_key_exists("notes", $body) ? $body["notes"] : null;
+
+    if ($skuCode === "" || $name === "" || $categoryId === "" || $unitOfMeasure === "" || $sellingPrice < 1) {
+      json_response(400, ["error" => "ValidationError", "message" => "skuCode, name, categoryId, unitOfMeasure, and sellingPrice are required"]);
+    }
+    if ($productType !== "BOARD" && $productType !== "NON_BOARD") {
+      json_response(400, ["error" => "ValidationError", "message" => "productType must be BOARD or NON_BOARD"]);
+    }
+    if ($costPrice !== null && $costPrice < 0) {
+      json_response(400, ["error" => "ValidationError", "message" => "costPrice must be >= 0"]);
+    }
+    if ($notes !== null && !is_string($notes)) {
+      json_response(400, ["error" => "ValidationError", "message" => "notes must be a string or null"]);
+    }
+
+    $yieldMap = ["A4C" => 48, "A3C" => 24, "A2C" => 12];
+    $yieldPerSheet = null;
+
+    if ($productType === "BOARD") {
+      if ($boardSizeCode === null || !isset($yieldMap[$boardSizeCode])) {
+        json_response(400, ["error" => "ValidationError", "message" => "boardSizeCode must be A4C, A3C, or A2C for BOARD products"]);
+      }
+      $yieldPerSheet = (int)$yieldMap[$boardSizeCode];
+    } else {
+      $boardSizeCode = null;
+    }
+
+    $category = phase1_db_fetch_one(
+      $pdo,
+      "SELECT id, name, is_active FROM product_categories WHERE id = :id LIMIT 1",
+      [":id" => $categoryId]
+    );
+    if (!$category) {
+      json_response(400, ["error" => "ValidationError", "message" => "Invalid categoryId"]);
+    }
+    if ((int)($category["is_active"] ?? 0) !== 1) {
+      json_response(400, ["error" => "ValidationError", "message" => "Category is inactive"]);
+    }
+
+    $id = create_id("prod");
+
+    try {
+      $stmt = $pdo->prepare(
+        "INSERT INTO products (id, sku_code, name, category_id, product_type, unit_of_measure, cost_price, selling_price, is_active, board_size_code, yield_per_sheet, notes) " .
+        "VALUES (:id, :sku_code, :name, :category_id, :product_type, :unit_of_measure, :cost_price, :selling_price, :is_active, :board_size_code, :yield_per_sheet, :notes)"
+      );
+      $stmt->execute([
+        ":id" => $id,
+        ":sku_code" => $skuCode,
+        ":name" => $name,
+        ":category_id" => $categoryId,
+        ":product_type" => $productType,
+        ":unit_of_measure" => $unitOfMeasure,
+        ":cost_price" => $costPrice,
+        ":selling_price" => $sellingPrice,
+        ":is_active" => $isActive ? 1 : 0,
+        ":board_size_code" => $boardSizeCode,
+        ":yield_per_sheet" => $yieldPerSheet,
+        ":notes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+      ]);
+    } catch (PDOException $error) {
+      $info = $error->errorInfo;
+      $code = is_array($info) && isset($info[1]) ? (int)$info[1] : 0;
+      if ($code === 1062) {
+        json_response(400, ["error" => "ValidationError", "message" => "skuCode already exists"]);
+      }
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to create product"]);
+    }
+
+    $row = phase1_db_fetch_one(
+      $pdo,
+      "SELECT p.id, p.sku_code, p.name, p.category_id, c.name AS category_name, p.product_type, p.unit_of_measure, " .
+        "p.cost_price, p.selling_price, p.is_active, p.board_size_code, p.yield_per_sheet, p.notes, p.created_at, p.updated_at " .
+      "FROM products p JOIN product_categories c ON c.id = p.category_id WHERE p.id = :id LIMIT 1",
+      [":id" => $id]
+    );
+    if (!$row) {
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to read created product"]);
+    }
+
+    $public = [
+      "id" => (string)$row["id"],
+      "skuCode" => (string)$row["sku_code"],
+      "name" => (string)$row["name"],
+      "categoryId" => (string)$row["category_id"],
+      "categoryName" => (string)$row["category_name"],
+      "productType" => (string)$row["product_type"],
+      "unitOfMeasure" => (string)$row["unit_of_measure"],
+      "costPrice" => $row["cost_price"] === null ? null : (int)$row["cost_price"],
+      "sellingPrice" => (int)$row["selling_price"],
+      "isActive" => (int)$row["is_active"] === 1,
+      "boardSizeCode" => $row["board_size_code"] === null ? null : (string)$row["board_size_code"],
+      "yieldPerSheet" => $row["yield_per_sheet"] === null ? null : (int)$row["yield_per_sheet"],
+      "notes" => $row["notes"] ?? null,
+      "createdAt" => (string)$row["created_at"],
+      "updatedAt" => (string)$row["updated_at"],
+    ];
+    phase1_audit_log($pdo, (string)($authUser["id"] ?? null), "CREATE", "product", (string)$row["id"], null, $public);
+    json_response(201, ["data" => $public]);
+  }
+
+  if ($method === "PATCH" && preg_match('/^products\\/([^\\/]+)$/', $route, $matches) === 1) {
+    phase1_require_role($roleName, ["ADMIN"]);
+    $id = (string)$matches[1];
+    $body = read_json_body();
+
+    $existing = phase1_db_fetch_one(
+      $pdo,
+      "SELECT p.id, p.sku_code, p.name, p.category_id, c.name AS category_name, p.product_type, p.unit_of_measure, " .
+        "p.cost_price, p.selling_price, p.is_active, p.board_size_code, p.yield_per_sheet, p.notes, p.created_at, p.updated_at " .
+      "FROM products p JOIN product_categories c ON c.id = p.category_id WHERE p.id = :id LIMIT 1",
+      [":id" => $id]
+    );
+    if (!$existing) {
+      json_response(404, ["error" => "HttpError", "message" => "Product not found"]);
+    }
+
+    $nextSkuCode = (string)$existing["sku_code"];
+    $nextName = (string)$existing["name"];
+    $nextCategoryId = (string)$existing["category_id"];
+    $nextProductType = (string)$existing["product_type"];
+    $nextUnitOfMeasure = (string)$existing["unit_of_measure"];
+    $nextCostPrice = $existing["cost_price"] === null ? null : (int)$existing["cost_price"];
+    $nextSellingPrice = (int)$existing["selling_price"];
+    $nextIsActive = (int)$existing["is_active"] === 1;
+    $nextBoardSizeCode = $existing["board_size_code"] === null ? null : (string)$existing["board_size_code"];
+    $nextNotes = $existing["notes"] ?? null;
+
+    if (array_key_exists("skuCode", $body)) {
+      $value = is_string($body["skuCode"]) ? trim($body["skuCode"]) : "";
+      if ($value === "") {
+        json_response(400, ["error" => "ValidationError", "message" => "skuCode cannot be empty"]);
+      }
+      $nextSkuCode = $value;
+    }
+    if (array_key_exists("name", $body)) {
+      $value = is_string($body["name"]) ? trim($body["name"]) : "";
+      if ($value === "") {
+        json_response(400, ["error" => "ValidationError", "message" => "name cannot be empty"]);
+      }
+      $nextName = $value;
+    }
+    if (array_key_exists("categoryId", $body)) {
+      $value = is_string($body["categoryId"]) ? trim($body["categoryId"]) : "";
+      if ($value === "") {
+        json_response(400, ["error" => "ValidationError", "message" => "categoryId cannot be empty"]);
+      }
+      $nextCategoryId = $value;
+    }
+    if (array_key_exists("productType", $body)) {
+      $value = is_string($body["productType"]) ? trim($body["productType"]) : "";
+      if ($value !== "BOARD" && $value !== "NON_BOARD") {
+        json_response(400, ["error" => "ValidationError", "message" => "productType must be BOARD or NON_BOARD"]);
+      }
+      $nextProductType = $value;
+    }
+    if (array_key_exists("unitOfMeasure", $body)) {
+      $value = is_string($body["unitOfMeasure"]) ? trim($body["unitOfMeasure"]) : "";
+      if ($value === "") {
+        json_response(400, ["error" => "ValidationError", "message" => "unitOfMeasure cannot be empty"]);
+      }
+      $nextUnitOfMeasure = $value;
+    }
+    if (array_key_exists("costPrice", $body)) {
+      if ($body["costPrice"] === null) {
+        $nextCostPrice = null;
+      } elseif (is_int($body["costPrice"]) || is_float($body["costPrice"]) || (is_string($body["costPrice"]) && $body["costPrice"] !== "")) {
+        $value = (int)$body["costPrice"];
+        if ($value < 0) {
+          json_response(400, ["error" => "ValidationError", "message" => "costPrice must be >= 0"]);
+        }
+        $nextCostPrice = $value;
+      } else {
+        json_response(400, ["error" => "ValidationError", "message" => "costPrice must be a number or null"]);
+      }
+    }
+    if (array_key_exists("sellingPrice", $body)) {
+      if (!is_int($body["sellingPrice"]) && !is_float($body["sellingPrice"]) && !(is_string($body["sellingPrice"]) && $body["sellingPrice"] !== "")) {
+        json_response(400, ["error" => "ValidationError", "message" => "sellingPrice must be a number"]);
+      }
+      $value = (int)$body["sellingPrice"];
+      if ($value < 1) {
+        json_response(400, ["error" => "ValidationError", "message" => "sellingPrice must be >= 1"]);
+      }
+      $nextSellingPrice = $value;
+    }
+    if (array_key_exists("isActive", $body)) {
+      $nextIsActive = (bool)$body["isActive"];
+    }
+    if (array_key_exists("boardSizeCode", $body)) {
+      if ($body["boardSizeCode"] === null) {
+        $nextBoardSizeCode = null;
+      } elseif (is_string($body["boardSizeCode"])) {
+        $value = trim($body["boardSizeCode"]);
+        $nextBoardSizeCode = $value !== "" ? $value : null;
+      } else {
+        json_response(400, ["error" => "ValidationError", "message" => "boardSizeCode must be a string or null"]);
+      }
+    }
+    if (array_key_exists("notes", $body)) {
+      $notesValue = $body["notes"];
+      if ($notesValue !== null && !is_string($notesValue)) {
+        json_response(400, ["error" => "ValidationError", "message" => "notes must be a string or null"]);
+      }
+      $nextNotes = is_string($notesValue) && trim($notesValue) !== "" ? trim($notesValue) : null;
+    }
+
+    if ($nextCategoryId !== (string)$existing["category_id"]) {
+      $category = phase1_db_fetch_one(
+        $pdo,
+        "SELECT id, is_active FROM product_categories WHERE id = :id LIMIT 1",
+        [":id" => $nextCategoryId]
+      );
+      if (!$category) {
+        json_response(400, ["error" => "ValidationError", "message" => "Invalid categoryId"]);
+      }
+      if ((int)($category["is_active"] ?? 0) !== 1) {
+        json_response(400, ["error" => "ValidationError", "message" => "Category is inactive"]);
+      }
+    }
+
+    $yieldMap = ["A4C" => 48, "A3C" => 24, "A2C" => 12];
+    $yieldPerSheet = null;
+
+    if ($nextProductType === "BOARD") {
+      if ($nextBoardSizeCode === null || !isset($yieldMap[$nextBoardSizeCode])) {
+        json_response(400, ["error" => "ValidationError", "message" => "boardSizeCode must be A4C, A3C, or A2C for BOARD products"]);
+      }
+      $yieldPerSheet = (int)$yieldMap[$nextBoardSizeCode];
+    } else {
+      $nextBoardSizeCode = null;
+      $yieldPerSheet = null;
+    }
+
+    try {
+      $stmt = $pdo->prepare(
+        "UPDATE products SET sku_code = :sku_code, name = :name, category_id = :category_id, product_type = :product_type, " .
+          "unit_of_measure = :unit_of_measure, cost_price = :cost_price, selling_price = :selling_price, is_active = :is_active, " .
+          "board_size_code = :board_size_code, yield_per_sheet = :yield_per_sheet, notes = :notes, updated_at = NOW() WHERE id = :id"
+      );
+      $stmt->execute([
+        ":id" => $id,
+        ":sku_code" => $nextSkuCode,
+        ":name" => $nextName,
+        ":category_id" => $nextCategoryId,
+        ":product_type" => $nextProductType,
+        ":unit_of_measure" => $nextUnitOfMeasure,
+        ":cost_price" => $nextCostPrice,
+        ":selling_price" => $nextSellingPrice,
+        ":is_active" => $nextIsActive ? 1 : 0,
+        ":board_size_code" => $nextBoardSizeCode,
+        ":yield_per_sheet" => $yieldPerSheet,
+        ":notes" => $nextNotes,
+      ]);
+    } catch (PDOException $error) {
+      $info = $error->errorInfo;
+      $code = is_array($info) && isset($info[1]) ? (int)$info[1] : 0;
+      if ($code === 1062) {
+        json_response(400, ["error" => "ValidationError", "message" => "skuCode already exists"]);
+      }
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to update product"]);
+    }
+
+    $row = phase1_db_fetch_one(
+      $pdo,
+      "SELECT p.id, p.sku_code, p.name, p.category_id, c.name AS category_name, p.product_type, p.unit_of_measure, " .
+        "p.cost_price, p.selling_price, p.is_active, p.board_size_code, p.yield_per_sheet, p.notes, p.created_at, p.updated_at " .
+      "FROM products p JOIN product_categories c ON c.id = p.category_id WHERE p.id = :id LIMIT 1",
+      [":id" => $id]
+    );
+    if (!$row) {
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to read updated product"]);
+    }
+
+    $beforePublic = [
+      "id" => (string)$existing["id"],
+      "skuCode" => (string)$existing["sku_code"],
+      "name" => (string)$existing["name"],
+      "categoryId" => (string)$existing["category_id"],
+      "categoryName" => (string)$existing["category_name"],
+      "productType" => (string)$existing["product_type"],
+      "unitOfMeasure" => (string)$existing["unit_of_measure"],
+      "costPrice" => $existing["cost_price"] === null ? null : (int)$existing["cost_price"],
+      "sellingPrice" => (int)$existing["selling_price"],
+      "isActive" => (int)$existing["is_active"] === 1,
+      "boardSizeCode" => $existing["board_size_code"] === null ? null : (string)$existing["board_size_code"],
+      "yieldPerSheet" => $existing["yield_per_sheet"] === null ? null : (int)$existing["yield_per_sheet"],
+      "notes" => $existing["notes"] ?? null,
+      "createdAt" => (string)$existing["created_at"],
+      "updatedAt" => (string)$existing["updated_at"],
+    ];
+    $afterPublic = [
+      "id" => (string)$row["id"],
+      "skuCode" => (string)$row["sku_code"],
+      "name" => (string)$row["name"],
+      "categoryId" => (string)$row["category_id"],
+      "categoryName" => (string)$row["category_name"],
+      "productType" => (string)$row["product_type"],
+      "unitOfMeasure" => (string)$row["unit_of_measure"],
+      "costPrice" => $row["cost_price"] === null ? null : (int)$row["cost_price"],
+      "sellingPrice" => (int)$row["selling_price"],
+      "isActive" => (int)$row["is_active"] === 1,
+      "boardSizeCode" => $row["board_size_code"] === null ? null : (string)$row["board_size_code"],
+      "yieldPerSheet" => $row["yield_per_sheet"] === null ? null : (int)$row["yield_per_sheet"],
+      "notes" => $row["notes"] ?? null,
+      "createdAt" => (string)$row["created_at"],
+      "updatedAt" => (string)$row["updated_at"],
+    ];
+
+    phase1_audit_log($pdo, (string)($authUser["id"] ?? null), "UPDATE", "product", (string)$row["id"], $beforePublic, $afterPublic);
+    json_response(200, ["data" => $afterPublic]);
   }
 
   json_response(404, ["error" => "NotFound", "message" => "Route not found"]);

@@ -79,6 +79,46 @@ export interface Shop {
   updatedAt?: string;
 }
 
+export interface ExpenseCategory {
+  id: string;
+  name: string;
+  isActive: boolean;
+  notes?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProductCategory {
+  id: string;
+  name: string;
+  isActive: boolean;
+  notes?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ProductType = "BOARD" | "NON_BOARD";
+
+export type BoardSizeCode = "A4C" | "A3C" | "A2C";
+
+export interface Product {
+  id: string;
+  skuCode: string;
+  name: string;
+  categoryId: string;
+  categoryName: string;
+  productType: ProductType;
+  unitOfMeasure: string;
+  costPrice?: number | null;
+  sellingPrice: number;
+  isActive: boolean;
+  boardSizeCode?: BoardSizeCode | null;
+  yieldPerSheet?: number | null;
+  notes?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export function login(payload: { mobileNumber: string; password: string }): Promise<AuthResponse> {
   return request<AuthResponse>("api/auth/login", {
     method: "POST",
@@ -96,4 +136,125 @@ export function listShops(token: string): Promise<Shop[]> {
 
 export function listUsers(token: string): Promise<AuthUser[]> {
   return request<AuthUser[]>("api/users", undefined, token);
+}
+
+export function listExpenseCategories(token: string): Promise<ExpenseCategory[]> {
+  return request<ExpenseCategory[]>("api/expense-categories", undefined, token);
+}
+
+export function createExpenseCategory(
+  token: string,
+  payload: { name: string; notes?: string; isActive?: boolean }
+): Promise<ExpenseCategory> {
+  return request<ExpenseCategory>(
+    "api/expense-categories",
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function updateExpenseCategory(
+  token: string,
+  id: string,
+  payload: { name?: string; notes?: string | null; isActive?: boolean }
+): Promise<ExpenseCategory> {
+  return request<ExpenseCategory>(
+    `api/expense-categories/${id}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function listProductCategories(token: string): Promise<ProductCategory[]> {
+  return request<ProductCategory[]>("api/product-categories", undefined, token);
+}
+
+export function createProductCategory(
+  token: string,
+  payload: { name: string; notes?: string; isActive?: boolean }
+): Promise<ProductCategory> {
+  return request<ProductCategory>(
+    "api/product-categories",
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function updateProductCategory(
+  token: string,
+  id: string,
+  payload: { name?: string; notes?: string | null; isActive?: boolean }
+): Promise<ProductCategory> {
+  return request<ProductCategory>(
+    `api/product-categories/${id}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function listProducts(token: string): Promise<Product[]> {
+  return request<Product[]>("api/products", undefined, token);
+}
+
+export function createProduct(
+  token: string,
+  payload: {
+    skuCode: string;
+    name: string;
+    categoryId: string;
+    productType: ProductType;
+    unitOfMeasure: string;
+    costPrice?: number | null;
+    sellingPrice: number;
+    isActive?: boolean;
+    boardSizeCode?: BoardSizeCode | null;
+    notes?: string | null;
+  }
+): Promise<Product> {
+  return request<Product>(
+    "api/products",
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function updateProduct(
+  token: string,
+  id: string,
+  payload: Partial<{
+    skuCode: string;
+    name: string;
+    categoryId: string;
+    productType: ProductType;
+    unitOfMeasure: string;
+    costPrice: number | null;
+    sellingPrice: number;
+    isActive: boolean;
+    boardSizeCode: BoardSizeCode | null;
+    notes: string | null;
+  }>
+): Promise<Product> {
+  return request<Product>(
+    `api/products/${id}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
 }
