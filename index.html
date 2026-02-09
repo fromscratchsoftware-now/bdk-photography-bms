@@ -21,5 +21,22 @@
   </head>
   <body>
     <div id="root"></div>
+    <noscript>
+      <div style="padding: 18px; font-family: system-ui, -apple-system, Segoe UI, sans-serif;">
+        <strong>JavaScript is required.</strong>
+        <div style="margin-top: 6px;">Please enable JavaScript in your browser to use BDK Photography BMS.</div>
+      </div>
+    </noscript>
+    <script nomodule>
+      (function () {
+        var root = document.getElementById("root");
+        if (!root) return;
+        root.innerHTML =
+          '<div style="padding:18px;font-family:system-ui,-apple-system,Segoe UI,sans-serif;">' +
+          "<strong>Browser not supported.</strong>" +
+          '<div style="margin-top:6px;">Please open this link in a modern browser (Chrome, Safari, Firefox, Edge).</div>' +
+          "</div>";
+      })();
+    </script>
   </body>
 </html>
