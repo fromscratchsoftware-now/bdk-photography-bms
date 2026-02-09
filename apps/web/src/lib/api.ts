@@ -59,6 +59,41 @@ async function request<T>(path: string, init?: RequestInit, token?: string): Pro
   return body.data as T;
 }
 
+async function downloadFile(path: string, token: string): Promise<{ blob: Blob; filename: string }> {
+  const url = addCacheBust(buildUrl(path));
+  const response = await fetch(url, {
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {})
+    },
+    cache: "no-store"
+  });
+
+  if (!response.ok) {
+    let message = "Request failed";
+    try {
+      const body = (await response.json()) as { message?: string; error?: string };
+      message = body.message ?? body.error ?? message;
+    } catch {
+      // ignore non-JSON response bodies
+      try {
+        const text = await response.text();
+        if (text.trim()) {
+          message = text.trim();
+        }
+      } catch {
+        // ignore
+      }
+    }
+    throw new Error(message);
+  }
+
+  const blob = await response.blob();
+  const disposition = response.headers.get("Content-Disposition") ?? "";
+  const filenameMatch = disposition.match(/filename=\"?([^\";]+)\"?/i);
+  const filename = filenameMatch?.[1] ? filenameMatch[1] : "download";
+  return { blob, filename };
+}
+
 export type Role = "ADMIN" | "MANAGER" | "SALES";
 
 export interface UserShop {
@@ -940,6 +975,303 @@ export function markNotificationRead(token: string, notifId: string): Promise<No
       method: "PATCH",
       body: JSON.stringify({})
     },
+    token
+  );
+}
+
+export type SalesReportPeriod = "daily" | "weekly" | "monthly" | "quarterly";
+
+export interface SalesReportRow {
+  periodStart: string;
+  periodEnd: string;
+  saleCount: number;
+  totalAmount: number;
+  cashAmount: number;
+  mobileMoneyAmount: number;
+  cardAmount: number;
+  creditAmount: number;
+}
+
+export interface SalesReport {
+  period: SalesReportPeriod;
+  dateFrom: string;
+  dateTo: string;
+  shopId?: string | null;
+  periods: SalesReportRow[];
+  totals: Omit<SalesReportRow, "periodStart" | "periodEnd">;
+}
+
+export type InvoiceReportStatus = "ALL" | "PAID" | "UNPAID" | "OVERDUE";
+
+export interface InvoiceReportItem {
+  id: string;
+  invoiceNumber: string;
+  shopId: string;
+  shopCode: string;
+  shopName: string;
+  status: InvoiceStatus;
+  invoiceDate: string;
+  issuedAt?: string | null;
+  dueDate?: string | null;
+  customerMobileNumber: string;
+  customerName: string;
+  totalAmount: number;
+  paidAmount: number;
+  balance: number;
+  isOverdue: boolean;
+  notes?: string | null;
+}
+
+export interface InvoiceReportSummary {
+  count: number;
+  totalAmount: number;
+  paidAmount: number;
+  balance: number;
+  overdueCount: number;
+  overdueBalance: number;
+}
+
+export interface InvoiceReport {
+  status: InvoiceReportStatus;
+  dateFrom: string;
+  dateTo: string;
+  shopId?: string | null;
+  items: InvoiceReportItem[];
+  summary: InvoiceReportSummary;
+}
+
+export interface ExpenseReportItem {
+  id: string;
+  shopId: string;
+  shopCode: string;
+  shopName: string;
+  categoryId: string;
+  categoryName: string;
+  amountUGX: number;
+  expenseDate: string;
+  paymentSource: ExpensePaymentSource;
+  paidByFullName?: string | null;
+  recordedByFullName?: string | null;
+  notes?: string | null;
+  createdAt: string;
+}
+
+export interface ExpenseReportCategoryRow {
+  categoryId: string;
+  categoryName: string;
+  expenseCount: number;
+  totalAmount: number;
+}
+
+export interface ExpenseReportSummary {
+  count: number;
+  totalAmount: number;
+  salespersonCashAmount: number;
+  adminBankAmount: number;
+}
+
+export interface ExpenseReport {
+  dateFrom: string;
+  dateTo: string;
+  shopId?: string | null;
+  items: ExpenseReportItem[];
+  byCategory: ExpenseReportCategoryRow[];
+  summary: ExpenseReportSummary;
+}
+
+export interface CashReportItem {
+  userId: string;
+  fullName: string;
+  shopId: string;
+  shopCode: string;
+  shopName: string;
+  cashAtHandAsOf: number;
+  bankedInRange: number;
+}
+
+export interface CashReport {
+  asOf: string;
+  dateFrom: string;
+  dateTo: string;
+  shopId?: string | null;
+  items: CashReportItem[];
+  totals: {
+    cashAtHand: number;
+    bankedInRange: number;
+  };
+}
+
+export interface PlBreakdownRow {
+  label: string;
+  totalAmount: number;
+}
+
+export interface PlReport {
+  dateFrom: string;
+  dateTo: string;
+  shopId?: string | null;
+  revenue: number;
+  saleCount: number;
+  expenses: number;
+  expenseCount: number;
+  profit: number;
+  revenueByPaymentMethod: Array<{ paymentMethod: SalePaymentMethod; totalAmount: number }>;
+  expensesByPaymentSource: Array<{ paymentSource: ExpensePaymentSource; totalAmount: number }>;
+}
+
+export function getSalesReport(
+  token: string,
+  params: { period?: SalesReportPeriod; shopId?: string; dateFrom?: string; dateTo?: string }
+): Promise<SalesReport> {
+  return request<SalesReport>(
+    withQuery("api/reports/sales", {
+      period: params.period ?? "daily",
+      shopId: params.shopId,
+      dateFrom: params.dateFrom,
+      dateTo: params.dateTo
+    }),
+    undefined,
+    token
+  );
+}
+
+export function getInvoiceReport(
+  token: string,
+  params: { status?: InvoiceReportStatus; shopId?: string; dateFrom?: string; dateTo?: string }
+): Promise<InvoiceReport> {
+  return request<InvoiceReport>(
+    withQuery("api/reports/invoices", {
+      status: params.status ?? "ALL",
+      shopId: params.shopId,
+      dateFrom: params.dateFrom,
+      dateTo: params.dateTo
+    }),
+    undefined,
+    token
+  );
+}
+
+export function getExpenseReport(token: string, params: { shopId?: string; dateFrom?: string; dateTo?: string }): Promise<ExpenseReport> {
+  return request<ExpenseReport>(
+    withQuery("api/reports/expenses", {
+      shopId: params.shopId,
+      dateFrom: params.dateFrom,
+      dateTo: params.dateTo
+    }),
+    undefined,
+    token
+  );
+}
+
+export function getCashReport(
+  token: string,
+  params: { shopId?: string; asOf?: string; dateFrom?: string; dateTo?: string }
+): Promise<CashReport> {
+  return request<CashReport>(
+    withQuery("api/reports/cash", {
+      shopId: params.shopId,
+      asOf: params.asOf,
+      dateFrom: params.dateFrom,
+      dateTo: params.dateTo
+    }),
+    undefined,
+    token
+  );
+}
+
+export function getPlReport(token: string, params: { shopId?: string; dateFrom?: string; dateTo?: string }): Promise<PlReport> {
+  return request<PlReport>(
+    withQuery("api/reports/pl", {
+      shopId: params.shopId,
+      dateFrom: params.dateFrom,
+      dateTo: params.dateTo
+    }),
+    undefined,
+    token
+  );
+}
+
+export type ReportExportFormat = "csv" | "xlsx" | "pdf";
+
+export function exportSalesReport(
+  token: string,
+  params: { period?: SalesReportPeriod; shopId?: string; dateFrom?: string; dateTo?: string },
+  format: ReportExportFormat
+): Promise<{ blob: Blob; filename: string }> {
+  return downloadFile(
+    withQuery("api/reports/sales", {
+      period: params.period ?? "daily",
+      shopId: params.shopId,
+      dateFrom: params.dateFrom,
+      dateTo: params.dateTo,
+      format
+    }),
+    token
+  );
+}
+
+export function exportInvoiceReport(
+  token: string,
+  params: { status?: InvoiceReportStatus; shopId?: string; dateFrom?: string; dateTo?: string },
+  format: ReportExportFormat
+): Promise<{ blob: Blob; filename: string }> {
+  return downloadFile(
+    withQuery("api/reports/invoices", {
+      status: params.status ?? "ALL",
+      shopId: params.shopId,
+      dateFrom: params.dateFrom,
+      dateTo: params.dateTo,
+      format
+    }),
+    token
+  );
+}
+
+export function exportExpenseReport(
+  token: string,
+  params: { shopId?: string; dateFrom?: string; dateTo?: string },
+  format: ReportExportFormat
+): Promise<{ blob: Blob; filename: string }> {
+  return downloadFile(
+    withQuery("api/reports/expenses", {
+      shopId: params.shopId,
+      dateFrom: params.dateFrom,
+      dateTo: params.dateTo,
+      format
+    }),
+    token
+  );
+}
+
+export function exportCashReport(
+  token: string,
+  params: { shopId?: string; asOf?: string; dateFrom?: string; dateTo?: string },
+  format: ReportExportFormat
+): Promise<{ blob: Blob; filename: string }> {
+  return downloadFile(
+    withQuery("api/reports/cash", {
+      shopId: params.shopId,
+      asOf: params.asOf,
+      dateFrom: params.dateFrom,
+      dateTo: params.dateTo,
+      format
+    }),
+    token
+  );
+}
+
+export function exportPlReport(
+  token: string,
+  params: { shopId?: string; dateFrom?: string; dateTo?: string },
+  format: ReportExportFormat
+): Promise<{ blob: Blob; filename: string }> {
+  return downloadFile(
+    withQuery("api/reports/pl", {
+      shopId: params.shopId,
+      dateFrom: params.dateFrom,
+      dateTo: params.dateTo,
+      format
+    }),
     token
   );
 }

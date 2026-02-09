@@ -56,6 +56,321 @@ function json_response(int $status, $payload): void {
   exit;
 }
 
+function file_response(string $contentType, string $filename, string $body): void {
+  http_response_code(200);
+  header("Content-Type: " . $contentType);
+  header("Content-Disposition: attachment; filename=\"" . $filename . "\"");
+  header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
+  header("Pragma: no-cache");
+  header("Expires: 0");
+  header("X-Content-Type-Options: nosniff");
+  header("Content-Length: " . (string)strlen($body));
+  echo $body;
+  exit;
+}
+
+function safe_filename(string $value): string {
+  $trimmed = trim($value);
+  if ($trimmed === "") {
+    return "download";
+  }
+  // Keep it ASCII and avoid path traversal. Replace everything else with underscores.
+  $clean = preg_replace('/[^A-Za-z0-9._-]+/', '_', $trimmed);
+  if (!is_string($clean) || $clean === "") {
+    return "download";
+  }
+  return substr($clean, 0, 120);
+}
+
+function csv_bytes(array $rows): string {
+  $fp = fopen("php://temp", "r+");
+  if ($fp === false) {
+    return "";
+  }
+  foreach ($rows as $row) {
+    if (!is_array($row)) {
+      continue;
+    }
+    fputcsv($fp, $row);
+  }
+  rewind($fp);
+  $csv = stream_get_contents($fp);
+  fclose($fp);
+  return is_string($csv) ? $csv : "";
+}
+
+function text_table_lines(array $headers, array $rows, array $rightAlignCols = []): array {
+  $colCount = count($headers);
+  $widths = array_fill(0, $colCount, 0);
+
+  for ($i = 0; $i < $colCount; $i++) {
+    $widths[$i] = max($widths[$i], strlen((string)($headers[$i] ?? "")));
+  }
+
+  foreach ($rows as $row) {
+    if (!is_array($row)) {
+      continue;
+    }
+    for ($i = 0; $i < $colCount; $i++) {
+      $value = isset($row[$i]) ? (string)$row[$i] : "";
+      $widths[$i] = max($widths[$i], strlen($value));
+    }
+  }
+
+  // Keep PDF line length sane; cap overly-wide columns.
+  for ($i = 0; $i < $colCount; $i++) {
+    $widths[$i] = min($widths[$i], 30);
+  }
+
+  $renderRow = function (array $row) use ($colCount, $widths, $rightAlignCols): string {
+    $cells = [];
+    for ($i = 0; $i < $colCount; $i++) {
+      $raw = isset($row[$i]) ? (string)$row[$i] : "";
+      $cell = strlen($raw) > $widths[$i] ? substr($raw, 0, max(0, $widths[$i] - 3)) . "..." : $raw;
+      $pad = $widths[$i];
+      if (in_array($i, $rightAlignCols, true)) {
+        $cells[] = str_pad($cell, $pad, " ", STR_PAD_LEFT);
+      } else {
+        $cells[] = str_pad($cell, $pad, " ", STR_PAD_RIGHT);
+      }
+    }
+    return implode(" | ", $cells);
+  };
+
+  $lines = [];
+  $lines[] = $renderRow($headers);
+  $sepParts = array_map(function ($w) { return str_repeat("-", max(1, $w)); }, $widths);
+  $lines[] = implode("-+-", $sepParts);
+  foreach ($rows as $row) {
+    if (!is_array($row)) {
+      continue;
+    }
+    $lines[] = $renderRow($row);
+  }
+  return $lines;
+}
+
+function xml_escape(string $value): string {
+  return htmlspecialchars($value, ENT_XML1 | ENT_QUOTES, "UTF-8");
+}
+
+function xlsx_col_letters(int $col1Based): string {
+  $letters = "";
+  $n = $col1Based;
+  while ($n > 0) {
+    $n--;
+    $letters = chr(($n % 26) + 65) . $letters;
+    $n = intdiv($n, 26);
+  }
+  return $letters;
+}
+
+function xlsx_cell_ref(int $col1Based, int $row1Based): string {
+  return xlsx_col_letters($col1Based) . (string)$row1Based;
+}
+
+function xlsx_sheet_xml(array $rows): string {
+  $xml = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>";
+  $xml .= "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" ";
+  $xml .= "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">";
+  $xml .= "<sheetData>";
+
+  $rowNum = 1;
+  foreach ($rows as $row) {
+    if (!is_array($row)) {
+      continue;
+    }
+    $xml .= "<row r=\"" . (string)$rowNum . "\">";
+    $colNum = 1;
+    foreach ($row as $cell) {
+      $ref = xlsx_cell_ref($colNum, $rowNum);
+      if (is_int($cell) || is_float($cell)) {
+        $xml .= "<c r=\"" . $ref . "\" t=\"n\"><v>" . (string)$cell . "</v></c>";
+      } else {
+        $text = $cell === null ? "" : (string)$cell;
+        $xml .= "<c r=\"" . $ref . "\" t=\"inlineStr\"><is><t>" . xml_escape($text) . "</t></is></c>";
+      }
+      $colNum++;
+    }
+    $xml .= "</row>";
+    $rowNum++;
+  }
+
+  $xml .= "</sheetData></worksheet>";
+  return $xml;
+}
+
+function xlsx_bytes(string $sheetName, array $rows): string {
+  if (!class_exists("ZipArchive")) {
+    json_response(500, ["error" => "InternalServerError", "message" => "ZipArchive is not available (cannot generate XLSX)"]);
+  }
+
+  $tmp = tempnam(sys_get_temp_dir(), "bdk_xlsx_");
+  if ($tmp === false) {
+    json_response(500, ["error" => "InternalServerError", "message" => "Failed to create temp file for XLSX"]);
+  }
+
+  $zip = new ZipArchive();
+  if ($zip->open($tmp, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+    @unlink($tmp);
+    json_response(500, ["error" => "InternalServerError", "message" => "Failed to open XLSX zip archive"]);
+  }
+
+  $sheetNameSafe = trim($sheetName) !== "" ? trim($sheetName) : "Sheet1";
+
+  $zip->addFromString("[Content_Types].xml", "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" .
+    "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">" .
+    "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>" .
+    "<Default Extension=\"xml\" ContentType=\"application/xml\"/>" .
+    "<Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>" .
+    "<Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>" .
+    "<Override PartName=\"/xl/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml\"/>" .
+    "</Types>"
+  );
+
+  $zip->addFromString("_rels/.rels", "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" .
+    "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">" .
+    "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/>" .
+    "</Relationships>"
+  );
+
+  $zip->addFromString("xl/workbook.xml", "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" .
+    "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" " .
+      "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">" .
+      "<sheets>" .
+        "<sheet name=\"" . xml_escape($sheetNameSafe) . "\" sheetId=\"1\" r:id=\"rId1\"/>" .
+      "</sheets>" .
+    "</workbook>"
+  );
+
+  $zip->addFromString("xl/_rels/workbook.xml.rels", "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" .
+    "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">" .
+    "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/>" .
+    "<Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>" .
+    "</Relationships>"
+  );
+
+  $zip->addFromString("xl/styles.xml", "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" .
+    "<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">" .
+      "<fonts count=\"1\"><font><sz val=\"11\"/><color theme=\"1\"/><name val=\"Calibri\"/><family val=\"2\"/></font></fonts>" .
+      "<fills count=\"2\"><fill><patternFill patternType=\"none\"/></fill><fill><patternFill patternType=\"gray125\"/></fill></fills>" .
+      "<borders count=\"1\"><border><left/><right/><top/><bottom/><diagonal/></border></borders>" .
+      "<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>" .
+      "<cellXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/></cellXfs>" .
+      "<cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles>" .
+    "</styleSheet>"
+  );
+
+  $zip->addFromString("xl/worksheets/sheet1.xml", xlsx_sheet_xml($rows));
+
+  $zip->close();
+
+  $bytes = file_get_contents($tmp);
+  @unlink($tmp);
+  return is_string($bytes) ? $bytes : "";
+}
+
+function pdf_escape_text(string $value): string {
+  $value = str_replace("\\", "\\\\", $value);
+  $value = str_replace("(", "\\(", $value);
+  $value = str_replace(")", "\\)", $value);
+  $value = str_replace("\r", "", $value);
+  $value = str_replace("\n", "", $value);
+  return $value;
+}
+
+function pdf_build(string $title, array $lines): string {
+  $pageWidth = 595;
+  $pageHeight = 842;
+  $marginX = 40;
+  $marginTop = 50;
+  $marginBottom = 50;
+  $fontSize = 10;
+  $lineHeight = 12;
+  $maxLinesPerPage = (int)floor(($pageHeight - $marginTop - $marginBottom) / $lineHeight);
+
+  $wrapped = [];
+  foreach ($lines as $line) {
+    if (!is_string($line)) {
+      continue;
+    }
+    $text = $line;
+    // Conservative wrap; Courier at 10pt fits ~95 chars with margins.
+    while (strlen($text) > 95) {
+      $wrapped[] = substr($text, 0, 95);
+      $text = substr($text, 95);
+    }
+    $wrapped[] = $text;
+  }
+
+  $allLines = array_merge([$title, str_repeat("-", min(95, max(10, strlen($title))))], $wrapped);
+
+  $pages = [];
+  for ($i = 0; $i < count($allLines); $i += $maxLinesPerPage) {
+    $pages[] = array_slice($allLines, $i, $maxLinesPerPage);
+  }
+  if (count($pages) < 1) {
+    $pages[] = [$title];
+  }
+
+  $objects = [];
+  $offsets = [];
+
+  $addObject = function (string $body) use (&$objects): int {
+    $objects[] = $body;
+    return count($objects);
+  };
+
+  $fontObj = $addObject("<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>");
+  $resourcesObj = $addObject("<< /Font << /F1 " . $fontObj . " 0 R >> >>");
+
+  $pageKids = [];
+  foreach ($pages as $pageLines) {
+    $content = "BT\n/F1 " . $fontSize . " Tf\n" .
+      $marginX . " " . ($pageHeight - $marginTop) . " Td\n" .
+      $lineHeight . " TL\n";
+    foreach ($pageLines as $line) {
+      $content .= "(" . pdf_escape_text((string)$line) . ") Tj\nT*\n";
+    }
+    $content .= "ET\n";
+    $stream = "<< /Length " . strlen($content) . " >>\nstream\n" . $content . "endstream";
+    $contentObj = $addObject($stream);
+
+    $pageObj = $addObject(
+      "<< /Type /Page /Parent 0 0 R /MediaBox [0 0 " . $pageWidth . " " . $pageHeight . "] " .
+        "/Resources " . $resourcesObj . " 0 R /Contents " . $contentObj . " 0 R >>"
+    );
+    $pageKids[] = $pageObj;
+  }
+
+  $kidsRefs = array_map(function ($id) { return $id . " 0 R"; }, $pageKids);
+  $pagesObj = $addObject("<< /Type /Pages /Kids [" . implode(" ", $kidsRefs) . "] /Count " . count($pageKids) . " >>");
+
+  // Patch Parent reference now that we know pages object id.
+  foreach ($pageKids as $idx => $pageObjId) {
+    $objects[$pageObjId - 1] = str_replace("/Parent 0 0 R", "/Parent " . $pagesObj . " 0 R", $objects[$pageObjId - 1]);
+  }
+
+  $catalogObj = $addObject("<< /Type /Catalog /Pages " . $pagesObj . " 0 R >>");
+
+  $pdf = "%PDF-1.4\n";
+  $offsets[0] = 0;
+  for ($i = 0; $i < count($objects); $i++) {
+    $offsets[$i + 1] = strlen($pdf);
+    $pdf .= ($i + 1) . " 0 obj\n" . $objects[$i] . "\nendobj\n";
+  }
+
+  $xrefPos = strlen($pdf);
+  $pdf .= "xref\n0 " . (count($objects) + 1) . "\n";
+  $pdf .= "0000000000 65535 f \n";
+  for ($i = 1; $i <= count($objects); $i++) {
+    $pdf .= str_pad((string)$offsets[$i], 10, "0", STR_PAD_LEFT) . " 00000 n \n";
+  }
+  $pdf .= "trailer\n<< /Size " . (count($objects) + 1) . " /Root " . $catalogObj . " 0 R >>\n";
+  $pdf .= "startxref\n" . $xrefPos . "\n%%EOF";
+  return $pdf;
+}
+
 function normalize_mobile_number(string $mobile): string {
   $trimmed = trim($mobile);
   // Keep digits only; simplifies matching and avoids format drift.
@@ -501,9 +816,133 @@ function phase1_cash_summary(PDO $pdo, string $userId): array {
   ];
 }
 
+function phase1_cash_summary_as_of(PDO $pdo, string $userId, string $asOfYmd): array {
+  $asOf = trim($asOfYmd);
+  if ($asOf === "" || !is_valid_ymd_date($asOf)) {
+    $asOf = phase1_business_today_ymd();
+  }
+
+  $cashSalesRow = phase1_db_fetch_one(
+    $pdo,
+    "SELECT COALESCE(SUM(total_amount), 0) AS total " .
+      "FROM sales WHERE user_id = :user_id AND payment_method = 'CASH' AND is_void = 0 AND sale_date <= :as_of",
+    [":user_id" => $userId, ":as_of" => $asOf]
+  );
+  $cashSales = $cashSalesRow ? (int)($cashSalesRow["total"] ?? 0) : 0;
+
+  $cashPaymentsRow = phase1_db_fetch_one(
+    $pdo,
+    "SELECT COALESCE(SUM(amount), 0) AS total " .
+      "FROM invoice_payments WHERE created_by_user_id = :user_id AND method = 'CASH' AND DATE(created_at) <= :as_of",
+    [":user_id" => $userId, ":as_of" => $asOf]
+  );
+  $cashInvoicePayments = $cashPaymentsRow ? (int)($cashPaymentsRow["total"] ?? 0) : 0;
+
+  $cashExpensesRow = phase1_db_fetch_one(
+    $pdo,
+    "SELECT COALESCE(SUM(amount_ugx), 0) AS total " .
+      "FROM expenses WHERE paid_by_user_id = :user_id AND payment_source = 'SALESPERSON_CASH' AND is_void = 0 AND expense_date <= :as_of",
+    [":user_id" => $userId, ":as_of" => $asOf]
+  );
+  $cashExpenses = $cashExpensesRow ? (int)($cashExpensesRow["total"] ?? 0) : 0;
+
+  $sentRow = phase1_db_fetch_one(
+    $pdo,
+    "SELECT COALESCE(SUM(amount_ugx), 0) AS total " .
+      "FROM cash_transfers WHERE sender_user_id = :user_id AND status = 'APPROVED' AND decided_at IS NOT NULL AND DATE(decided_at) <= :as_of",
+    [":user_id" => $userId, ":as_of" => $asOf]
+  );
+  $transfersSent = $sentRow ? (int)($sentRow["total"] ?? 0) : 0;
+
+  $receivedRow = phase1_db_fetch_one(
+    $pdo,
+    "SELECT COALESCE(SUM(amount_ugx), 0) AS total " .
+      "FROM cash_transfers WHERE receiver_user_id = :user_id AND status = 'APPROVED' AND decided_at IS NOT NULL AND DATE(decided_at) <= :as_of",
+    [":user_id" => $userId, ":as_of" => $asOf]
+  );
+  $transfersReceived = $receivedRow ? (int)($receivedRow["total"] ?? 0) : 0;
+
+  $bankedRow = phase1_db_fetch_one(
+    $pdo,
+    "SELECT COALESCE(SUM(amount_ugx), 0) AS total " .
+      "FROM banking_requests WHERE user_id = :user_id AND status = 'APPROVED' AND decided_at IS NOT NULL AND DATE(decided_at) <= :as_of",
+    [":user_id" => $userId, ":as_of" => $asOf]
+  );
+  $banked = $bankedRow ? (int)($bankedRow["total"] ?? 0) : 0;
+
+  $cashAtHand = $cashSales + $cashInvoicePayments - $cashExpenses - $transfersSent + $transfersReceived - $banked;
+
+  return [
+    "asOf" => $asOf,
+    "cashAtHand" => $cashAtHand,
+    "cashSales" => $cashSales,
+    "cashInvoicePayments" => $cashInvoicePayments,
+    "cashExpenses" => $cashExpenses,
+    "transfersSent" => $transfersSent,
+    "transfersReceived" => $transfersReceived,
+    "banked" => $banked,
+  ];
+}
+
 function phase1_cash_at_hand(PDO $pdo, string $userId): int {
   $summary = phase1_cash_summary($pdo, $userId);
   return (int)($summary["cashAtHand"] ?? 0);
+}
+
+function phase1_date_add_days(string $ymd, int $days): string {
+  try {
+    $dt = new DateTime($ymd, new DateTimeZone(phase1_business_tz_id()));
+    $dt->modify(($days >= 0 ? "+" : "") . (string)$days . " days");
+    return $dt->format("Y-m-d");
+  } catch (Throwable $error) {
+    return $ymd;
+  }
+}
+
+function phase1_resolve_date_range(?string $dateFrom, ?string $dateTo, int $defaultDays): array {
+  $to = is_string($dateTo) ? trim($dateTo) : "";
+  if ($to === "") {
+    $to = phase1_business_today_ymd();
+  }
+  if (!is_valid_ymd_date($to)) {
+    json_response(400, ["error" => "ValidationError", "message" => "dateTo must be YYYY-MM-DD"]);
+  }
+
+  $from = is_string($dateFrom) ? trim($dateFrom) : "";
+  if ($from === "") {
+    $from = phase1_date_add_days($to, -max(0, $defaultDays - 1));
+  }
+  if (!is_valid_ymd_date($from)) {
+    json_response(400, ["error" => "ValidationError", "message" => "dateFrom must be YYYY-MM-DD"]);
+  }
+  if ($from > $to) {
+    json_response(400, ["error" => "ValidationError", "message" => "dateFrom must be <= dateTo"]);
+  }
+
+  return ["dateFrom" => $from, "dateTo" => $to];
+}
+
+function phase1_shop_scope_sql(string $roleName, array $assignments, string $requestedShopId, string $column, array &$params): string {
+  $shopId = trim($requestedShopId);
+  if ($shopId !== "") {
+    phase1_require_shop_access($roleName, $assignments, $shopId);
+    $params[":shop_id"] = $shopId;
+    return " AND " . $column . " = :shop_id";
+  }
+  if ($roleName === "ADMIN") {
+    return "";
+  }
+  $shopIds = phase1_assigned_shop_ids($assignments);
+  if (count($shopIds) < 1) {
+    return " AND 1=0";
+  }
+  $placeholders = [];
+  foreach ($shopIds as $idx => $id) {
+    $key = ":shop_" . (string)$idx;
+    $placeholders[] = $key;
+    $params[$key] = $id;
+  }
+  return " AND " . $column . " IN (" . implode(", ", $placeholders) . ")";
 }
 
 function phase1_handle(string $method, string $route): void {
@@ -4922,6 +5361,634 @@ function phase1_handle(string $method, string $route): void {
     ] : ["id" => $notifId, "isRead" => true];
 
     json_response(200, ["data" => $public]);
+  }
+
+  // Phase 7 — Reports + Exports
+  if ($method === "GET" && $route === "reports/sales") {
+    phase1_require_role($roleName, ["ADMIN", "MANAGER"]);
+
+    $period = isset($_GET["period"]) && is_string($_GET["period"]) ? strtolower(trim($_GET["period"])) : "daily";
+    if (!in_array($period, ["daily", "weekly", "monthly", "quarterly"], true)) {
+      json_response(400, ["error" => "ValidationError", "message" => "period must be daily, weekly, monthly, or quarterly"]);
+    }
+
+    $requestedShopId = isset($_GET["shopId"]) && is_string($_GET["shopId"]) ? trim($_GET["shopId"]) : "";
+    $range = phase1_resolve_date_range(
+      isset($_GET["dateFrom"]) && is_string($_GET["dateFrom"]) ? $_GET["dateFrom"] : null,
+      isset($_GET["dateTo"]) && is_string($_GET["dateTo"]) ? $_GET["dateTo"] : null,
+      30
+    );
+    $dateFrom = (string)$range["dateFrom"];
+    $dateTo = (string)$range["dateTo"];
+
+    $format = isset($_GET["format"]) && is_string($_GET["format"]) ? strtolower(trim($_GET["format"])) : "";
+    if ($format !== "" && !in_array($format, ["csv", "xlsx", "pdf"], true)) {
+      json_response(400, ["error" => "ValidationError", "message" => "format must be csv, xlsx, or pdf"]);
+    }
+
+    $params = [":date_from" => $dateFrom, ":date_to" => $dateTo];
+    $shopSql = phase1_shop_scope_sql($roleName, $assignments, $requestedShopId, "s.shop_id", $params);
+
+    $periodStartExpr = "s.sale_date";
+    $periodEndExpr = "s.sale_date";
+    if ($period === "weekly") {
+      $periodStartExpr = "DATE_SUB(s.sale_date, INTERVAL WEEKDAY(s.sale_date) DAY)";
+      $periodEndExpr = "DATE_ADD(DATE_SUB(s.sale_date, INTERVAL WEEKDAY(s.sale_date) DAY), INTERVAL 6 DAY)";
+    } elseif ($period === "monthly") {
+      $periodStartExpr = "DATE_FORMAT(s.sale_date, '%Y-%m-01')";
+      $periodEndExpr = "LAST_DAY(s.sale_date)";
+    } elseif ($period === "quarterly") {
+      $quarterStart = "DATE_ADD(MAKEDATE(YEAR(s.sale_date), 1), INTERVAL (QUARTER(s.sale_date) - 1) * 3 MONTH)";
+      $periodStartExpr = $quarterStart;
+      $periodEndExpr = "LAST_DAY(DATE_ADD(" . $quarterStart . ", INTERVAL 2 MONTH))";
+    }
+
+    $rows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT t.period_start, t.period_end, " .
+        "COUNT(*) AS sale_count, " .
+        "COALESCE(SUM(t.total_amount), 0) AS total_amount, " .
+        "COALESCE(SUM(CASE WHEN t.payment_method = 'CASH' THEN t.total_amount ELSE 0 END), 0) AS cash_amount, " .
+        "COALESCE(SUM(CASE WHEN t.payment_method = 'MOBILE_MONEY' THEN t.total_amount ELSE 0 END), 0) AS mobile_money_amount, " .
+        "COALESCE(SUM(CASE WHEN t.payment_method = 'CARD' THEN t.total_amount ELSE 0 END), 0) AS card_amount, " .
+        "COALESCE(SUM(CASE WHEN t.payment_method = 'CREDIT' THEN t.total_amount ELSE 0 END), 0) AS credit_amount " .
+      "FROM (" .
+        "SELECT s.total_amount, s.payment_method, " . $periodStartExpr . " AS period_start, " . $periodEndExpr . " AS period_end " .
+        "FROM sales s " .
+        "WHERE s.is_void = 0 AND s.sale_date BETWEEN :date_from AND :date_to" . $shopSql .
+      ") t " .
+      "GROUP BY t.period_start, t.period_end " .
+      "ORDER BY t.period_start ASC",
+      $params
+    );
+
+    $periods = array_map(function ($row) {
+      return [
+        "periodStart" => (string)($row["period_start"] ?? ""),
+        "periodEnd" => (string)($row["period_end"] ?? ""),
+        "saleCount" => (int)($row["sale_count"] ?? 0),
+        "totalAmount" => (int)($row["total_amount"] ?? 0),
+        "cashAmount" => (int)($row["cash_amount"] ?? 0),
+        "mobileMoneyAmount" => (int)($row["mobile_money_amount"] ?? 0),
+        "cardAmount" => (int)($row["card_amount"] ?? 0),
+        "creditAmount" => (int)($row["credit_amount"] ?? 0),
+      ];
+    }, $rows);
+
+    $totals = [
+      "saleCount" => 0,
+      "totalAmount" => 0,
+      "cashAmount" => 0,
+      "mobileMoneyAmount" => 0,
+      "cardAmount" => 0,
+      "creditAmount" => 0,
+    ];
+    foreach ($periods as $p) {
+      $totals["saleCount"] += (int)$p["saleCount"];
+      $totals["totalAmount"] += (int)$p["totalAmount"];
+      $totals["cashAmount"] += (int)$p["cashAmount"];
+      $totals["mobileMoneyAmount"] += (int)$p["mobileMoneyAmount"];
+      $totals["cardAmount"] += (int)$p["cardAmount"];
+      $totals["creditAmount"] += (int)$p["creditAmount"];
+    }
+
+    $payload = [
+      "period" => $period,
+      "dateFrom" => $dateFrom,
+      "dateTo" => $dateTo,
+      "shopId" => $requestedShopId !== "" ? $requestedShopId : null,
+      "periods" => $periods,
+      "totals" => $totals,
+    ];
+
+    if ($format === "") {
+      json_response(200, ["data" => $payload]);
+    }
+
+    $exportRows = [];
+    $exportRows[] = ["Period Start", "Period End", "Sales", "Total (UGX)", "Cash", "Mobile Money", "Card", "Credit"];
+    foreach ($periods as $p) {
+      $exportRows[] = [
+        $p["periodStart"],
+        $p["periodEnd"],
+        $p["saleCount"],
+        $p["totalAmount"],
+        $p["cashAmount"],
+        $p["mobileMoneyAmount"],
+        $p["cardAmount"],
+        $p["creditAmount"],
+      ];
+    }
+    $exportRows[] = ["TOTAL", "", $totals["saleCount"], $totals["totalAmount"], $totals["cashAmount"], $totals["mobileMoneyAmount"], $totals["cardAmount"], $totals["creditAmount"]];
+
+    $baseName = safe_filename("bdk_sales_report_" . $period . "_" . $dateFrom . "_to_" . $dateTo);
+    if ($format === "csv") {
+      file_response("text/csv; charset=utf-8", $baseName . ".csv", csv_bytes($exportRows));
+    }
+    if ($format === "xlsx") {
+      file_response("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", $baseName . ".xlsx", xlsx_bytes("Sales Report", $exportRows));
+    }
+    $lines = text_table_lines($exportRows[0], array_slice($exportRows, 1), [2, 3, 4, 5, 6, 7]);
+    file_response("application/pdf", $baseName . ".pdf", pdf_build("Sales Report (" . $period . ") " . $dateFrom . " to " . $dateTo, $lines));
+  }
+
+  if ($method === "GET" && $route === "reports/invoices") {
+    phase1_require_role($roleName, ["ADMIN", "MANAGER"]);
+
+    $requestedShopId = isset($_GET["shopId"]) && is_string($_GET["shopId"]) ? trim($_GET["shopId"]) : "";
+    $statusFilter = isset($_GET["status"]) && is_string($_GET["status"]) ? strtoupper(trim($_GET["status"])) : "ALL";
+    if (!in_array($statusFilter, ["ALL", "PAID", "UNPAID", "OVERDUE"], true)) {
+      json_response(400, ["error" => "ValidationError", "message" => "status must be ALL, PAID, UNPAID, or OVERDUE"]);
+    }
+
+    $range = phase1_resolve_date_range(
+      isset($_GET["dateFrom"]) && is_string($_GET["dateFrom"]) ? $_GET["dateFrom"] : null,
+      isset($_GET["dateTo"]) && is_string($_GET["dateTo"]) ? $_GET["dateTo"] : null,
+      30
+    );
+    $dateFrom = (string)$range["dateFrom"];
+    $dateTo = (string)$range["dateTo"];
+    $today = phase1_business_today_ymd();
+
+    $format = isset($_GET["format"]) && is_string($_GET["format"]) ? strtolower(trim($_GET["format"])) : "";
+    if ($format !== "" && !in_array($format, ["csv", "xlsx", "pdf"], true)) {
+      json_response(400, ["error" => "ValidationError", "message" => "format must be csv, xlsx, or pdf"]);
+    }
+
+    $params = [":date_from" => $dateFrom, ":date_to" => $dateTo, ":today" => $today];
+    $shopSql = phase1_shop_scope_sql($roleName, $assignments, $requestedShopId, "i.shop_id", $params);
+
+    $where = "i.status <> 'VOID' AND DATE(COALESCE(i.issued_at, i.created_at)) BETWEEN :date_from AND :date_to";
+    if ($statusFilter === "PAID") {
+      $where .= " AND i.status = 'PAID'";
+    } elseif ($statusFilter === "UNPAID") {
+      $where .= " AND i.status <> 'PAID' AND i.balance > 0";
+    } elseif ($statusFilter === "OVERDUE") {
+      $where .= " AND i.due_date IS NOT NULL AND i.due_date < :today AND i.balance > 0";
+    }
+
+    $rows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT i.id, i.invoice_number, i.shop_id, s.code AS shop_code, s.name AS shop_name, " .
+        "i.status, i.issued_at, i.due_date, i.total_amount, i.paid_amount, i.balance, i.notes, " .
+        "c.mobile AS customer_mobile, c.first_name, c.last_name, " .
+        "DATE(COALESCE(i.issued_at, i.created_at)) AS invoice_date, " .
+        "CASE WHEN i.due_date IS NOT NULL AND i.due_date < :today AND i.balance > 0 AND i.status <> 'VOID' THEN 1 ELSE 0 END AS is_overdue " .
+      "FROM invoices i " .
+      "JOIN shops s ON s.id = i.shop_id " .
+      "JOIN customers c ON c.id = i.customer_id " .
+      "WHERE " . $where . $shopSql . " " .
+      "ORDER BY invoice_date DESC, i.created_at DESC " .
+      "LIMIT 300",
+      $params
+    );
+
+    $items = array_map(function ($row) {
+      $customerName = trim((string)($row["first_name"] ?? "") . " " . (string)($row["last_name"] ?? ""));
+      return [
+        "id" => (string)($row["id"] ?? ""),
+        "invoiceNumber" => (string)($row["invoice_number"] ?? ""),
+        "shopId" => (string)($row["shop_id"] ?? ""),
+        "shopCode" => (string)($row["shop_code"] ?? ""),
+        "shopName" => (string)($row["shop_name"] ?? ""),
+        "status" => (string)($row["status"] ?? ""),
+        "invoiceDate" => (string)($row["invoice_date"] ?? ""),
+        "issuedAt" => $row["issued_at"] ?? null,
+        "dueDate" => $row["due_date"] ?? null,
+        "customerMobileNumber" => (string)($row["customer_mobile"] ?? ""),
+        "customerName" => $customerName,
+        "totalAmount" => (int)($row["total_amount"] ?? 0),
+        "paidAmount" => (int)($row["paid_amount"] ?? 0),
+        "balance" => (int)($row["balance"] ?? 0),
+        "isOverdue" => (int)($row["is_overdue"] ?? 0) === 1,
+        "notes" => $row["notes"] ?? null,
+      ];
+    }, $rows);
+
+    $summary = [
+      "count" => count($items),
+      "totalAmount" => 0,
+      "paidAmount" => 0,
+      "balance" => 0,
+      "overdueCount" => 0,
+      "overdueBalance" => 0,
+    ];
+    foreach ($items as $inv) {
+      $summary["totalAmount"] += (int)$inv["totalAmount"];
+      $summary["paidAmount"] += (int)$inv["paidAmount"];
+      $summary["balance"] += (int)$inv["balance"];
+      if ($inv["isOverdue"]) {
+        $summary["overdueCount"] += 1;
+        $summary["overdueBalance"] += (int)$inv["balance"];
+      }
+    }
+
+    $payload = [
+      "status" => $statusFilter,
+      "dateFrom" => $dateFrom,
+      "dateTo" => $dateTo,
+      "shopId" => $requestedShopId !== "" ? $requestedShopId : null,
+      "items" => $items,
+      "summary" => $summary,
+    ];
+
+    if ($format === "") {
+      json_response(200, ["data" => $payload]);
+    }
+
+    $exportRows = [];
+    $exportRows[] = ["Invoice #", "Shop", "Customer", "Status", "Invoice Date", "Due Date", "Total (UGX)", "Paid", "Balance", "Overdue"];
+    foreach ($items as $inv) {
+      $exportRows[] = [
+        $inv["invoiceNumber"],
+        $inv["shopCode"],
+        $inv["customerName"],
+        $inv["status"],
+        $inv["invoiceDate"],
+        $inv["dueDate"] ?? "",
+        $inv["totalAmount"],
+        $inv["paidAmount"],
+        $inv["balance"],
+        $inv["isOverdue"] ? "YES" : "NO",
+      ];
+    }
+    $exportRows[] = ["TOTAL", "", "", "", "", "", $summary["totalAmount"], $summary["paidAmount"], $summary["balance"], ""];
+
+    $baseName = safe_filename("bdk_invoice_report_" . strtolower($statusFilter) . "_" . $dateFrom . "_to_" . $dateTo);
+    if ($format === "csv") {
+      file_response("text/csv; charset=utf-8", $baseName . ".csv", csv_bytes($exportRows));
+    }
+    if ($format === "xlsx") {
+      file_response("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", $baseName . ".xlsx", xlsx_bytes("Invoice Report", $exportRows));
+    }
+    $lines = text_table_lines($exportRows[0], array_slice($exportRows, 1), [6, 7, 8]);
+    file_response("application/pdf", $baseName . ".pdf", pdf_build("Invoice Report (" . $statusFilter . ") " . $dateFrom . " to " . $dateTo, $lines));
+  }
+
+  if ($method === "GET" && $route === "reports/expenses") {
+    phase1_require_role($roleName, ["ADMIN", "MANAGER"]);
+
+    $requestedShopId = isset($_GET["shopId"]) && is_string($_GET["shopId"]) ? trim($_GET["shopId"]) : "";
+    $range = phase1_resolve_date_range(
+      isset($_GET["dateFrom"]) && is_string($_GET["dateFrom"]) ? $_GET["dateFrom"] : null,
+      isset($_GET["dateTo"]) && is_string($_GET["dateTo"]) ? $_GET["dateTo"] : null,
+      30
+    );
+    $dateFrom = (string)$range["dateFrom"];
+    $dateTo = (string)$range["dateTo"];
+
+    $format = isset($_GET["format"]) && is_string($_GET["format"]) ? strtolower(trim($_GET["format"])) : "";
+    if ($format !== "" && !in_array($format, ["csv", "xlsx", "pdf"], true)) {
+      json_response(400, ["error" => "ValidationError", "message" => "format must be csv, xlsx, or pdf"]);
+    }
+
+    $params = [":date_from" => $dateFrom, ":date_to" => $dateTo];
+    $shopSql = phase1_shop_scope_sql($roleName, $assignments, $requestedShopId, "e.shop_id", $params);
+
+    $itemsRows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT e.id, e.shop_id, sh.code AS shop_code, sh.name AS shop_name, e.category_id, c.name AS category_name, " .
+        "e.amount_ugx, e.expense_date, e.notes, e.payment_source, e.paid_by_user_id, pu.full_name AS paid_by_full_name, " .
+        "e.recorded_by_user_id, ru.full_name AS recorded_by_full_name, e.created_at " .
+      "FROM expenses e " .
+      "JOIN shops sh ON sh.id = e.shop_id " .
+      "JOIN expense_categories c ON c.id = e.category_id " .
+      "LEFT JOIN users pu ON pu.id = e.paid_by_user_id " .
+      "LEFT JOIN users ru ON ru.id = e.recorded_by_user_id " .
+      "WHERE e.is_void = 0 AND e.expense_date BETWEEN :date_from AND :date_to" . $shopSql . " " .
+      "ORDER BY e.expense_date DESC, e.created_at DESC " .
+      "LIMIT 500",
+      $params
+    );
+
+    $items = array_map(function ($row) {
+      return [
+        "id" => (string)($row["id"] ?? ""),
+        "shopId" => (string)($row["shop_id"] ?? ""),
+        "shopCode" => (string)($row["shop_code"] ?? ""),
+        "shopName" => (string)($row["shop_name"] ?? ""),
+        "categoryId" => (string)($row["category_id"] ?? ""),
+        "categoryName" => (string)($row["category_name"] ?? ""),
+        "amountUGX" => (int)($row["amount_ugx"] ?? 0),
+        "expenseDate" => (string)($row["expense_date"] ?? ""),
+        "paymentSource" => (string)($row["payment_source"] ?? ""),
+        "paidByFullName" => $row["paid_by_full_name"] ?? null,
+        "recordedByFullName" => $row["recorded_by_full_name"] ?? null,
+        "notes" => $row["notes"] ?? null,
+        "createdAt" => (string)($row["created_at"] ?? ""),
+      ];
+    }, $itemsRows);
+
+    $byCategoryRows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT e.category_id, c.name AS category_name, COUNT(*) AS expense_count, COALESCE(SUM(e.amount_ugx), 0) AS total_amount " .
+      "FROM expenses e JOIN expense_categories c ON c.id = e.category_id " .
+      "WHERE e.is_void = 0 AND e.expense_date BETWEEN :date_from AND :date_to" . $shopSql . " " .
+      "GROUP BY e.category_id, c.name " .
+      "ORDER BY total_amount DESC",
+      $params
+    );
+
+    $byCategory = array_map(function ($row) {
+      return [
+        "categoryId" => (string)($row["category_id"] ?? ""),
+        "categoryName" => (string)($row["category_name"] ?? ""),
+        "expenseCount" => (int)($row["expense_count"] ?? 0),
+        "totalAmount" => (int)($row["total_amount"] ?? 0),
+      ];
+    }, $byCategoryRows);
+
+    $summary = [
+      "count" => count($items),
+      "totalAmount" => 0,
+      "salespersonCashAmount" => 0,
+      "adminBankAmount" => 0,
+    ];
+    foreach ($items as $exp) {
+      $summary["totalAmount"] += (int)$exp["amountUGX"];
+      if ($exp["paymentSource"] === "SALESPERSON_CASH") {
+        $summary["salespersonCashAmount"] += (int)$exp["amountUGX"];
+      } elseif ($exp["paymentSource"] === "ADMIN_BANK") {
+        $summary["adminBankAmount"] += (int)$exp["amountUGX"];
+      }
+    }
+
+    $payload = [
+      "dateFrom" => $dateFrom,
+      "dateTo" => $dateTo,
+      "shopId" => $requestedShopId !== "" ? $requestedShopId : null,
+      "items" => $items,
+      "byCategory" => $byCategory,
+      "summary" => $summary,
+    ];
+
+    if ($format === "") {
+      json_response(200, ["data" => $payload]);
+    }
+
+    $exportRows = [];
+    $exportRows[] = ["Date", "Shop", "Category", "Amount (UGX)", "Source", "Paid by", "Notes"];
+    foreach ($items as $exp) {
+      $exportRows[] = [
+        $exp["expenseDate"],
+        $exp["shopCode"],
+        $exp["categoryName"],
+        $exp["amountUGX"],
+        $exp["paymentSource"],
+        $exp["paymentSource"] === "SALESPERSON_CASH" ? ($exp["paidByFullName"] ?? "") : "",
+        $exp["notes"] ?? "",
+      ];
+    }
+    $exportRows[] = ["TOTAL", "", "", $summary["totalAmount"], "", "", ""];
+
+    $baseName = safe_filename("bdk_expense_report_" . $dateFrom . "_to_" . $dateTo);
+    if ($format === "csv") {
+      file_response("text/csv; charset=utf-8", $baseName . ".csv", csv_bytes($exportRows));
+    }
+    if ($format === "xlsx") {
+      file_response("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", $baseName . ".xlsx", xlsx_bytes("Expense Report", $exportRows));
+    }
+    $lines = text_table_lines($exportRows[0], array_slice($exportRows, 1), [3]);
+    file_response("application/pdf", $baseName . ".pdf", pdf_build("Expense Report " . $dateFrom . " to " . $dateTo, $lines));
+  }
+
+  if ($method === "GET" && $route === "reports/cash") {
+    phase1_require_role($roleName, ["ADMIN", "MANAGER"]);
+
+    $requestedShopId = isset($_GET["shopId"]) && is_string($_GET["shopId"]) ? trim($_GET["shopId"]) : "";
+    $range = phase1_resolve_date_range(
+      isset($_GET["dateFrom"]) && is_string($_GET["dateFrom"]) ? $_GET["dateFrom"] : null,
+      isset($_GET["dateTo"]) && is_string($_GET["dateTo"]) ? $_GET["dateTo"] : null,
+      30
+    );
+    $dateFrom = (string)$range["dateFrom"];
+    $dateTo = (string)$range["dateTo"];
+
+    $asOf = isset($_GET["asOf"]) && is_string($_GET["asOf"]) ? trim($_GET["asOf"]) : "";
+    if ($asOf === "") {
+      $asOf = $dateTo;
+    }
+    if (!is_valid_ymd_date($asOf)) {
+      json_response(400, ["error" => "ValidationError", "message" => "asOf must be YYYY-MM-DD"]);
+    }
+
+    $format = isset($_GET["format"]) && is_string($_GET["format"]) ? strtolower(trim($_GET["format"])) : "";
+    if ($format !== "" && !in_array($format, ["csv", "xlsx", "pdf"], true)) {
+      json_response(400, ["error" => "ValidationError", "message" => "format must be csv, xlsx, or pdf"]);
+    }
+
+    $params = [];
+    $shopSql = phase1_shop_scope_sql($roleName, $assignments, $requestedShopId, "a.shop_id", $params);
+
+    $usersRows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT DISTINCT u.id, u.full_name, sh.id AS shop_id, sh.code AS shop_code, sh.name AS shop_name " .
+      "FROM users u " .
+      "JOIN roles r ON r.id = u.role_id " .
+      "JOIN user_shop_assignment a ON a.user_id = u.id AND a.unassigned_at IS NULL AND a.is_primary = 1 " .
+      "JOIN shops sh ON sh.id = a.shop_id " .
+      "WHERE u.is_active = 1 AND r.name = 'SALES'" . $shopSql . " " .
+      "ORDER BY u.full_name ASC",
+      $params
+    );
+
+    $items = [];
+    $totals = [
+      "cashAtHand" => 0,
+      "bankedInRange" => 0,
+    ];
+
+    foreach ($usersRows as $row) {
+      if (!is_array($row)) {
+        continue;
+      }
+      $userId = (string)($row["id"] ?? "");
+      if ($userId === "") {
+        continue;
+      }
+
+      $summary = phase1_cash_summary_as_of($pdo, $userId, $asOf);
+
+      $bankedRow = phase1_db_fetch_one(
+        $pdo,
+        "SELECT COALESCE(SUM(amount_ugx), 0) AS total FROM banking_requests " .
+          "WHERE user_id = :user_id AND status = 'APPROVED' AND decided_at IS NOT NULL " .
+          "AND DATE(decided_at) BETWEEN :date_from AND :date_to",
+        [":user_id" => $userId, ":date_from" => $dateFrom, ":date_to" => $dateTo]
+      );
+      $bankedInRange = $bankedRow ? (int)($bankedRow["total"] ?? 0) : 0;
+
+      $items[] = [
+        "userId" => $userId,
+        "fullName" => (string)($row["full_name"] ?? ""),
+        "shopId" => (string)($row["shop_id"] ?? ""),
+        "shopCode" => (string)($row["shop_code"] ?? ""),
+        "shopName" => (string)($row["shop_name"] ?? ""),
+        "cashAtHandAsOf" => (int)($summary["cashAtHand"] ?? 0),
+        "bankedInRange" => $bankedInRange,
+      ];
+
+      $totals["cashAtHand"] += (int)($summary["cashAtHand"] ?? 0);
+      $totals["bankedInRange"] += $bankedInRange;
+    }
+
+    $payload = [
+      "asOf" => $asOf,
+      "dateFrom" => $dateFrom,
+      "dateTo" => $dateTo,
+      "shopId" => $requestedShopId !== "" ? $requestedShopId : null,
+      "items" => $items,
+      "totals" => $totals,
+    ];
+
+    if ($format === "") {
+      json_response(200, ["data" => $payload]);
+    }
+
+    $exportRows = [];
+    $exportRows[] = ["User", "Shop", "Cash at hand (as of)", "Banked (range)"];
+    foreach ($items as $item) {
+      $exportRows[] = [
+        $item["fullName"],
+        $item["shopCode"],
+        $item["cashAtHandAsOf"],
+        $item["bankedInRange"],
+      ];
+    }
+    $exportRows[] = ["TOTAL", "", $totals["cashAtHand"], $totals["bankedInRange"]];
+
+    $baseName = safe_filename("bdk_cash_report_asof_" . $asOf . "_" . $dateFrom . "_to_" . $dateTo);
+    if ($format === "csv") {
+      file_response("text/csv; charset=utf-8", $baseName . ".csv", csv_bytes($exportRows));
+    }
+    if ($format === "xlsx") {
+      file_response("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", $baseName . ".xlsx", xlsx_bytes("Cash Report", $exportRows));
+    }
+    $lines = text_table_lines($exportRows[0], array_slice($exportRows, 1), [2, 3]);
+    file_response("application/pdf", $baseName . ".pdf", pdf_build("Cash Report (as of " . $asOf . ") " . $dateFrom . " to " . $dateTo, $lines));
+  }
+
+  if ($method === "GET" && $route === "reports/pl") {
+    phase1_require_role($roleName, ["ADMIN", "MANAGER"]);
+
+    $requestedShopId = isset($_GET["shopId"]) && is_string($_GET["shopId"]) ? trim($_GET["shopId"]) : "";
+    $range = phase1_resolve_date_range(
+      isset($_GET["dateFrom"]) && is_string($_GET["dateFrom"]) ? $_GET["dateFrom"] : null,
+      isset($_GET["dateTo"]) && is_string($_GET["dateTo"]) ? $_GET["dateTo"] : null,
+      30
+    );
+    $dateFrom = (string)$range["dateFrom"];
+    $dateTo = (string)$range["dateTo"];
+
+    $format = isset($_GET["format"]) && is_string($_GET["format"]) ? strtolower(trim($_GET["format"])) : "";
+    if ($format !== "" && !in_array($format, ["csv", "xlsx", "pdf"], true)) {
+      json_response(400, ["error" => "ValidationError", "message" => "format must be csv, xlsx, or pdf"]);
+    }
+
+    $params = [":date_from" => $dateFrom, ":date_to" => $dateTo];
+    $salesShopSql = phase1_shop_scope_sql($roleName, $assignments, $requestedShopId, "s.shop_id", $params);
+    $expenseShopSql = phase1_shop_scope_sql($roleName, $assignments, $requestedShopId, "e.shop_id", $params);
+
+    $revRow = phase1_db_fetch_one(
+      $pdo,
+      "SELECT COALESCE(SUM(s.total_amount), 0) AS total_amount, COUNT(*) AS sale_count " .
+      "FROM sales s WHERE s.is_void = 0 AND s.sale_date BETWEEN :date_from AND :date_to" . $salesShopSql,
+      $params
+    );
+    $revenue = $revRow ? (int)($revRow["total_amount"] ?? 0) : 0;
+    $saleCount = $revRow ? (int)($revRow["sale_count"] ?? 0) : 0;
+
+    $revByMethodRows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT s.payment_method, COALESCE(SUM(s.total_amount), 0) AS total_amount " .
+      "FROM sales s WHERE s.is_void = 0 AND s.sale_date BETWEEN :date_from AND :date_to" . $salesShopSql . " " .
+      "GROUP BY s.payment_method ORDER BY total_amount DESC",
+      $params
+    );
+    $revenueByPaymentMethod = array_map(function ($row) {
+      return [
+        "paymentMethod" => (string)($row["payment_method"] ?? ""),
+        "totalAmount" => (int)($row["total_amount"] ?? 0),
+      ];
+    }, $revByMethodRows);
+
+    $expRow = phase1_db_fetch_one(
+      $pdo,
+      "SELECT COALESCE(SUM(e.amount_ugx), 0) AS total_amount, COUNT(*) AS expense_count " .
+      "FROM expenses e WHERE e.is_void = 0 AND e.expense_date BETWEEN :date_from AND :date_to" . $expenseShopSql,
+      $params
+    );
+    $expensesTotal = $expRow ? (int)($expRow["total_amount"] ?? 0) : 0;
+    $expenseCount = $expRow ? (int)($expRow["expense_count"] ?? 0) : 0;
+
+    $expBySourceRows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT e.payment_source, COALESCE(SUM(e.amount_ugx), 0) AS total_amount " .
+      "FROM expenses e WHERE e.is_void = 0 AND e.expense_date BETWEEN :date_from AND :date_to" . $expenseShopSql . " " .
+      "GROUP BY e.payment_source ORDER BY total_amount DESC",
+      $params
+    );
+    $expensesByPaymentSource = array_map(function ($row) {
+      return [
+        "paymentSource" => (string)($row["payment_source"] ?? ""),
+        "totalAmount" => (int)($row["total_amount"] ?? 0),
+      ];
+    }, $expBySourceRows);
+
+    $profit = $revenue - $expensesTotal;
+
+    $payload = [
+      "dateFrom" => $dateFrom,
+      "dateTo" => $dateTo,
+      "shopId" => $requestedShopId !== "" ? $requestedShopId : null,
+      "revenue" => $revenue,
+      "saleCount" => $saleCount,
+      "expenses" => $expensesTotal,
+      "expenseCount" => $expenseCount,
+      "profit" => $profit,
+      "revenueByPaymentMethod" => $revenueByPaymentMethod,
+      "expensesByPaymentSource" => $expensesByPaymentSource,
+    ];
+
+    if ($format === "") {
+      json_response(200, ["data" => $payload]);
+    }
+
+    $exportRows = [];
+    $exportRows[] = ["Metric", "Value"];
+    $exportRows[] = ["Revenue (UGX)", $revenue];
+    $exportRows[] = ["Expenses (UGX)", $expensesTotal];
+    $exportRows[] = ["Profit (UGX)", $profit];
+    $exportRows[] = ["Sales count", $saleCount];
+    $exportRows[] = ["Expense count", $expenseCount];
+    $exportRows[] = ["", ""];
+    $exportRows[] = ["Revenue by payment method", ""];
+    $exportRows[] = ["Payment method", "Total (UGX)"];
+    foreach ($revenueByPaymentMethod as $row) {
+      $exportRows[] = [$row["paymentMethod"], $row["totalAmount"]];
+    }
+    $exportRows[] = ["", ""];
+    $exportRows[] = ["Expenses by payment source", ""];
+    $exportRows[] = ["Payment source", "Total (UGX)"];
+    foreach ($expensesByPaymentSource as $row) {
+      $exportRows[] = [$row["paymentSource"], $row["totalAmount"]];
+    }
+
+    $baseName = safe_filename("bdk_pl_report_" . $dateFrom . "_to_" . $dateTo);
+    if ($format === "csv") {
+      file_response("text/csv; charset=utf-8", $baseName . ".csv", csv_bytes($exportRows));
+    }
+    if ($format === "xlsx") {
+      file_response("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", $baseName . ".xlsx", xlsx_bytes("P&L", $exportRows));
+    }
+    $pdfLines = [];
+    foreach ($exportRows as $r) {
+      if (!is_array($r)) {
+        continue;
+      }
+      $pdfLines[] = (string)($r[0] ?? "") . (isset($r[1]) && (string)$r[1] !== "" ? (": " . (string)$r[1]) : "");
+    }
+    file_response("application/pdf", $baseName . ".pdf", pdf_build("P&L Report " . $dateFrom . " to " . $dateTo, $pdfLines));
   }
 
   json_response(404, ["error" => "NotFound", "message" => "Route not found"]);

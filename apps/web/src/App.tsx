@@ -13,11 +13,21 @@ import {
   createProductCategory,
   decideBankingRequest,
   decideCashTransfer,
+  exportCashReport,
+  exportExpenseReport,
+  exportInvoiceReport,
+  exportPlReport,
+  exportSalesReport,
   getAdminCashOverview,
   getCashMe,
+  getCashReport,
+  getExpenseReport,
+  getInvoiceReport,
   getSale,
   getInvoice,
   getMe,
+  getPlReport,
+  getSalesReport,
   listBankingRequests,
   listCashRecipients,
   listCashTransfers,
@@ -49,19 +59,27 @@ import {
   type CashRecipient,
   type CashSummary,
   type CashTransfer,
+  type CashReport,
   type Customer,
   type Expense,
   type ExpenseCategory,
+  type ExpenseReport,
   type Invoice,
   type InvoiceDetail,
   type InvoicePayment,
+  type InvoiceReport,
+  type InvoiceReportStatus,
   type NotificationItem,
+  type PlReport,
   type Product,
   type ProductCategory,
+  type ReportExportFormat,
   type ReconciliationLock,
   type Sale,
   type SaleDetail,
   type SalePaymentMethod,
+  type SalesReport,
+  type SalesReportPeriod,
   type Shop
 } from "./lib/api";
 
@@ -70,8 +88,9 @@ type AuthState = {
   user: AuthUser;
 };
 
-type ActiveView = "overview" | "customers" | "invoices" | "sales" | "expenses" | "cash" | "master-data";
+type ActiveView = "overview" | "customers" | "invoices" | "sales" | "expenses" | "cash" | "reports" | "master-data";
 type MasterSection = "expense-categories" | "product-categories" | "products";
+type ReportSection = "sales" | "invoices" | "cash" | "expenses" | "pl";
 
 const AUTH_STORAGE_KEY = "bdk.auth.phase1.v1";
 
@@ -125,6 +144,15 @@ function todayLocalYmd(): string {
   return `${yyyy}-${mm}-${dd}`;
 }
 
+function daysAgoLocalYmd(daysAgo: number): string {
+  const date = new Date();
+  date.setDate(date.getDate() - daysAgo);
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
 export default function App(): JSX.Element {
   const [auth, setAuth] = useState<AuthState | null>(() => readStoredAuth());
   const [shops, setShops] = useState<Shop[]>([]);
@@ -132,6 +160,7 @@ export default function App(): JSX.Element {
 
   const [activeView, setActiveView] = useState<ActiveView>("overview");
   const [masterSection, setMasterSection] = useState<MasterSection>("expense-categories");
+  const [reportSection, setReportSection] = useState<ReportSection>("sales");
 
   const [expenseCategories, setExpenseCategories] = useState<ExpenseCategory[]>([]);
   const [productCategories, setProductCategories] = useState<ProductCategory[]>([]);
@@ -265,6 +294,69 @@ export default function App(): JSX.Element {
     notes: ""
   });
 
+  const [reportsBusy, setReportsBusy] = useState(false);
+  const [salesReport, setSalesReport] = useState<SalesReport | null>(null);
+  const [invoiceReport, setInvoiceReport] = useState<InvoiceReport | null>(null);
+  const [cashReport, setCashReport] = useState<CashReport | null>(null);
+  const [expenseReport, setExpenseReport] = useState<ExpenseReport | null>(null);
+  const [plReport, setPlReport] = useState<PlReport | null>(null);
+
+  const [salesReportFilters, setSalesReportFilters] = useState<{
+    shopId: string;
+    period: SalesReportPeriod;
+    dateFrom: string;
+    dateTo: string;
+  }>({
+    shopId: "",
+    period: "daily",
+    dateFrom: daysAgoLocalYmd(29),
+    dateTo: todayLocalYmd()
+  });
+
+  const [invoiceReportFilters, setInvoiceReportFilters] = useState<{
+    shopId: string;
+    status: InvoiceReportStatus;
+    dateFrom: string;
+    dateTo: string;
+  }>({
+    shopId: "",
+    status: "ALL",
+    dateFrom: daysAgoLocalYmd(29),
+    dateTo: todayLocalYmd()
+  });
+
+  const [cashReportFilters, setCashReportFilters] = useState<{
+    shopId: string;
+    asOf: string;
+    dateFrom: string;
+    dateTo: string;
+  }>({
+    shopId: "",
+    asOf: todayLocalYmd(),
+    dateFrom: daysAgoLocalYmd(29),
+    dateTo: todayLocalYmd()
+  });
+
+  const [expenseReportFilters, setExpenseReportFilters] = useState<{
+    shopId: string;
+    dateFrom: string;
+    dateTo: string;
+  }>({
+    shopId: "",
+    dateFrom: daysAgoLocalYmd(29),
+    dateTo: todayLocalYmd()
+  });
+
+  const [plReportFilters, setPlReportFilters] = useState<{
+    shopId: string;
+    dateFrom: string;
+    dateTo: string;
+  }>({
+    shopId: "",
+    dateFrom: daysAgoLocalYmd(29),
+    dateTo: todayLocalYmd()
+  });
+
   const [masterBusy, setMasterBusy] = useState(false);
   const [editingExpenseCategoryId, setEditingExpenseCategoryId] = useState<string | null>(null);
   const [editingExpenseCategoryForm, setEditingExpenseCategoryForm] = useState<{
@@ -341,6 +433,7 @@ export default function App(): JSX.Element {
   const canVoidExpenses = authUser?.role === "ADMIN";
   const canViewCash = authUser?.role === "ADMIN" || authUser?.role === "MANAGER" || authUser?.role === "SALES";
   const canApproveBanking = authUser?.role === "ADMIN";
+  const canViewReports = authUser?.role === "ADMIN" || authUser?.role === "MANAGER";
 
   const shopCodesForUser = useMemo(() => {
     const map = new Map<string, string>();
@@ -378,6 +471,11 @@ export default function App(): JSX.Element {
     setBankingRequests([]);
     setNotifications([]);
     setAdminCashOverview(null);
+    setSalesReport(null);
+    setInvoiceReport(null);
+    setCashReport(null);
+    setExpenseReport(null);
+    setPlReport(null);
     setSuccess(null);
     setError(message ?? null);
   }
@@ -453,6 +551,11 @@ export default function App(): JSX.Element {
         setNewExpenseForm((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
         setAdminCashFilters((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
         setNewTransferForm((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
+        setSalesReportFilters((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
+        setInvoiceReportFilters((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
+        setCashReportFilters((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
+        setExpenseReportFilters((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
+        setPlReportFilters((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
       } catch (caught: unknown) {
         if (!cancelled) {
           setError(caught instanceof Error ? caught.message : "Failed to load data");
@@ -1126,6 +1229,177 @@ export default function App(): JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeView, auth?.token, canViewCash, authUser?.role, newTransferForm.shopId]);
 
+  function triggerBrowserDownload(blob: Blob, filename: string): void {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename || "download";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  async function refreshReportsData(): Promise<void> {
+    if (!auth || !canViewReports) {
+      return;
+    }
+    setReportsBusy(true);
+    setError(null);
+    try {
+      if (reportSection === "sales") {
+        const report = await getSalesReport(auth.token, {
+          period: salesReportFilters.period,
+          shopId: salesReportFilters.shopId || undefined,
+          dateFrom: salesReportFilters.dateFrom || undefined,
+          dateTo: salesReportFilters.dateTo || undefined
+        });
+        setSalesReport(report);
+      } else if (reportSection === "invoices") {
+        const report = await getInvoiceReport(auth.token, {
+          status: invoiceReportFilters.status,
+          shopId: invoiceReportFilters.shopId || undefined,
+          dateFrom: invoiceReportFilters.dateFrom || undefined,
+          dateTo: invoiceReportFilters.dateTo || undefined
+        });
+        setInvoiceReport(report);
+      } else if (reportSection === "cash") {
+        const report = await getCashReport(auth.token, {
+          shopId: cashReportFilters.shopId || undefined,
+          asOf: cashReportFilters.asOf || undefined,
+          dateFrom: cashReportFilters.dateFrom || undefined,
+          dateTo: cashReportFilters.dateTo || undefined
+        });
+        setCashReport(report);
+      } else if (reportSection === "expenses") {
+        const report = await getExpenseReport(auth.token, {
+          shopId: expenseReportFilters.shopId || undefined,
+          dateFrom: expenseReportFilters.dateFrom || undefined,
+          dateTo: expenseReportFilters.dateTo || undefined
+        });
+        setExpenseReport(report);
+      } else if (reportSection === "pl") {
+        const report = await getPlReport(auth.token, {
+          shopId: plReportFilters.shopId || undefined,
+          dateFrom: plReportFilters.dateFrom || undefined,
+          dateTo: plReportFilters.dateTo || undefined
+        });
+        setPlReport(report);
+      }
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to load report");
+    } finally {
+      setReportsBusy(false);
+    }
+  }
+
+  async function exportCurrentReport(format: ReportExportFormat): Promise<void> {
+    if (!auth || !canViewReports) {
+      return;
+    }
+    setReportsBusy(true);
+    setError(null);
+    try {
+      if (reportSection === "sales") {
+        const file = await exportSalesReport(
+          auth.token,
+          {
+            period: salesReportFilters.period,
+            shopId: salesReportFilters.shopId || undefined,
+            dateFrom: salesReportFilters.dateFrom || undefined,
+            dateTo: salesReportFilters.dateTo || undefined
+          },
+          format
+        );
+        triggerBrowserDownload(file.blob, file.filename);
+      } else if (reportSection === "invoices") {
+        const file = await exportInvoiceReport(
+          auth.token,
+          {
+            status: invoiceReportFilters.status,
+            shopId: invoiceReportFilters.shopId || undefined,
+            dateFrom: invoiceReportFilters.dateFrom || undefined,
+            dateTo: invoiceReportFilters.dateTo || undefined
+          },
+          format
+        );
+        triggerBrowserDownload(file.blob, file.filename);
+      } else if (reportSection === "cash") {
+        const file = await exportCashReport(
+          auth.token,
+          {
+            shopId: cashReportFilters.shopId || undefined,
+            asOf: cashReportFilters.asOf || undefined,
+            dateFrom: cashReportFilters.dateFrom || undefined,
+            dateTo: cashReportFilters.dateTo || undefined
+          },
+          format
+        );
+        triggerBrowserDownload(file.blob, file.filename);
+      } else if (reportSection === "expenses") {
+        const file = await exportExpenseReport(
+          auth.token,
+          {
+            shopId: expenseReportFilters.shopId || undefined,
+            dateFrom: expenseReportFilters.dateFrom || undefined,
+            dateTo: expenseReportFilters.dateTo || undefined
+          },
+          format
+        );
+        triggerBrowserDownload(file.blob, file.filename);
+      } else if (reportSection === "pl") {
+        const file = await exportPlReport(
+          auth.token,
+          {
+            shopId: plReportFilters.shopId || undefined,
+            dateFrom: plReportFilters.dateFrom || undefined,
+            dateTo: plReportFilters.dateTo || undefined
+          },
+          format
+        );
+        triggerBrowserDownload(file.blob, file.filename);
+      }
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to export report");
+    } finally {
+      setReportsBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!auth || !canViewReports) {
+      return;
+    }
+    if (activeView !== "reports") {
+      return;
+    }
+    void refreshReportsData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    activeView,
+    auth?.token,
+    canViewReports,
+    reportSection,
+    salesReportFilters.shopId,
+    salesReportFilters.period,
+    salesReportFilters.dateFrom,
+    salesReportFilters.dateTo,
+    invoiceReportFilters.shopId,
+    invoiceReportFilters.status,
+    invoiceReportFilters.dateFrom,
+    invoiceReportFilters.dateTo,
+    cashReportFilters.shopId,
+    cashReportFilters.asOf,
+    cashReportFilters.dateFrom,
+    cashReportFilters.dateTo,
+    expenseReportFilters.shopId,
+    expenseReportFilters.dateFrom,
+    expenseReportFilters.dateTo,
+    plReportFilters.shopId,
+    plReportFilters.dateFrom,
+    plReportFilters.dateTo
+  ]);
+
   async function submitLogin(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     setError(null);
@@ -1328,7 +1602,7 @@ export default function App(): JSX.Element {
         <p className="eyebrow">BDK Photography</p>
         <h1>Business Management System</h1>
         <p className="subtitle">
-          Phases 1-6: authentication (JWT), master data, customers, invoices/payments, sales POS, reconciliation locks, expenses, and cash tracking.
+          Phases 1-7: authentication (JWT), master data, customers, invoices/payments, sales POS, reconciliation locks, expenses, cash tracking, and reports/exports.
         </p>
 
         <div className="divider" style={{ background: "rgba(255,255,255,0.22)" }} />
@@ -1405,6 +1679,15 @@ export default function App(): JSX.Element {
               Cash
             </button>
           ) : null}
+          {canViewReports ? (
+            <button
+              className={`tab ${activeView === "reports" ? "isActive" : ""}`}
+              type="button"
+              onClick={() => setActiveView("reports")}
+            >
+              Reports
+            </button>
+          ) : null}
           {canManageMasterData ? (
             <button
               className={`tab ${activeView === "master-data" ? "isActive" : ""}`}
@@ -1465,9 +1748,10 @@ export default function App(): JSX.Element {
                 <li>Phase 4: Sales (POS) + daily reconciliation locks</li>
                 <li>Phase 5: Expenses (payment source: salesperson cash vs admin/bank)</li>
                 <li>Phase 6: Cash tracking (cash at hand, transfers, banking approvals, notifications)</li>
+                <li>Phase 7: Reports + exports (CSV / Excel / PDF)</li>
               </ul>
               <div className="note">
-                Next phases will add workshop production, inventory/transfers, messaging, reporting, and the capital dashboard.
+                Next phases will add workshop production, inventory/transfers, messaging, and the capital dashboard.
               </div>
             </section>
           </>
@@ -3547,6 +3831,608 @@ export default function App(): JSX.Element {
                 </table>
               </div>
             </section>
+          </>
+        ) : activeView === "reports" ? (
+          <>
+            <section className="card" style={{ gridColumn: "1 / -1" }}>
+              <h2>Phase 7: Reports + Exports</h2>
+              <p className="hint">Core reports with filters (shop/date range) and exports to CSV, Excel (XLSX), and PDF.</p>
+
+              <div className="tabs" style={{ marginTop: "0.9rem" }}>
+                <button className={`tab ${reportSection === "sales" ? "isActive" : ""}`} type="button" onClick={() => setReportSection("sales")}>
+                  Sales
+                </button>
+                <button className={`tab ${reportSection === "invoices" ? "isActive" : ""}`} type="button" onClick={() => setReportSection("invoices")}>
+                  Invoices
+                </button>
+                <button className={`tab ${reportSection === "cash" ? "isActive" : ""}`} type="button" onClick={() => setReportSection("cash")}>
+                  Cash
+                </button>
+                <button className={`tab ${reportSection === "expenses" ? "isActive" : ""}`} type="button" onClick={() => setReportSection("expenses")}>
+                  Expenses
+                </button>
+                <button className={`tab ${reportSection === "pl" ? "isActive" : ""}`} type="button" onClick={() => setReportSection("pl")}>
+                  P&amp;L
+                </button>
+              </div>
+
+              <div style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap", marginTop: "1rem" }}>
+                <button type="button" data-variant="ghost" onClick={() => void refreshReportsData()} disabled={reportsBusy}>
+                  {reportsBusy ? "Refreshing..." : "Refresh"}
+                </button>
+                <button type="button" data-variant="ghost" onClick={() => void exportCurrentReport("csv")} disabled={reportsBusy}>
+                  Export CSV
+                </button>
+                <button type="button" data-variant="ghost" onClick={() => void exportCurrentReport("xlsx")} disabled={reportsBusy}>
+                  Export Excel
+                </button>
+                <button type="button" data-variant="ghost" onClick={() => void exportCurrentReport("pdf")} disabled={reportsBusy}>
+                  Export PDF
+                </button>
+              </div>
+            </section>
+
+            {reportSection === "sales" ? (
+              <>
+                <section className="card">
+                  <h2>Sales Report</h2>
+                  <form
+                    className="form"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void refreshReportsData();
+                    }}
+                  >
+                    <label>
+                      Shop
+                      <select value={salesReportFilters.shopId} onChange={(event) => setSalesReportFilters((prev) => ({ ...prev, shopId: event.target.value }))}>
+                        <option value="">All shops</option>
+                        {shops.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.code} - {s.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Period
+                      <select
+                        value={salesReportFilters.period}
+                        onChange={(event) => setSalesReportFilters((prev) => ({ ...prev, period: event.target.value as SalesReportPeriod }))}
+                      >
+                        <option value="daily">Daily</option>
+                        <option value="weekly">Weekly</option>
+                        <option value="monthly">Monthly</option>
+                        <option value="quarterly">Quarterly</option>
+                      </select>
+                    </label>
+                    <label>
+                      Date from
+                      <input type="date" value={salesReportFilters.dateFrom} onChange={(event) => setSalesReportFilters((prev) => ({ ...prev, dateFrom: event.target.value }))} />
+                    </label>
+                    <label>
+                      Date to
+                      <input type="date" value={salesReportFilters.dateTo} onChange={(event) => setSalesReportFilters((prev) => ({ ...prev, dateTo: event.target.value }))} />
+                    </label>
+                    <button type="submit" disabled={reportsBusy}>
+                      {reportsBusy ? "Loading..." : "Run"}
+                    </button>
+                  </form>
+                </section>
+
+                <section className="card">
+                  <h2>Totals</h2>
+                  {salesReport ? (
+                    <ul className="stack">
+                      <li>
+                        <strong>Sales:</strong> {salesReport.totals.saleCount}
+                      </li>
+                      <li>
+                        <strong>Total revenue (UGX):</strong> {salesReport.totals.totalAmount}
+                      </li>
+                      <li>
+                        <strong>Cash:</strong> {salesReport.totals.cashAmount}
+                      </li>
+                      <li>
+                        <strong>Mobile Money:</strong> {salesReport.totals.mobileMoneyAmount}
+                      </li>
+                      <li>
+                        <strong>Card:</strong> {salesReport.totals.cardAmount}
+                      </li>
+                      <li>
+                        <strong>Credit:</strong> {salesReport.totals.creditAmount}
+                      </li>
+                    </ul>
+                  ) : (
+                    <p className="hint">Run the report to see totals.</p>
+                  )}
+                </section>
+
+                <section className="card" style={{ gridColumn: "1 / -1" }}>
+                  <h2>Results</h2>
+                  <div className="tableWrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Start</th>
+                          <th>End</th>
+                          <th className="right">Sales</th>
+                          <th className="right">Total</th>
+                          <th className="right">Cash</th>
+                          <th className="right">MM</th>
+                          <th className="right">Card</th>
+                          <th className="right">Credit</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {salesReport?.periods?.length ? (
+                          salesReport.periods.map((row) => (
+                            <tr key={`${row.periodStart}-${row.periodEnd}`}>
+                              <td>{row.periodStart}</td>
+                              <td>{row.periodEnd}</td>
+                              <td className="right">{row.saleCount}</td>
+                              <td className="right">{row.totalAmount}</td>
+                              <td className="right">{row.cashAmount}</td>
+                              <td className="right">{row.mobileMoneyAmount}</td>
+                              <td className="right">{row.cardAmount}</td>
+                              <td className="right">{row.creditAmount}</td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan={8}>No results.</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              </>
+            ) : reportSection === "invoices" ? (
+              <>
+                <section className="card">
+                  <h2>Invoice Report</h2>
+                  <form
+                    className="form"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void refreshReportsData();
+                    }}
+                  >
+                    <label>
+                      Shop
+                      <select value={invoiceReportFilters.shopId} onChange={(event) => setInvoiceReportFilters((prev) => ({ ...prev, shopId: event.target.value }))}>
+                        <option value="">All shops</option>
+                        {shops.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.code} - {s.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Status
+                      <select
+                        value={invoiceReportFilters.status}
+                        onChange={(event) => setInvoiceReportFilters((prev) => ({ ...prev, status: event.target.value as InvoiceReportStatus }))}
+                      >
+                        <option value="ALL">All</option>
+                        <option value="PAID">Paid</option>
+                        <option value="UNPAID">Unpaid</option>
+                        <option value="OVERDUE">Overdue</option>
+                      </select>
+                    </label>
+                    <label>
+                      Date from
+                      <input type="date" value={invoiceReportFilters.dateFrom} onChange={(event) => setInvoiceReportFilters((prev) => ({ ...prev, dateFrom: event.target.value }))} />
+                    </label>
+                    <label>
+                      Date to
+                      <input type="date" value={invoiceReportFilters.dateTo} onChange={(event) => setInvoiceReportFilters((prev) => ({ ...prev, dateTo: event.target.value }))} />
+                    </label>
+                    <button type="submit" disabled={reportsBusy}>
+                      {reportsBusy ? "Loading..." : "Run"}
+                    </button>
+                  </form>
+                </section>
+
+                <section className="card">
+                  <h2>Totals</h2>
+                  {invoiceReport ? (
+                    <ul className="stack">
+                      <li>
+                        <strong>Invoices:</strong> {invoiceReport.summary.count}
+                      </li>
+                      <li>
+                        <strong>Total (UGX):</strong> {invoiceReport.summary.totalAmount}
+                      </li>
+                      <li>
+                        <strong>Paid:</strong> {invoiceReport.summary.paidAmount}
+                      </li>
+                      <li>
+                        <strong>Balance:</strong> {invoiceReport.summary.balance}
+                      </li>
+                      <li>
+                        <strong>Overdue:</strong> {invoiceReport.summary.overdueCount} (UGX {invoiceReport.summary.overdueBalance})
+                      </li>
+                    </ul>
+                  ) : (
+                    <p className="hint">Run the report to see totals.</p>
+                  )}
+                </section>
+
+                <section className="card" style={{ gridColumn: "1 / -1" }}>
+                  <h2>Results</h2>
+                  <div className="tableWrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Invoice</th>
+                          <th>Shop</th>
+                          <th>Customer</th>
+                          <th>Status</th>
+                          <th>Invoice date</th>
+                          <th>Due</th>
+                          <th className="right">Total</th>
+                          <th className="right">Paid</th>
+                          <th className="right">Balance</th>
+                          <th>Overdue</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {invoiceReport?.items?.length ? (
+                          invoiceReport.items.map((inv) => (
+                            <tr key={inv.id} style={{ opacity: inv.isOverdue ? 1 : 0.95 }}>
+                              <td>{inv.invoiceNumber}</td>
+                              <td>{inv.shopCode}</td>
+                              <td>{inv.customerName}</td>
+                              <td>{inv.status}</td>
+                              <td>{inv.invoiceDate}</td>
+                              <td>{inv.dueDate ?? "-"}</td>
+                              <td className="right">{inv.totalAmount}</td>
+                              <td className="right">{inv.paidAmount}</td>
+                              <td className="right">{inv.balance}</td>
+                              <td>{inv.isOverdue ? "YES" : "NO"}</td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan={10}>No results.</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              </>
+            ) : reportSection === "cash" ? (
+              <>
+                <section className="card">
+                  <h2>Cash Report</h2>
+                  <p className="hint">Cash at hand is computed as of the selected date; banked totals respect the date range.</p>
+                  <form
+                    className="form"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void refreshReportsData();
+                    }}
+                  >
+                    <label>
+                      Shop
+                      <select value={cashReportFilters.shopId} onChange={(event) => setCashReportFilters((prev) => ({ ...prev, shopId: event.target.value }))}>
+                        <option value="">All shops</option>
+                        {shops.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.code} - {s.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      As of
+                      <input type="date" value={cashReportFilters.asOf} onChange={(event) => setCashReportFilters((prev) => ({ ...prev, asOf: event.target.value }))} />
+                    </label>
+                    <label>
+                      Date from
+                      <input type="date" value={cashReportFilters.dateFrom} onChange={(event) => setCashReportFilters((prev) => ({ ...prev, dateFrom: event.target.value }))} />
+                    </label>
+                    <label>
+                      Date to
+                      <input type="date" value={cashReportFilters.dateTo} onChange={(event) => setCashReportFilters((prev) => ({ ...prev, dateTo: event.target.value }))} />
+                    </label>
+                    <button type="submit" disabled={reportsBusy}>
+                      {reportsBusy ? "Loading..." : "Run"}
+                    </button>
+                  </form>
+                </section>
+
+                <section className="card">
+                  <h2>Totals</h2>
+                  {cashReport ? (
+                    <ul className="stack">
+                      <li>
+                        <strong>Cash at hand (as of):</strong> UGX {cashReport.totals.cashAtHand}
+                      </li>
+                      <li>
+                        <strong>Banked (range):</strong> UGX {cashReport.totals.bankedInRange}
+                      </li>
+                    </ul>
+                  ) : (
+                    <p className="hint">Run the report to see totals.</p>
+                  )}
+                </section>
+
+                <section className="card" style={{ gridColumn: "1 / -1" }}>
+                  <h2>Results</h2>
+                  <div className="tableWrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>User</th>
+                          <th>Shop</th>
+                          <th className="right">Cash at hand</th>
+                          <th className="right">Banked (range)</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {cashReport?.items?.length ? (
+                          cashReport.items.map((item) => (
+                            <tr key={item.userId}>
+                              <td>{item.fullName}</td>
+                              <td>{item.shopCode}</td>
+                              <td className="right">{item.cashAtHandAsOf}</td>
+                              <td className="right">{item.bankedInRange}</td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan={4}>No results.</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              </>
+            ) : reportSection === "expenses" ? (
+              <>
+                <section className="card">
+                  <h2>Expense Report</h2>
+                  <form
+                    className="form"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void refreshReportsData();
+                    }}
+                  >
+                    <label>
+                      Shop
+                      <select value={expenseReportFilters.shopId} onChange={(event) => setExpenseReportFilters((prev) => ({ ...prev, shopId: event.target.value }))}>
+                        <option value="">All shops</option>
+                        {shops.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.code} - {s.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Date from
+                      <input type="date" value={expenseReportFilters.dateFrom} onChange={(event) => setExpenseReportFilters((prev) => ({ ...prev, dateFrom: event.target.value }))} />
+                    </label>
+                    <label>
+                      Date to
+                      <input type="date" value={expenseReportFilters.dateTo} onChange={(event) => setExpenseReportFilters((prev) => ({ ...prev, dateTo: event.target.value }))} />
+                    </label>
+                    <button type="submit" disabled={reportsBusy}>
+                      {reportsBusy ? "Loading..." : "Run"}
+                    </button>
+                  </form>
+                </section>
+
+                <section className="card">
+                  <h2>Totals</h2>
+                  {expenseReport ? (
+                    <ul className="stack">
+                      <li>
+                        <strong>Expenses:</strong> {expenseReport.summary.count}
+                      </li>
+                      <li>
+                        <strong>Total (UGX):</strong> {expenseReport.summary.totalAmount}
+                      </li>
+                      <li>
+                        <strong>Salesperson cash:</strong> {expenseReport.summary.salespersonCashAmount}
+                      </li>
+                      <li>
+                        <strong>Admin/bank:</strong> {expenseReport.summary.adminBankAmount}
+                      </li>
+                    </ul>
+                  ) : (
+                    <p className="hint">Run the report to see totals.</p>
+                  )}
+                </section>
+
+                <section className="card" style={{ gridColumn: "1 / -1" }}>
+                  <h2>By Category</h2>
+                  <div className="tableWrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Category</th>
+                          <th className="right">Count</th>
+                          <th className="right">Total</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {expenseReport?.byCategory?.length ? (
+                          expenseReport.byCategory.map((row) => (
+                            <tr key={row.categoryId}>
+                              <td>{row.categoryName}</td>
+                              <td className="right">{row.expenseCount}</td>
+                              <td className="right">{row.totalAmount}</td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan={3}>No results.</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+
+                <section className="card" style={{ gridColumn: "1 / -1" }}>
+                  <h2>Items</h2>
+                  <div className="tableWrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Date</th>
+                          <th>Shop</th>
+                          <th>Category</th>
+                          <th className="right">Amount</th>
+                          <th>Source</th>
+                          <th>Paid by</th>
+                          <th>Notes</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {expenseReport?.items?.length ? (
+                          expenseReport.items.map((exp) => (
+                            <tr key={exp.id}>
+                              <td>{exp.expenseDate}</td>
+                              <td>{exp.shopCode}</td>
+                              <td>{exp.categoryName}</td>
+                              <td className="right">{exp.amountUGX}</td>
+                              <td>{exp.paymentSource}</td>
+                              <td>{exp.paymentSource === "SALESPERSON_CASH" ? exp.paidByFullName ?? "-" : "-"}</td>
+                              <td>{exp.notes ?? "-"}</td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan={7}>No results.</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              </>
+            ) : (
+              <>
+                <section className="card">
+                  <h2>P&amp;L (v1 simple)</h2>
+                  <p className="hint">Revenue (sales) − expenses for the selected date range.</p>
+                  <form
+                    className="form"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void refreshReportsData();
+                    }}
+                  >
+                    <label>
+                      Shop
+                      <select value={plReportFilters.shopId} onChange={(event) => setPlReportFilters((prev) => ({ ...prev, shopId: event.target.value }))}>
+                        <option value="">All shops</option>
+                        {shops.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.code} - {s.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Date from
+                      <input type="date" value={plReportFilters.dateFrom} onChange={(event) => setPlReportFilters((prev) => ({ ...prev, dateFrom: event.target.value }))} />
+                    </label>
+                    <label>
+                      Date to
+                      <input type="date" value={plReportFilters.dateTo} onChange={(event) => setPlReportFilters((prev) => ({ ...prev, dateTo: event.target.value }))} />
+                    </label>
+                    <button type="submit" disabled={reportsBusy}>
+                      {reportsBusy ? "Loading..." : "Run"}
+                    </button>
+                  </form>
+                </section>
+
+                <section className="card">
+                  <h2>Totals</h2>
+                  {plReport ? (
+                    <ul className="stack">
+                      <li>
+                        <strong>Revenue (UGX):</strong> {plReport.revenue} ({plReport.saleCount} sales)
+                      </li>
+                      <li>
+                        <strong>Expenses (UGX):</strong> {plReport.expenses} ({plReport.expenseCount} expenses)
+                      </li>
+                      <li>
+                        <strong>Profit (UGX):</strong> {plReport.profit}
+                      </li>
+                    </ul>
+                  ) : (
+                    <p className="hint">Run the report to see totals.</p>
+                  )}
+                </section>
+
+                <section className="card" style={{ gridColumn: "1 / -1" }}>
+                  <h2>Revenue Breakdown</h2>
+                  <div className="tableWrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Payment method</th>
+                          <th className="right">Total (UGX)</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {plReport?.revenueByPaymentMethod?.length ? (
+                          plReport.revenueByPaymentMethod.map((row) => (
+                            <tr key={row.paymentMethod}>
+                              <td>{row.paymentMethod}</td>
+                              <td className="right">{row.totalAmount}</td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan={2}>No results.</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+
+                <section className="card" style={{ gridColumn: "1 / -1" }}>
+                  <h2>Expense Breakdown</h2>
+                  <div className="tableWrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Payment source</th>
+                          <th className="right">Total (UGX)</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {plReport?.expensesByPaymentSource?.length ? (
+                          plReport.expensesByPaymentSource.map((row) => (
+                            <tr key={row.paymentSource}>
+                              <td>{row.paymentSource}</td>
+                              <td className="right">{row.totalAmount}</td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan={2}>No results.</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              </>
+            )}
           </>
         ) : (
           <>
