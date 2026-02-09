@@ -55,6 +55,7 @@ The production deployment uses the PHP API in `api/index.php` and MySQL (Phase 1
    - `php scripts/migrate_phase6_cash_tracking.php`
    - `php scripts/migrate_phase8_inventory_workshop.php`
    - `php scripts/migrate_phase9_messaging_notifications.php`
+   - `php scripts/migrate_phase10_user_passwords.php` (password reset + optional user emails)
 
 ### Demo Logins (Seeded)
 
