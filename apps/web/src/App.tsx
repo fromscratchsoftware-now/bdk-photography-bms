@@ -746,6 +746,39 @@ export default function App(): JSX.Element {
     return map;
   }, [users]);
 
+  // Keep hook ordering stable even while `booting` shows the early loading UI.
+  const filteredInvoices = useMemo(() => {
+    const q = invoiceSearch.trim().toLowerCase();
+    if (!q) {
+      return invoices;
+    }
+    return invoices.filter((inv) => {
+      const haystack = [
+        inv.invoiceNumber,
+        inv.shopCode,
+        inv.customerFirstName,
+        inv.customerLastName,
+        inv.customerMobileNumber ?? "",
+        inv.status
+      ]
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [invoices, invoiceSearch]);
+
+  const activeCustomerOptions = useMemo(
+    () =>
+      customers
+        .filter((c) => c.isActive)
+        .map((c) => ({
+          value: c.id,
+          label: `${c.firstName} ${c.lastName} • ${c.mobileNumber}`,
+          keywords: `${c.mobileNumber} ${c.firstName} ${c.lastName} ${c.email ?? ""}`
+        })),
+    [customers]
+  );
+
   function clearSession(message?: string): void {
     setAuth(null);
     writeStoredAuth(null);
@@ -2282,10 +2315,10 @@ export default function App(): JSX.Element {
                   ? "Capital"
                   : "P&L";
 
-  const topbarTitle = !authUser
-    ? "BDK Photography BMS"
-    : activeView === "overview"
-      ? "Dashboard"
+	  const topbarTitle = !authUser
+	    ? "BDK Photography BMS"
+	    : activeView === "overview"
+	      ? "Dashboard"
       : activeView === "inventory"
         ? "Projects"
         : activeView === "sales"
@@ -2301,43 +2334,11 @@ export default function App(): JSX.Element {
                   : activeView === "reports"
                     ? `Reports · ${reportTitle}`
                     : activeView === "messaging"
-                      ? "Messaging"
-                      : "Master Data";
+	                      ? "Messaging"
+	                      : "Master Data";
 
-  const filteredInvoices = useMemo(() => {
-    const q = invoiceSearch.trim().toLowerCase();
-    if (!q) {
-      return invoices;
-    }
-    return invoices.filter((inv) => {
-      const haystack = [
-        inv.invoiceNumber,
-        inv.shopCode,
-        inv.customerFirstName,
-        inv.customerLastName,
-        inv.customerMobileNumber ?? "",
-        inv.status
-      ]
-        .join(" ")
-        .toLowerCase();
-      return haystack.includes(q);
-    });
-  }, [invoices, invoiceSearch]);
-
-  const activeCustomerOptions = useMemo(
-    () =>
-      customers
-        .filter((c) => c.isActive)
-        .map((c) => ({
-          value: c.id,
-          label: `${c.firstName} ${c.lastName} • ${c.mobileNumber}`,
-          keywords: `${c.mobileNumber} ${c.firstName} ${c.lastName} ${c.email ?? ""}`
-        })),
-    [customers]
-  );
-
-  return (
-    <div className={cx("appShell", !authUser && "appShell--loggedOut")}>
+	  return (
+	    <div className={cx("appShell", !authUser && "appShell--loggedOut")}>
       {authUser ? (
         <>
           {sidebarOpen ? <div className="sidebarOverlay" onClick={() => setSidebarOpen(false)} /> : null}
