@@ -114,6 +114,31 @@ export interface ExpenseCategory {
   updatedAt: string;
 }
 
+export type ExpensePaymentSource = "SALESPERSON_CASH" | "ADMIN_BANK";
+
+export interface Expense {
+  id: string;
+  shopId: string;
+  shopCode: string;
+  shopName: string;
+  categoryId: string;
+  categoryName: string;
+  amountUGX: number;
+  expenseDate: string;
+  notes?: string | null;
+  paymentSource: ExpensePaymentSource;
+  paidByUserId?: string | null;
+  paidByFullName?: string | null;
+  recordedByUserId?: string | null;
+  recordedByFullName?: string | null;
+  isVoid: boolean;
+  voidedAt?: string | null;
+  voidedByUserId?: string | null;
+  voidedByFullName?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ProductCategory {
   id: string;
   name: string;
@@ -280,6 +305,59 @@ export function listUsers(token: string): Promise<AuthUser[]> {
 
 export function listCustomers(token: string): Promise<Customer[]> {
   return request<Customer[]>("api/customers", undefined, token);
+}
+
+export function listExpenses(
+  token: string,
+  params?: {
+    shopId?: string;
+    expenseDate?: string;
+    dateFrom?: string;
+    dateTo?: string;
+  }
+): Promise<Expense[]> {
+  return request<Expense[]>(
+    withQuery("api/expenses", {
+      shopId: params?.shopId,
+      expenseDate: params?.expenseDate,
+      dateFrom: params?.dateFrom,
+      dateTo: params?.dateTo
+    }),
+    undefined,
+    token
+  );
+}
+
+export function createExpense(
+  token: string,
+  payload: {
+    shopId?: string;
+    categoryId: string;
+    amountUGX: number;
+    date?: string;
+    notes?: string | null;
+    paymentSource: ExpensePaymentSource;
+    paidByUserId?: string;
+  }
+): Promise<Expense> {
+  return request<Expense>(
+    "api/expenses",
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function voidExpense(token: string, expenseId: string): Promise<Expense> {
+  return request<Expense>(
+    `api/expenses/${expenseId}`,
+    {
+      method: "DELETE"
+    },
+    token
+  );
 }
 
 export function createCustomer(

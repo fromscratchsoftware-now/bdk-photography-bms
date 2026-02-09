@@ -562,10 +562,11 @@ function phase1_handle(string $method, string $route): void {
   }
 
   if ($method === "GET" && $route === "expense-categories") {
-    phase1_require_role($roleName, ["ADMIN"]);
+    phase1_require_role($roleName, ["ADMIN", "MANAGER", "SALES"]);
+    $where = $roleName === "ADMIN" ? "" : "WHERE is_active = 1 ";
     $rows = phase1_db_fetch_all(
       $pdo,
-      "SELECT id, name, is_active, notes, created_at, updated_at FROM expense_categories ORDER BY name ASC",
+      "SELECT id, name, is_active, notes, created_at, updated_at FROM expense_categories " . $where . "ORDER BY name ASC",
       []
     );
     $categories = array_map(function ($row) {
@@ -714,6 +715,411 @@ function phase1_handle(string $method, string $route): void {
 
     phase1_audit_log($pdo, (string)($authUser["id"] ?? null), "UPDATE", "expense_category", (string)$row["id"], $beforePublic, $afterPublic);
     json_response(200, ["data" => $afterPublic]);
+  }
+
+  if ($method === "GET" && $route === "expenses") {
+    phase1_require_role($roleName, ["ADMIN", "MANAGER", "SALES"]);
+
+    $shopId = isset($_GET["shopId"]) && is_string($_GET["shopId"]) ? trim($_GET["shopId"]) : "";
+    $expenseDate = isset($_GET["expenseDate"]) && is_string($_GET["expenseDate"]) ? trim($_GET["expenseDate"]) : "";
+    $dateFrom = isset($_GET["dateFrom"]) && is_string($_GET["dateFrom"]) ? trim($_GET["dateFrom"]) : "";
+    $dateTo = isset($_GET["dateTo"]) && is_string($_GET["dateTo"]) ? trim($_GET["dateTo"]) : "";
+
+    if ($expenseDate !== "" && !is_valid_ymd_date($expenseDate)) {
+      json_response(400, ["error" => "ValidationError", "message" => "expenseDate must be YYYY-MM-DD"]);
+    }
+    if ($dateFrom !== "" && !is_valid_ymd_date($dateFrom)) {
+      json_response(400, ["error" => "ValidationError", "message" => "dateFrom must be YYYY-MM-DD"]);
+    }
+    if ($dateTo !== "" && !is_valid_ymd_date($dateTo)) {
+      json_response(400, ["error" => "ValidationError", "message" => "dateTo must be YYYY-MM-DD"]);
+    }
+
+    $where = [];
+    $params = [];
+
+    if ($shopId !== "") {
+      phase1_require_shop_access($roleName, $assignments, $shopId);
+      $where[] = "e.shop_id = :shop_id";
+      $params[":shop_id"] = $shopId;
+    } elseif ($roleName !== "ADMIN") {
+      $shopIds = phase1_assigned_shop_ids($assignments);
+      if (count($shopIds) < 1) {
+        json_response(200, ["data" => []]);
+      }
+      $placeholders = [];
+      foreach ($shopIds as $idx => $id) {
+        $key = ":shop_" . (string)$idx;
+        $placeholders[] = $key;
+        $params[$key] = $id;
+      }
+      $where[] = "e.shop_id IN (" . implode(", ", $placeholders) . ")";
+    }
+
+    if ($expenseDate !== "") {
+      $where[] = "e.expense_date = :expense_date";
+      $params[":expense_date"] = $expenseDate;
+    }
+    if ($dateFrom !== "") {
+      $where[] = "e.expense_date >= :date_from";
+      $params[":date_from"] = $dateFrom;
+    }
+    if ($dateTo !== "") {
+      $where[] = "e.expense_date <= :date_to";
+      $params[":date_to"] = $dateTo;
+    }
+
+    if ($roleName === "SALES") {
+      // Sales can view admin/bank expenses for their shop(s) and their own salesperson-cash expenses.
+      $userId = (string)($authUser["id"] ?? "");
+      $where[] = "(e.payment_source = 'ADMIN_BANK' OR e.paid_by_user_id = :viewer_user_id)";
+      $params[":viewer_user_id"] = $userId;
+    }
+
+    if (count($where) < 1) {
+      $where[] = "1=1";
+    }
+
+    $rows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT e.id, e.shop_id, sh.code AS shop_code, sh.name AS shop_name, e.category_id, c.name AS category_name, " .
+        "e.amount_ugx, e.expense_date, e.notes, e.payment_source, e.paid_by_user_id, pu.full_name AS paid_by_full_name, " .
+        "e.recorded_by_user_id, ru.full_name AS recorded_by_full_name, e.is_void, e.voided_at, e.voided_by_user_id, " .
+        "vu.full_name AS voided_by_full_name, e.created_at, e.updated_at " .
+      "FROM expenses e " .
+      "JOIN shops sh ON sh.id = e.shop_id " .
+      "JOIN expense_categories c ON c.id = e.category_id " .
+      "LEFT JOIN users pu ON pu.id = e.paid_by_user_id " .
+      "LEFT JOIN users ru ON ru.id = e.recorded_by_user_id " .
+      "LEFT JOIN users vu ON vu.id = e.voided_by_user_id " .
+      "WHERE " . implode(" AND ", $where) . " " .
+      "ORDER BY e.expense_date DESC, e.created_at DESC " .
+      "LIMIT 200",
+      $params
+    );
+
+    $expenses = array_map(function ($row) {
+      return [
+        "id" => (string)($row["id"] ?? ""),
+        "shopId" => (string)($row["shop_id"] ?? ""),
+        "shopCode" => (string)($row["shop_code"] ?? ""),
+        "shopName" => (string)($row["shop_name"] ?? ""),
+        "categoryId" => (string)($row["category_id"] ?? ""),
+        "categoryName" => (string)($row["category_name"] ?? ""),
+        "amountUGX" => (int)($row["amount_ugx"] ?? 0),
+        "expenseDate" => (string)($row["expense_date"] ?? ""),
+        "notes" => $row["notes"] ?? null,
+        "paymentSource" => (string)($row["payment_source"] ?? ""),
+        "paidByUserId" => $row["paid_by_user_id"] ?? null,
+        "paidByFullName" => $row["paid_by_full_name"] ?? null,
+        "recordedByUserId" => $row["recorded_by_user_id"] ?? null,
+        "recordedByFullName" => $row["recorded_by_full_name"] ?? null,
+        "isVoid" => (int)($row["is_void"] ?? 0) === 1,
+        "voidedAt" => $row["voided_at"] ?? null,
+        "voidedByUserId" => $row["voided_by_user_id"] ?? null,
+        "voidedByFullName" => $row["voided_by_full_name"] ?? null,
+        "createdAt" => (string)($row["created_at"] ?? ""),
+        "updatedAt" => (string)($row["updated_at"] ?? ""),
+      ];
+    }, $rows);
+
+    json_response(200, ["data" => $expenses]);
+  }
+
+  if ($method === "POST" && $route === "expenses") {
+    phase1_require_role($roleName, ["ADMIN", "SALES"]);
+    $body = read_json_body();
+
+    $requestedShopId = isset($body["shopId"]) && is_string($body["shopId"]) ? trim($body["shopId"]) : "";
+    $categoryId = isset($body["categoryId"]) && is_string($body["categoryId"]) ? trim($body["categoryId"]) : "";
+    $amount = isset($body["amountUGX"]) ? (int)$body["amountUGX"] : 0;
+    $expenseDate = isset($body["date"]) && is_string($body["date"]) ? trim($body["date"]) : "";
+    $notes = array_key_exists("notes", $body) ? $body["notes"] : null;
+    $paymentSource = isset($body["paymentSource"]) && is_string($body["paymentSource"]) ? trim($body["paymentSource"]) : "";
+    $paidByUserId = isset($body["paidByUserId"]) && is_string($body["paidByUserId"]) ? trim($body["paidByUserId"]) : "";
+
+    if ($categoryId === "" || $amount <= 0 || $paymentSource === "") {
+      json_response(400, ["error" => "ValidationError", "message" => "categoryId, amountUGX (>0), and paymentSource are required"]);
+    }
+    if (!in_array($paymentSource, ["SALESPERSON_CASH", "ADMIN_BANK"], true)) {
+      json_response(400, ["error" => "ValidationError", "message" => "paymentSource must be SALESPERSON_CASH or ADMIN_BANK"]);
+    }
+    if ($expenseDate === "") {
+      $expenseDate = phase1_business_today_ymd();
+    }
+    if (!is_valid_ymd_date($expenseDate)) {
+      json_response(400, ["error" => "ValidationError", "message" => "date must be YYYY-MM-DD"]);
+    }
+    if ($notes !== null && !is_string($notes)) {
+      json_response(400, ["error" => "ValidationError", "message" => "notes must be a string or null"]);
+    }
+
+    $shopId = $requestedShopId;
+    $actorUserId = (string)($authUser["id"] ?? "");
+
+    if ($roleName !== "ADMIN") {
+      $shopId = phase1_primary_shop_id($assignments);
+      if ($shopId === "") {
+        json_response(400, ["error" => "ValidationError", "message" => "Sales user is not assigned to a shop"]);
+      }
+    } else {
+      if ($shopId === "") {
+        json_response(400, ["error" => "ValidationError", "message" => "shopId is required"]);
+      }
+    }
+
+    phase1_require_shop_access($roleName, $assignments, $shopId);
+
+    if ($paymentSource === "ADMIN_BANK") {
+      phase1_require_role($roleName, ["ADMIN"]);
+      $paidByUserId = "";
+    }
+
+    if ($paymentSource === "SALESPERSON_CASH") {
+      if ($roleName === "SALES") {
+        $paidByUserId = $actorUserId;
+      } else {
+        if ($paidByUserId === "") {
+          json_response(400, ["error" => "ValidationError", "message" => "paidByUserId is required for SALESPERSON_CASH expenses"]);
+        }
+      }
+    }
+
+    $categoryRow = phase1_db_fetch_one(
+      $pdo,
+      "SELECT id, name, is_active FROM expense_categories WHERE id = :id LIMIT 1",
+      [":id" => $categoryId]
+    );
+    if (!$categoryRow) {
+      json_response(400, ["error" => "ValidationError", "message" => "Invalid categoryId"]);
+    }
+    if ((int)($categoryRow["is_active"] ?? 0) !== 1) {
+      json_response(400, ["error" => "ValidationError", "message" => "Expense category is inactive"]);
+    }
+
+    $paidByRow = null;
+    if ($paymentSource === "SALESPERSON_CASH") {
+      $paidByRow = phase1_db_fetch_one(
+        $pdo,
+        "SELECT u.id, u.full_name, r.name AS role_name " .
+        "FROM users u JOIN roles r ON r.id = u.role_id WHERE u.id = :id LIMIT 1",
+        [":id" => $paidByUserId]
+      );
+      if (!$paidByRow) {
+        json_response(400, ["error" => "ValidationError", "message" => "Invalid paidByUserId"]);
+      }
+      if ((string)($paidByRow["role_name"] ?? "") !== "SALES") {
+        json_response(400, ["error" => "ValidationError", "message" => "paidByUserId must be a SALES user"]);
+      }
+      if ($roleName === "SALES" && $paidByUserId !== $actorUserId) {
+        json_response(403, ["error" => "HttpError", "message" => "Cannot record salesperson-cash expense for another user"]);
+      }
+
+      // Negative cash blocking (admin override is implicit by role).
+      if ($roleName !== "ADMIN") {
+        $cashSalesRow = phase1_db_fetch_one(
+          $pdo,
+          "SELECT COALESCE(SUM(total_amount), 0) AS total " .
+          "FROM sales WHERE user_id = :user_id AND payment_method = 'CASH' AND is_void = 0",
+          [":user_id" => $paidByUserId]
+        );
+        $cashSales = $cashSalesRow ? (int)($cashSalesRow["total"] ?? 0) : 0;
+
+        $cashExpensesRow = phase1_db_fetch_one(
+          $pdo,
+          "SELECT COALESCE(SUM(amount_ugx), 0) AS total " .
+          "FROM expenses WHERE paid_by_user_id = :user_id AND payment_source = 'SALESPERSON_CASH' AND is_void = 0",
+          [":user_id" => $paidByUserId]
+        );
+        $cashExpenses = $cashExpensesRow ? (int)($cashExpensesRow["total"] ?? 0) : 0;
+
+        $available = $cashSales - $cashExpenses;
+        if ($available < 0) {
+          $available = 0;
+        }
+        if ($available < $amount) {
+          json_response(400, [
+            "error" => "BadRequest",
+            "message" => "Insufficient cash at hand. Available: " . $available . ", required: " . $amount,
+          ]);
+        }
+      }
+    }
+
+    $expenseId = create_id("exp");
+
+    try {
+      $stmt = $pdo->prepare(
+        "INSERT INTO expenses (id, shop_id, category_id, amount_ugx, expense_date, notes, payment_source, paid_by_user_id, recorded_by_user_id) " .
+        "VALUES (:id, :shop_id, :category_id, :amount_ugx, :expense_date, :notes, :payment_source, :paid_by_user_id, :recorded_by_user_id)"
+      );
+      $stmt->execute([
+        ":id" => $expenseId,
+        ":shop_id" => $shopId,
+        ":category_id" => $categoryId,
+        ":amount_ugx" => $amount,
+        ":expense_date" => $expenseDate,
+        ":notes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+        ":payment_source" => $paymentSource,
+        ":paid_by_user_id" => $paidByUserId !== "" ? $paidByUserId : null,
+        ":recorded_by_user_id" => $actorUserId !== "" ? $actorUserId : null,
+      ]);
+    } catch (Throwable $error) {
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to create expense"]);
+    }
+
+    $row = phase1_db_fetch_one(
+      $pdo,
+      "SELECT e.id, e.shop_id, sh.code AS shop_code, sh.name AS shop_name, e.category_id, c.name AS category_name, " .
+        "e.amount_ugx, e.expense_date, e.notes, e.payment_source, e.paid_by_user_id, pu.full_name AS paid_by_full_name, " .
+        "e.recorded_by_user_id, ru.full_name AS recorded_by_full_name, e.is_void, e.voided_at, e.voided_by_user_id, " .
+        "vu.full_name AS voided_by_full_name, e.created_at, e.updated_at " .
+      "FROM expenses e " .
+      "JOIN shops sh ON sh.id = e.shop_id " .
+      "JOIN expense_categories c ON c.id = e.category_id " .
+      "LEFT JOIN users pu ON pu.id = e.paid_by_user_id " .
+      "LEFT JOIN users ru ON ru.id = e.recorded_by_user_id " .
+      "LEFT JOIN users vu ON vu.id = e.voided_by_user_id " .
+      "WHERE e.id = :id LIMIT 1",
+      [":id" => $expenseId]
+    );
+    if (!$row) {
+      json_response(201, ["data" => ["id" => $expenseId]]);
+    }
+
+    $public = [
+      "id" => (string)$row["id"],
+      "shopId" => (string)$row["shop_id"],
+      "shopCode" => (string)$row["shop_code"],
+      "shopName" => (string)$row["shop_name"],
+      "categoryId" => (string)$row["category_id"],
+      "categoryName" => (string)$row["category_name"],
+      "amountUGX" => (int)$row["amount_ugx"],
+      "expenseDate" => (string)$row["expense_date"],
+      "notes" => $row["notes"] ?? null,
+      "paymentSource" => (string)$row["payment_source"],
+      "paidByUserId" => $row["paid_by_user_id"] ?? null,
+      "paidByFullName" => $row["paid_by_full_name"] ?? null,
+      "recordedByUserId" => $row["recorded_by_user_id"] ?? null,
+      "recordedByFullName" => $row["recorded_by_full_name"] ?? null,
+      "isVoid" => (int)$row["is_void"] === 1,
+      "voidedAt" => $row["voided_at"] ?? null,
+      "voidedByUserId" => $row["voided_by_user_id"] ?? null,
+      "voidedByFullName" => $row["voided_by_full_name"] ?? null,
+      "createdAt" => (string)$row["created_at"],
+      "updatedAt" => (string)$row["updated_at"],
+    ];
+
+    phase1_audit_log($pdo, $actorUserId !== "" ? $actorUserId : null, "CREATE", "expense", $expenseId, null, $public);
+    json_response(201, ["data" => $public]);
+  }
+
+  if ($method === "DELETE" && preg_match('/^expenses\\/([^\\/]+)$/', $route, $matches) === 1) {
+    phase1_require_role($roleName, ["ADMIN"]);
+    $expenseId = (string)$matches[1];
+    $actorUserId = (string)($authUser["id"] ?? "");
+
+    try {
+      $pdo->beginTransaction();
+
+      $existing = phase1_db_fetch_one(
+        $pdo,
+        "SELECT e.id, e.shop_id, sh.code AS shop_code, sh.name AS shop_name, e.category_id, c.name AS category_name, " .
+          "e.amount_ugx, e.expense_date, e.notes, e.payment_source, e.paid_by_user_id, pu.full_name AS paid_by_full_name, " .
+          "e.recorded_by_user_id, ru.full_name AS recorded_by_full_name, e.is_void, e.created_at, e.updated_at " .
+        "FROM expenses e " .
+        "JOIN shops sh ON sh.id = e.shop_id " .
+        "JOIN expense_categories c ON c.id = e.category_id " .
+        "LEFT JOIN users pu ON pu.id = e.paid_by_user_id " .
+        "LEFT JOIN users ru ON ru.id = e.recorded_by_user_id " .
+        "WHERE e.id = :id FOR UPDATE",
+        [":id" => $expenseId]
+      );
+      if (!$existing) {
+        $pdo->rollBack();
+        json_response(404, ["error" => "HttpError", "message" => "Expense not found"]);
+      }
+
+      if ((int)($existing["is_void"] ?? 0) === 1) {
+        $pdo->rollBack();
+        json_response(400, ["error" => "BadRequest", "message" => "Expense is already void"]);
+      }
+
+      $beforePublic = [
+        "id" => (string)$existing["id"],
+        "shopId" => (string)$existing["shop_id"],
+        "shopCode" => (string)$existing["shop_code"],
+        "shopName" => (string)$existing["shop_name"],
+        "categoryId" => (string)$existing["category_id"],
+        "categoryName" => (string)$existing["category_name"],
+        "amountUGX" => (int)$existing["amount_ugx"],
+        "expenseDate" => (string)$existing["expense_date"],
+        "notes" => $existing["notes"] ?? null,
+        "paymentSource" => (string)$existing["payment_source"],
+        "paidByUserId" => $existing["paid_by_user_id"] ?? null,
+        "paidByFullName" => $existing["paid_by_full_name"] ?? null,
+        "recordedByUserId" => $existing["recorded_by_user_id"] ?? null,
+        "recordedByFullName" => $existing["recorded_by_full_name"] ?? null,
+        "isVoid" => (int)$existing["is_void"] === 1,
+        "createdAt" => (string)$existing["created_at"],
+        "updatedAt" => (string)$existing["updated_at"],
+      ];
+
+      phase1_db_execute(
+        $pdo,
+        "UPDATE expenses SET is_void = 1, voided_at = NOW(), voided_by_user_id = :actor, updated_at = NOW() WHERE id = :id",
+        [":actor" => $actorUserId !== "" ? $actorUserId : null, ":id" => $expenseId]
+      );
+
+      $updated = phase1_db_fetch_one(
+        $pdo,
+        "SELECT e.id, e.shop_id, sh.code AS shop_code, sh.name AS shop_name, e.category_id, c.name AS category_name, " .
+          "e.amount_ugx, e.expense_date, e.notes, e.payment_source, e.paid_by_user_id, pu.full_name AS paid_by_full_name, " .
+          "e.recorded_by_user_id, ru.full_name AS recorded_by_full_name, e.is_void, e.voided_at, e.voided_by_user_id, " .
+          "vu.full_name AS voided_by_full_name, e.created_at, e.updated_at " .
+        "FROM expenses e " .
+        "JOIN shops sh ON sh.id = e.shop_id " .
+        "JOIN expense_categories c ON c.id = e.category_id " .
+        "LEFT JOIN users pu ON pu.id = e.paid_by_user_id " .
+        "LEFT JOIN users ru ON ru.id = e.recorded_by_user_id " .
+        "LEFT JOIN users vu ON vu.id = e.voided_by_user_id " .
+        "WHERE e.id = :id LIMIT 1",
+        [":id" => $expenseId]
+      );
+
+      $pdo->commit();
+
+      $afterPublic = $updated ? [
+        "id" => (string)$updated["id"],
+        "shopId" => (string)$updated["shop_id"],
+        "shopCode" => (string)$updated["shop_code"],
+        "shopName" => (string)$updated["shop_name"],
+        "categoryId" => (string)$updated["category_id"],
+        "categoryName" => (string)$updated["category_name"],
+        "amountUGX" => (int)$updated["amount_ugx"],
+        "expenseDate" => (string)$updated["expense_date"],
+        "notes" => $updated["notes"] ?? null,
+        "paymentSource" => (string)$updated["payment_source"],
+        "paidByUserId" => $updated["paid_by_user_id"] ?? null,
+        "paidByFullName" => $updated["paid_by_full_name"] ?? null,
+        "recordedByUserId" => $updated["recorded_by_user_id"] ?? null,
+        "recordedByFullName" => $updated["recorded_by_full_name"] ?? null,
+        "isVoid" => (int)$updated["is_void"] === 1,
+        "voidedAt" => $updated["voided_at"] ?? null,
+        "voidedByUserId" => $updated["voided_by_user_id"] ?? null,
+        "voidedByFullName" => $updated["voided_by_full_name"] ?? null,
+        "createdAt" => (string)$updated["created_at"],
+        "updatedAt" => (string)$updated["updated_at"],
+      ] : $beforePublic;
+
+      phase1_audit_log($pdo, $actorUserId !== "" ? $actorUserId : null, "UPDATE", "expense", $expenseId, $beforePublic, $afterPublic);
+      json_response(200, ["data" => $afterPublic]);
+    } catch (Throwable $error) {
+      if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+      }
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to void expense"]);
+    }
   }
 
   if ($method === "GET" && $route === "product-categories") {

@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
   createCustomer,
   createExpenseCategory,
+  createExpense,
   createInvoice,
   createInvoicePayment,
   createReconciliationLock,
@@ -12,6 +13,7 @@ import {
   getInvoice,
   getMe,
   listCustomers,
+  listExpenses,
   listExpenseCategories,
   listInvoicePayments,
   listInvoices,
@@ -29,8 +31,10 @@ import {
   updateProduct,
   updateProductCategory,
   voidSale,
+  voidExpense,
   type AuthUser,
   type Customer,
+  type Expense,
   type ExpenseCategory,
   type Invoice,
   type InvoiceDetail,
@@ -49,7 +53,7 @@ type AuthState = {
   user: AuthUser;
 };
 
-type ActiveView = "overview" | "customers" | "invoices" | "sales" | "master-data";
+type ActiveView = "overview" | "customers" | "invoices" | "sales" | "expenses" | "master-data";
 type MasterSection = "expense-categories" | "product-categories" | "products";
 
 const AUTH_STORAGE_KEY = "bdk.auth.phase1.v1";
@@ -194,6 +198,30 @@ export default function App(): JSX.Element {
   const [reconcileBusy, setReconcileBusy] = useState(false);
   const [reconciliationLocks, setReconciliationLocks] = useState<ReconciliationLock[]>([]);
 
+  const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [expensesBusy, setExpensesBusy] = useState(false);
+  const [expenseFilters, setExpenseFilters] = useState<{ shopId: string; expenseDate: string }>({
+    shopId: "",
+    expenseDate: todayLocalYmd()
+  });
+  const [newExpenseForm, setNewExpenseForm] = useState<{
+    shopId: string;
+    paymentSource: "SALESPERSON_CASH" | "ADMIN_BANK";
+    paidByUserId: string;
+    categoryId: string;
+    amountUGX: string;
+    date: string;
+    notes: string;
+  }>({
+    shopId: "",
+    paymentSource: "SALESPERSON_CASH",
+    paidByUserId: "",
+    categoryId: "",
+    amountUGX: "",
+    date: todayLocalYmd(),
+    notes: ""
+  });
+
   const [masterBusy, setMasterBusy] = useState(false);
   const [editingExpenseCategoryId, setEditingExpenseCategoryId] = useState<string | null>(null);
   const [editingExpenseCategoryForm, setEditingExpenseCategoryForm] = useState<{
@@ -265,6 +293,9 @@ export default function App(): JSX.Element {
   const canViewSales = authUser?.role === "ADMIN" || authUser?.role === "MANAGER" || authUser?.role === "SALES";
   const canCreateSales = authUser?.role === "ADMIN" || authUser?.role === "SALES";
   const canReconcile = authUser?.role === "ADMIN";
+  const canViewExpenses = authUser?.role === "ADMIN" || authUser?.role === "MANAGER" || authUser?.role === "SALES";
+  const canCreateExpenses = authUser?.role === "ADMIN" || authUser?.role === "SALES";
+  const canVoidExpenses = authUser?.role === "ADMIN";
 
   const shopCodesForUser = useMemo(() => {
     const map = new Map<string, string>();
@@ -295,6 +326,7 @@ export default function App(): JSX.Element {
     setSalesDayLock(null);
     setReconciliationLocks([]);
     setSaleDraftId(null);
+    setExpenses([]);
     setSuccess(null);
     setError(message ?? null);
   }
@@ -366,6 +398,8 @@ export default function App(): JSX.Element {
         setSalesFilters((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
         setSaleDraftForm((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
         setReconcileForm((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
+        setExpenseFilters((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
+        setNewExpenseForm((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
       } catch (caught: unknown) {
         if (!cancelled) {
           setError(caught instanceof Error ? caught.message : "Failed to load data");
@@ -737,6 +771,126 @@ export default function App(): JSX.Element {
     }));
   }, [activeView, salesFilters.shopId, salesFilters.saleDate, saleDraftId]);
 
+  async function refreshExpensesData(): Promise<void> {
+    if (!auth) {
+      return;
+    }
+    setExpensesBusy(true);
+    setError(null);
+    try {
+      const [categoryData, expenseData] = await Promise.all([
+        listExpenseCategories(auth.token),
+        listExpenses(auth.token, { shopId: expenseFilters.shopId, expenseDate: expenseFilters.expenseDate })
+      ]);
+      setExpenseCategories(categoryData);
+      setExpenses(expenseData);
+
+      const firstActiveCategory = categoryData.find((c) => c.isActive) ?? categoryData[0];
+      if (firstActiveCategory) {
+        setNewExpenseForm((prev) => (prev.categoryId ? prev : { ...prev, categoryId: firstActiveCategory.id }));
+      }
+
+      if (authUser?.role === "ADMIN") {
+        const salesUsers = users.filter((u) => u.role === "SALES");
+        if (salesUsers.length) {
+          setNewExpenseForm((prev) =>
+            prev.paymentSource === "SALESPERSON_CASH" && !prev.paidByUserId ? { ...prev, paidByUserId: salesUsers[0].id } : prev
+          );
+        }
+      } else {
+        setNewExpenseForm((prev) => (prev.paymentSource === "SALESPERSON_CASH" ? prev : { ...prev, paymentSource: "SALESPERSON_CASH" }));
+      }
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to load expenses");
+    } finally {
+      setExpensesBusy(false);
+    }
+  }
+
+  async function submitExpense(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (!auth) {
+      return;
+    }
+    setError(null);
+    setSuccess(null);
+    setExpensesBusy(true);
+
+    try {
+      const amount = Number.parseInt(newExpenseForm.amountUGX, 10);
+      if (!newExpenseForm.categoryId) {
+        throw new Error("Category is required.");
+      }
+      if (!Number.isFinite(amount) || amount <= 0) {
+        throw new Error("Amount must be greater than 0.");
+      }
+
+      const trimmedNotes = newExpenseForm.notes.trim();
+
+      await createExpense(auth.token, {
+        ...(authUser?.role === "ADMIN" ? { shopId: newExpenseForm.shopId } : {}),
+        categoryId: newExpenseForm.categoryId,
+        amountUGX: amount,
+        date: newExpenseForm.date,
+        notes: trimmedNotes ? trimmedNotes : null,
+        paymentSource: authUser?.role === "ADMIN" ? newExpenseForm.paymentSource : "SALESPERSON_CASH",
+        paidByUserId: authUser?.role === "ADMIN" && newExpenseForm.paymentSource === "SALESPERSON_CASH" ? newExpenseForm.paidByUserId : undefined
+      });
+
+      setSuccess("Expense recorded.");
+      setNewExpenseForm((prev) => ({ ...prev, amountUGX: "", notes: "" }));
+      await refreshExpensesData();
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to record expense");
+    } finally {
+      setExpensesBusy(false);
+    }
+  }
+
+  async function handleVoidExpense(expenseId: string): Promise<void> {
+    if (!auth) {
+      return;
+    }
+    setError(null);
+    setSuccess(null);
+    setExpensesBusy(true);
+    try {
+      await voidExpense(auth.token, expenseId);
+      setSuccess("Expense voided.");
+      await refreshExpensesData();
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to void expense");
+    } finally {
+      setExpensesBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!auth || !canViewExpenses) {
+      return;
+    }
+    if (activeView !== "expenses") {
+      return;
+    }
+    void refreshExpensesData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeView, auth?.token, canViewExpenses, expenseFilters.shopId, expenseFilters.expenseDate]);
+
+  useEffect(() => {
+    if (activeView !== "expenses") {
+      return;
+    }
+    if (authUser?.role === "ADMIN") {
+      return;
+    }
+    setNewExpenseForm((prev) => ({
+      ...prev,
+      shopId: expenseFilters.shopId || prev.shopId,
+      date: expenseFilters.expenseDate || prev.date,
+      paymentSource: "SALESPERSON_CASH"
+    }));
+  }, [activeView, authUser?.role, expenseFilters.shopId, expenseFilters.expenseDate]);
+
   async function submitLogin(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     setError(null);
@@ -996,6 +1150,15 @@ export default function App(): JSX.Element {
               onClick={() => setActiveView("sales")}
             >
               Sales (POS)
+            </button>
+          ) : null}
+          {canViewExpenses ? (
+            <button
+              className={`tab ${activeView === "expenses" ? "isActive" : ""}`}
+              type="button"
+              onClick={() => setActiveView("expenses")}
+            >
+              Expenses
             </button>
           ) : null}
           {canManageMasterData ? (
@@ -2514,6 +2677,228 @@ export default function App(): JSX.Element {
                 </div>
               </section>
             ) : null}
+          </>
+        ) : activeView === "expenses" ? (
+          <>
+            <section className="card" style={{ gridColumn: "1 / -1" }}>
+              <h2>Expenses</h2>
+              <p className="hint">
+                Record expenses with a payment source. Salesperson cash expenses reduce that salesperson’s cash at hand.
+              </p>
+
+              <form
+                className="form form--three"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void refreshExpensesData();
+                }}
+              >
+                <label>
+                  Shop
+                  <select
+                    value={expenseFilters.shopId}
+                    onChange={(event) => setExpenseFilters((prev) => ({ ...prev, shopId: event.target.value }))}
+                    disabled={authUser?.role === "SALES"}
+                  >
+                    {shops.map((shop) => (
+                      <option key={shop.id} value={shop.id}>
+                        {shop.code} — {shop.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Date
+                  <input
+                    type="date"
+                    value={expenseFilters.expenseDate}
+                    onChange={(event) => setExpenseFilters((prev) => ({ ...prev, expenseDate: event.target.value }))}
+                  />
+                </label>
+                <button type="submit" disabled={expensesBusy}>
+                  {expensesBusy ? "Loading..." : "Refresh"}
+                </button>
+              </form>
+            </section>
+
+            {canCreateExpenses ? (
+              <section className="card">
+                <h2>Record Expense</h2>
+
+                {authUser?.role !== "ADMIN" ? (
+                  <div className="note">Payment source is fixed to Salesperson Cash for sales users.</div>
+                ) : null}
+
+                <form className="form form--three" onSubmit={submitExpense}>
+                  {authUser?.role === "ADMIN" ? (
+                    <label>
+                      Shop
+                      <select
+                        value={newExpenseForm.shopId}
+                        onChange={(event) => setNewExpenseForm((prev) => ({ ...prev, shopId: event.target.value }))}
+                        required
+                      >
+                        {shops.map((shop) => (
+                          <option key={shop.id} value={shop.id}>
+                            {shop.code} — {shop.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : null}
+
+                  <label>
+                    Payment source
+                    <select
+                      value={authUser?.role === "ADMIN" ? newExpenseForm.paymentSource : "SALESPERSON_CASH"}
+                      onChange={(event) =>
+                        setNewExpenseForm((prev) => ({
+                          ...prev,
+                          paymentSource: event.target.value === "ADMIN_BANK" ? "ADMIN_BANK" : "SALESPERSON_CASH"
+                        }))
+                      }
+                      disabled={authUser?.role !== "ADMIN"}
+                    >
+                      <option value="SALESPERSON_CASH">Paid by salesperson cash</option>
+                      <option value="ADMIN_BANK">Paid by admin/bank</option>
+                    </select>
+                  </label>
+
+                  {authUser?.role === "ADMIN" && newExpenseForm.paymentSource === "SALESPERSON_CASH" ? (
+                    <label>
+                      Paid by (Salesperson)
+                      <select
+                        value={newExpenseForm.paidByUserId}
+                        onChange={(event) => setNewExpenseForm((prev) => ({ ...prev, paidByUserId: event.target.value }))}
+                        required
+                      >
+                        <option value="">Select salesperson...</option>
+                        {users
+                          .filter((u) => u.role === "SALES")
+                          .map((u) => (
+                            <option key={u.id} value={u.id}>
+                              {u.fullName} • {u.mobileNumber}
+                            </option>
+                          ))}
+                      </select>
+                    </label>
+                  ) : null}
+
+                  <label>
+                    Category
+                    <select
+                      value={newExpenseForm.categoryId}
+                      onChange={(event) => setNewExpenseForm((prev) => ({ ...prev, categoryId: event.target.value }))}
+                      required
+                    >
+                      <option value="">Select category...</option>
+                      {expenseCategories
+                        .filter((c) => c.isActive)
+                        .map((category) => (
+                          <option key={category.id} value={category.id}>
+                            {category.name}
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+
+                  <label>
+                    Amount (UGX)
+                    <input
+                      type="number"
+                      min={1}
+                      value={newExpenseForm.amountUGX}
+                      onChange={(event) => setNewExpenseForm((prev) => ({ ...prev, amountUGX: event.target.value }))}
+                      required
+                    />
+                  </label>
+
+                  <label>
+                    Date
+                    <input
+                      type="date"
+                      value={newExpenseForm.date}
+                      onChange={(event) => setNewExpenseForm((prev) => ({ ...prev, date: event.target.value }))}
+                      required
+                    />
+                  </label>
+
+                  <label>
+                    Notes (optional)
+                    <input
+                      value={newExpenseForm.notes}
+                      onChange={(event) => setNewExpenseForm((prev) => ({ ...prev, notes: event.target.value }))}
+                    />
+                  </label>
+
+                  <button type="submit" disabled={expensesBusy}>
+                    {expensesBusy ? "Saving..." : "Record expense"}
+                  </button>
+                </form>
+              </section>
+            ) : (
+              <section className="card">
+                <h2>Record Expense</h2>
+                <div className="note">You don’t have permission to record expenses.</div>
+              </section>
+            )}
+
+            <section className="card" style={{ gridColumn: "1 / -1" }}>
+              <h2>Expense List</h2>
+              <div className="tableWrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      <th>Shop</th>
+                      <th>Category</th>
+                      <th className="right">Amount</th>
+                      <th>Source</th>
+                      <th>Paid by</th>
+                      <th>Status</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {expenses.length ? (
+                      expenses.map((expense) => (
+                        <tr key={expense.id} style={{ opacity: expense.isVoid ? 0.6 : 1 }}>
+                          <td>{expense.expenseDate}</td>
+                          <td>{expense.shopCode}</td>
+                          <td>{expense.categoryName}</td>
+                          <td className="right">{expense.amountUGX}</td>
+                          <td>{expense.paymentSource}</td>
+                          <td>{expense.paymentSource === "SALESPERSON_CASH" ? expense.paidByFullName ?? "-" : "-"}</td>
+                          <td>{expense.isVoid ? "VOID" : "ACTIVE"}</td>
+                          <td>
+                            {canVoidExpenses && !expense.isVoid ? (
+                              <button
+                                data-variant="ghost"
+                                type="button"
+                                onClick={() => {
+                                  if (!window.confirm("Void this expense? This cannot be undone.")) {
+                                    return;
+                                  }
+                                  void handleVoidExpense(expense.id);
+                                }}
+                              >
+                                Void
+                              </button>
+                            ) : (
+                              "-"
+                            )}
+                          </td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan={8}>No expenses found.</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </section>
           </>
         ) : (
           <>
