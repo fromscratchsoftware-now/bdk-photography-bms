@@ -8640,16 +8640,21 @@ function phase1_handle(string $method, string $route): void {
     );
     $receivedTransfersByProduct = $mapFromRows($receivedTransferRows);
 
+    // PDO with native prepares does not allow reusing the same named placeholder multiple times.
+    $salesParams = [":as_of_sale" => $asOf, ":as_of_void" => $asOf];
+    if ($requestedShopId !== "") {
+      $salesParams[":shop_id"] = $requestedShopId;
+    }
     $salesRows = phase1_db_fetch_all(
       $pdo,
       "SELECT l.product_id, COALESCE(SUM(l.quantity), 0) AS qty " .
       "FROM sales s " .
       "JOIN sale_lines l ON l.sale_id = s.id " .
-      "WHERE s.sale_date <= :as_of " .
-        "AND (s.is_void = 0 OR (s.is_void = 1 AND s.voided_at IS NOT NULL AND DATE(s.voided_at) > :as_of))" .
+      "WHERE s.sale_date <= :as_of_sale " .
+        "AND (s.is_void = 0 OR (s.is_void = 1 AND s.voided_at IS NOT NULL AND DATE(s.voided_at) > :as_of_void))" .
         ($requestedShopId !== "" ? " AND s.shop_id = :shop_id" : "") . " " .
       "GROUP BY l.product_id",
-      $asOfParams
+      $salesParams
     );
     $salesByProduct = $mapFromRows($salesRows);
 
@@ -8664,16 +8669,20 @@ function phase1_handle(string $method, string $route): void {
     $damagesByProduct = $mapFromRows($damageRows);
 
     // In-transit to shop (shipped but not yet received as of date).
+    $transitParams = [":as_of_shipped" => $asOf, ":as_of_received" => $asOf];
+    if ($requestedShopId !== "") {
+      $transitParams[":shop_id"] = $requestedShopId;
+    }
     $transitRows = phase1_db_fetch_all(
       $pdo,
       "SELECT l.product_id, COALESCE(SUM(l.quantity_shipped), 0) AS qty " .
       "FROM inventory_transfers t " .
       "JOIN inventory_transfer_lines l ON l.transfer_id = t.id " .
-      "WHERE t.status = 'SHIPPED' AND t.shipped_at IS NOT NULL AND DATE(t.shipped_at) <= :as_of " .
-        "AND (t.received_at IS NULL OR DATE(t.received_at) > :as_of)" .
+      "WHERE t.status = 'SHIPPED' AND t.shipped_at IS NOT NULL AND DATE(t.shipped_at) <= :as_of_shipped " .
+        "AND (t.received_at IS NULL OR DATE(t.received_at) > :as_of_received)" .
         ($requestedShopId !== "" ? " AND t.to_shop_id = :shop_id" : "") . " " .
       "GROUP BY l.product_id",
-      $asOfParams
+      $transitParams
     );
     $transitByProduct = $mapFromRows($transitRows);
 
