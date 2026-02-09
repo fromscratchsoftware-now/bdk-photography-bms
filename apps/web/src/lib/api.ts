@@ -107,7 +107,9 @@ export interface AuthUser {
   id: string;
   fullName: string;
   mobileNumber: string;
+  email?: string | null;
   role: Role;
+  isActive: boolean;
   notes?: string | null;
   createdAt: string;
   updatedAt: string;
@@ -425,6 +427,96 @@ export function listShops(token: string): Promise<Shop[]> {
 
 export function listUsers(token: string): Promise<AuthUser[]> {
   return request<AuthUser[]>("api/users", undefined, token);
+}
+
+export function createUser(
+  token: string,
+  payload: {
+    fullName: string;
+    mobileNumber: string;
+    email?: string | null;
+    role: Role;
+    password: string;
+    shopIds?: string[];
+    primaryShopId?: string | null;
+    notes?: string | null;
+    isActive?: boolean;
+  }
+): Promise<AuthUser> {
+  return request<AuthUser>(
+    "api/users",
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function updateUser(
+  token: string,
+  userId: string,
+  payload: Partial<{
+    fullName: string;
+    email: string | null;
+    role: Role;
+    shopIds: string[];
+    primaryShopId: string | null;
+    notes: string | null;
+    isActive: boolean;
+  }>
+): Promise<AuthUser> {
+  return request<AuthUser>(
+    `api/users/${userId}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function adminResetUserPassword(
+  token: string,
+  userId: string,
+  payload?: { notes?: string | null }
+): Promise<{ resetLink: string; expiresAt: string; queued: Array<Record<string, unknown>> }> {
+  return request<{ resetLink: string; expiresAt: string; queued: Array<Record<string, unknown>> }>(
+    `api/users/${userId}/password-reset`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload ?? {})
+    },
+    token
+  );
+}
+
+export function changePassword(
+  token: string,
+  payload: { currentPassword: string; newPassword: string }
+): Promise<{ token: string }> {
+  return request<{ token: string }>(
+    "api/auth/change-password",
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function forgotPassword(payload: { mobileNumber?: string; email?: string; notes?: string | null }): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>("api/auth/forgot-password", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function resetPassword(payload: { token: string; newPassword: string }): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>("api/auth/reset-password", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
 }
 
 export function listCustomers(token: string): Promise<Customer[]> {

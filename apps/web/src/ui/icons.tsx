@@ -175,3 +175,23 @@ export function IconLogout(props: IconProps): JSX.Element {
   );
 }
 
+export function IconUsers(props: IconProps): JSX.Element {
+  return (
+    <BaseIcon {...props}>
+      <path d="M16 11a4 4 0 1 0-8 0" />
+      <path d="M2.5 20c1.1-3.3 4-5.5 7.5-5.5" />
+      <path d="M14.5 14.5c3.5 0 6.4 2.2 7.5 5.5" />
+      <path d="M19 7.5a2.5 2.5 0 1 0-5 0" />
+    </BaseIcon>
+  );
+}
+
+export function IconHelp(props: IconProps): JSX.Element {
+  return (
+    <BaseIcon {...props}>
+      <path d="M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Z" />
+      <path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 2-2.5 2-2.5 4" />
+      <path d="M12 17h0.01" />
+    </BaseIcon>
+  );
+}

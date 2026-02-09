@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
   createBankingRequest,
   createCustomer,
+  createUser,
   createCashTransfer,
   createExpenseCategory,
   createExpense,
@@ -66,6 +67,10 @@ import {
   listWorkshopSheetReceipts,
   listWorkshopStock,
   login,
+  forgotPassword,
+  resetPassword,
+  changePassword,
+  adminResetUserPassword,
   markNotificationRead,
   receiveInventoryTransfer,
   runAdminDailySummary,
@@ -75,6 +80,7 @@ import {
   updateMessagingTemplate,
   updateSale,
   updateCustomer,
+  updateUser,
   updateInvoice,
   updateExpenseCategory,
   updateProduct,
@@ -151,7 +157,9 @@ import {
   IconPayments,
   IconProjects,
   IconReports,
-  IconSales
+  IconSales,
+  IconUsers,
+  IconHelp
 } from "./ui/icons";
 
 type AuthState = {
@@ -159,7 +167,19 @@ type AuthState = {
   user: AuthUser;
 };
 
-type ActiveView = "overview" | "customers" | "invoices" | "inventory" | "sales" | "expenses" | "cash" | "reports" | "messaging" | "master-data";
+type ActiveView =
+  | "overview"
+  | "customers"
+  | "invoices"
+  | "inventory"
+  | "sales"
+  | "expenses"
+  | "cash"
+  | "reports"
+  | "messaging"
+  | "master-data"
+  | "users"
+  | "help";
 type MasterSection = "expense-categories" | "product-categories" | "products";
 type ReportSection = "sales" | "commissions" | "invoices" | "payments" | "cash" | "expenses" | "pl" | "capital";
 type InventorySection = "stock" | "transfers" | "workshop";
@@ -230,13 +250,72 @@ export default function App(): JSX.Element {
   const [auth, setAuth] = useState<AuthState | null>(() => readStoredAuth());
   const [shops, setShops] = useState<Shop[]>([]);
   const [users, setUsers] = useState<AuthUser[]>([]);
+  const [usersBusy, setUsersBusy] = useState(false);
 
   const [activeView, setActiveView] = useState<ActiveView>("overview");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [masterSection, setMasterSection] = useState<MasterSection>("expense-categories");
   const [reportSection, setReportSection] = useState<ReportSection>("sales");
+  const [helpTopic, setHelpTopic] = useState<"users" | "passwords" | "invoicing">("users");
 
   const [toasts, setToasts] = useState<Toast[]>([]);
+
+  const [forgotPasswordOpen, setForgotPasswordOpen] = useState(false);
+  const [forgotPasswordForm, setForgotPasswordForm] = useState<{ mobileNumber: string; email: string }>({ mobileNumber: "", email: "" });
+
+  const [resetTokenFromUrl, setResetTokenFromUrl] = useState<string | null>(() => {
+    if (typeof window === "undefined") {
+      return null;
+    }
+    const token = new URLSearchParams(window.location.search).get("resetToken");
+    return token && token.trim() ? token.trim() : null;
+  });
+  const [resetPasswordForm, setResetPasswordForm] = useState<{ newPassword: string; confirmNewPassword: string }>({
+    newPassword: "",
+    confirmNewPassword: ""
+  });
+
+  const [changePasswordOpen, setChangePasswordOpen] = useState(false);
+  const [changePasswordForm, setChangePasswordForm] = useState<{ currentPassword: string; newPassword: string; confirmNewPassword: string }>({
+    currentPassword: "",
+    newPassword: "",
+    confirmNewPassword: ""
+  });
+
+  const [newUserForm, setNewUserForm] = useState<{
+    fullName: string;
+    mobileNumber: string;
+    email: string;
+    role: "ADMIN" | "MANAGER" | "SALES";
+    password: string;
+    confirmPassword: string;
+    shopIds: string[];
+    primaryShopId: string;
+    notes: string;
+    isActive: boolean;
+  }>({
+    fullName: "",
+    mobileNumber: "",
+    email: "",
+    role: "SALES",
+    password: "",
+    confirmPassword: "",
+    shopIds: [],
+    primaryShopId: "",
+    notes: "",
+    isActive: true
+  });
+  const [editingUserId, setEditingUserId] = useState<string | null>(null);
+  const [editingUserForm, setEditingUserForm] = useState<{
+    fullName: string;
+    email: string;
+    role: "ADMIN" | "MANAGER" | "SALES";
+    shopIds: string[];
+    primaryShopId: string;
+    notes: string;
+    isActive: boolean;
+  } | null>(null);
+  const [lastPasswordReset, setLastPasswordReset] = useState<{ resetLink: string; expiresAt: string } | null>(null);
 
   const [expenseCategories, setExpenseCategories] = useState<ExpenseCategory[]>([]);
   const [productCategories, setProductCategories] = useState<ProductCategory[]>([]);
@@ -709,6 +788,7 @@ export default function App(): JSX.Element {
   }, [success]);
 
   const canViewUsers = authUser?.role === "ADMIN" || authUser?.role === "MANAGER";
+  const canManageUsers = canViewUsers;
   const canManageMasterData = authUser?.role === "ADMIN";
   const canManageCustomers = authUser?.role === "ADMIN" || authUser?.role === "SALES";
   const canManageInvoices = authUser?.role === "ADMIN" || authUser?.role === "SALES";
@@ -854,8 +934,43 @@ export default function App(): JSX.Element {
     setRunDailySummaryForm({ date: todayLocalYmd(), notes: "" });
     setLastOverdueRunResult(null);
     setLastDailySummaryResult(null);
+    setUsersBusy(false);
+    setForgotPasswordOpen(false);
+    setForgotPasswordForm({ mobileNumber: "", email: "" });
+    setResetPasswordForm({ newPassword: "", confirmNewPassword: "" });
+    setChangePasswordOpen(false);
+    setChangePasswordForm({ currentPassword: "", newPassword: "", confirmNewPassword: "" });
+    setNewUserForm({
+      fullName: "",
+      mobileNumber: "",
+      email: "",
+      role: "SALES",
+      password: "",
+      confirmPassword: "",
+      shopIds: [],
+      primaryShopId: "",
+      notes: "",
+      isActive: true
+    });
+    setEditingUserId(null);
+    setEditingUserForm(null);
+    setLastPasswordReset(null);
     setSuccess(null);
     setError(message ?? null);
+  }
+
+  function clearResetTokenFromUrl(): void {
+    setResetTokenFromUrl(null);
+    if (typeof window === "undefined") {
+      return;
+    }
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("resetToken");
+      window.history.replaceState({}, "", url.toString());
+    } catch {
+      // ignore
+    }
   }
 
   useEffect(() => {
@@ -920,6 +1035,16 @@ export default function App(): JSX.Element {
 
         setShops(shopData);
         setUsers(userData);
+
+        setNewUserForm((prev) => {
+          if (!shopData.length) {
+            return prev;
+          }
+          if (prev.shopIds.length) {
+            return prev;
+          }
+          return { ...prev, shopIds: [shopData[0].id], primaryShopId: shopData[0].id };
+        });
 
         setNewInvoiceForm((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
         setSalesFilters((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
@@ -1014,6 +1139,22 @@ export default function App(): JSX.Element {
     }
   }
 
+  async function refreshUsers(): Promise<void> {
+    if (!auth || !canViewUsers) {
+      return;
+    }
+    setUsersBusy(true);
+    setError(null);
+    try {
+      const data = await listUsers(auth.token);
+      setUsers(data);
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to load users");
+    } finally {
+      setUsersBusy(false);
+    }
+  }
+
   async function refreshInvoices(): Promise<void> {
     if (!auth) {
       return;
@@ -1073,6 +1214,17 @@ export default function App(): JSX.Element {
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeView, auth?.token]);
+
+  useEffect(() => {
+    if (!auth || !canViewUsers) {
+      return;
+    }
+    if (activeView !== "users") {
+      return;
+    }
+    void refreshUsers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeView, auth?.token, canViewUsers]);
 
   async function refreshSalesData(): Promise<void> {
     if (!auth) {
@@ -2315,10 +2467,10 @@ export default function App(): JSX.Element {
                   ? "Capital"
                   : "P&L";
 
-	  const topbarTitle = !authUser
-	    ? "BDK Photography BMS"
-	    : activeView === "overview"
-	      ? "Dashboard"
+  const topbarTitle = !authUser
+    ? "BDK Photography BMS"
+    : activeView === "overview"
+      ? "Dashboard"
       : activeView === "inventory"
         ? "Projects"
         : activeView === "sales"
@@ -2333,9 +2485,13 @@ export default function App(): JSX.Element {
                   ? "Cash"
                   : activeView === "reports"
                     ? `Reports · ${reportTitle}`
-                    : activeView === "messaging"
-	                      ? "Messaging"
-	                      : "Master Data";
+                    : activeView === "users"
+                      ? "Users"
+                      : activeView === "help"
+                        ? "Help"
+                        : activeView === "messaging"
+                          ? "Messaging"
+                          : "Master Data";
 
 	  return (
 	    <div className={cx("appShell", !authUser && "appShell--loggedOut")}>
@@ -2485,9 +2641,22 @@ export default function App(): JSX.Element {
                 ) : null}
               </div>
 
-              {canManageMasterData || canManageMessaging ? (
+              {canViewUsers || canManageMasterData || canManageMessaging ? (
                 <div className="navGroup">
                   <div className="navGroup__title">Admin</div>
+                  {canViewUsers ? (
+                    <button
+                      className={cx("navItem", activeView === "users" && "isActive")}
+                      type="button"
+                      onClick={() => {
+                        setActiveView("users");
+                        setSidebarOpen(false);
+                      }}
+                    >
+                      <IconUsers />
+                      Users
+                    </button>
+                  ) : null}
                   {canManageMasterData ? (
                     <button
                       className={cx("navItem", activeView === "master-data" && "isActive")}
@@ -2516,6 +2685,21 @@ export default function App(): JSX.Element {
                   ) : null}
                 </div>
               ) : null}
+
+              <div className="navGroup">
+                <div className="navGroup__title">Support</div>
+                <button
+                  className={cx("navItem", activeView === "help" && "isActive")}
+                  type="button"
+                  onClick={() => {
+                    setActiveView("help");
+                    setSidebarOpen(false);
+                  }}
+                >
+                  <IconHelp />
+                  Help
+                </button>
+              </div>
             </nav>
 
             <div className="sidebarFooter">
@@ -2546,11 +2730,24 @@ export default function App(): JSX.Element {
           ) : null}
           <h1 className="topbar__title">{topbarTitle}</h1>
           <div className="topbar__spacer" />
-          {!authUser ? null : (
+          {authUser ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<IconHelp width={18} height={18} />}
+              onClick={() => {
+                setHelpTopic("users");
+                setActiveView("help");
+              }}
+            >
+              Help
+            </Button>
+          ) : null}
+          {authUser ? (
             <Button variant="secondary" size="sm" icon={<IconLogout width={18} height={18} />} onClick={() => clearSession("Logged out.")}>
               Logout
             </Button>
-          )}
+          ) : null}
         </header>
 
         <main className="content">
@@ -2559,35 +2756,95 @@ export default function App(): JSX.Element {
         {!authUser ? (
           <>
             <section className="card">
-              <h2>Login</h2>
-              <form className="form" onSubmit={submitLogin}>
-                <label>
-                  Mobile number
-                  <input
-                    value={loginForm.mobileNumber}
-                    onChange={(event) => setLoginForm((prev) => ({ ...prev, mobileNumber: event.target.value }))}
-                    placeholder="0700 000 000"
-                    autoComplete="username"
-                    required
-                  />
-                </label>
-                <label>
-                  Password
-                  <input
-                    value={loginForm.password}
-                    onChange={(event) => setLoginForm((prev) => ({ ...prev, password: event.target.value }))}
-                    type="password"
-                    autoComplete="current-password"
-                    required
-                  />
-                </label>
-                <button type="submit" disabled={loading}>
-                  {loading ? "Signing in..." : "Login"}
-                </button>
-              </form>
-              <p className="hint">
-                If you don’t have credentials yet, ask an admin to create your account.
-              </p>
+              <h2>{resetTokenFromUrl ? "Reset Password" : "Login"}</h2>
+
+              {resetTokenFromUrl ? (
+                <>
+                  <p className="hint">
+                    Set a new password for your account. This link expires after a short time.
+                  </p>
+                  <form
+                    className="form"
+                    onSubmit={async (event) => {
+                      event.preventDefault();
+                      setError(null);
+                      setSuccess(null);
+                      if (!resetTokenFromUrl) {
+                        return;
+                      }
+                      if (!resetPasswordForm.newPassword || resetPasswordForm.newPassword !== resetPasswordForm.confirmNewPassword) {
+                        setError("Passwords do not match.");
+                        return;
+                      }
+                      setLoading(true);
+                      try {
+                        await resetPassword({ token: resetTokenFromUrl, newPassword: resetPasswordForm.newPassword });
+                        setSuccess("Password updated. Please login.");
+                        setResetPasswordForm({ newPassword: "", confirmNewPassword: "" });
+                        clearResetTokenFromUrl();
+                      } catch (caught: unknown) {
+                        setError(caught instanceof Error ? caught.message : "Failed to reset password");
+                      } finally {
+                        setLoading(false);
+                      }
+                    }}
+                  >
+                    <TextField
+                      label="New password"
+                      type="password"
+                      value={resetPasswordForm.newPassword}
+                      onChange={(event) => setResetPasswordForm((prev) => ({ ...prev, newPassword: event.target.value }))}
+                      autoComplete="new-password"
+                      helper="At least 8 characters with at least one letter and one number."
+                      required
+                    />
+                    <TextField
+                      label="Confirm new password"
+                      type="password"
+                      value={resetPasswordForm.confirmNewPassword}
+                      onChange={(event) => setResetPasswordForm((prev) => ({ ...prev, confirmNewPassword: event.target.value }))}
+                      autoComplete="new-password"
+                      required
+                    />
+                    <div className="approvalActions" style={{ gridColumn: "1 / -1" }}>
+                      <Button type="submit" disabled={loading}>
+                        {loading ? "Saving..." : "Reset password"}
+                      </Button>
+                      <Button variant="ghost" type="button" onClick={clearResetTokenFromUrl} disabled={loading}>
+                        Back to login
+                      </Button>
+                    </div>
+                  </form>
+                </>
+              ) : (
+                <>
+                  <form className="form" onSubmit={submitLogin}>
+                    <TextField
+                      label="Mobile number"
+                      value={loginForm.mobileNumber}
+                      onChange={(event) => setLoginForm((prev) => ({ ...prev, mobileNumber: event.target.value }))}
+                      placeholder="0700 000 000"
+                      autoComplete="username"
+                      required
+                    />
+                    <TextField
+                      label="Password"
+                      value={loginForm.password}
+                      onChange={(event) => setLoginForm((prev) => ({ ...prev, password: event.target.value }))}
+                      type="password"
+                      autoComplete="current-password"
+                      required
+                    />
+                    <Button type="submit" disabled={loading}>
+                      {loading ? "Signing in..." : "Login"}
+                    </Button>
+                    <Button variant="ghost" type="button" onClick={() => setForgotPasswordOpen(true)} disabled={loading}>
+                      Forgot password?
+                    </Button>
+                  </form>
+                  <p className="hint">If you don’t have credentials yet, ask an admin or manager to create your account.</p>
+                </>
+              )}
             </section>
 
             <section className="card">
@@ -2610,23 +2867,45 @@ export default function App(): JSX.Element {
               </div>
             </section>
           </>
-        ) : activeView === "overview" ? (
-          <>
-            <section className="card">
-              <h2>Profile</h2>
-              <ul className="stack">
+	        ) : activeView === "overview" ? (
+	          <>
+	            <section className="card">
+	              <h2>Profile</h2>
+	              <ul className="stack">
                 <li>
                   <strong>Name:</strong> {authUser.fullName}
                 </li>
                 <li>
                   <strong>Role:</strong> {authUser.role}
                 </li>
-                <li>
-                  <strong>Phone:</strong> {authUser.mobileNumber}
-                </li>
-              </ul>
-              {loading ? <p className="hint">Refreshing data...</p> : null}
-            </section>
+	                <li>
+	                  <strong>Phone:</strong> {authUser.mobileNumber}
+	                </li>
+	              </ul>
+	              <div className="approvalActions" style={{ marginTop: "0.85rem" }}>
+	                <Button
+	                  variant="secondary"
+	                  size="sm"
+	                  onClick={() => {
+	                    setChangePasswordOpen(true);
+	                  }}
+	                >
+	                  Change password
+	                </Button>
+	                <Button
+	                  variant="ghost"
+	                  size="sm"
+	                  icon={<IconHelp width={18} height={18} />}
+	                  onClick={() => {
+	                    setHelpTopic("passwords");
+	                    setActiveView("help");
+	                  }}
+	                >
+	                  Help
+	                </Button>
+	              </div>
+	              {loading ? <p className="hint">Refreshing data...</p> : null}
+	            </section>
 
             <section className="card">
               <h2>Shops</h2>
@@ -2695,21 +2974,570 @@ export default function App(): JSX.Element {
               </section>
             )}
 
-            <section className="card">
-              <h2>Next Modules</h2>
-              <ul className="stack">
+	            <section className="card">
+	              <h2>Next Modules</h2>
+	              <ul className="stack">
                 <li>Messaging provider integration (SMS / WhatsApp / Email) + retries/cron</li>
                 <li>Audit log viewer UI</li>
                 <li>Inventory movement reports + exports</li>
                 <li>Workshop yield + waste reports + exports</li>
                 <li>Capital dashboard trend (historical snapshots)</li>
-              </ul>
-            </section>
-          </>
-        ) : activeView === "customers" ? (
-          <>
-            <section className="card" style={{ gridColumn: "1 / -1" }}>
-              <h2>Customers</h2>
+	              </ul>
+	            </section>
+	          </>
+	        ) : activeView === "users" ? (
+	          <>
+	            <section className="card" style={{ gridColumn: "1 / -1" }}>
+	              <div className="meta" style={{ gridTemplateColumns: "1fr auto", alignItems: "start" }}>
+	                <div>
+	                  <h2 style={{ marginBottom: 0 }}>Users</h2>
+	                  <p className="hint">
+	                    Admins can manage all users. Managers can manage SALES users in their assigned shops.
+	                  </p>
+	                </div>
+	                <div className="approvalActions">
+	                  <Button
+	                    variant="ghost"
+	                    size="sm"
+	                    icon={<IconHelp width={18} height={18} />}
+	                    onClick={() => {
+	                      setHelpTopic("users");
+	                      setActiveView("help");
+	                    }}
+	                  >
+	                    Help
+	                  </Button>
+	                </div>
+	              </div>
+	            </section>
+
+	            {!canViewUsers ? (
+	              <section className="card" style={{ gridColumn: "1 / -1" }}>
+	                <div className="note">You don’t have permission to view users.</div>
+	              </section>
+	            ) : (
+	              <>
+	                {canManageUsers ? (
+	                  <section className="card">
+	                    <h2>Create User</h2>
+	                    <p className="hint">
+	                      Passwords must be at least 8 characters and include at least one letter and one number.
+	                    </p>
+	                    <form
+	                      className="form"
+	                      onSubmit={async (event) => {
+	                        event.preventDefault();
+	                        if (!auth) {
+	                          return;
+	                        }
+	                        setError(null);
+	                        setSuccess(null);
+	                        setUsersBusy(true);
+	                        try {
+	                          if (!newUserForm.password || newUserForm.password !== newUserForm.confirmPassword) {
+	                            throw new Error("Passwords do not match.");
+	                          }
+
+	                          const actorRole = authUser?.role ?? "SALES";
+	                          const requestedRole = actorRole === "ADMIN" ? newUserForm.role : "SALES";
+	                          const allowedShops =
+	                            actorRole === "ADMIN" ? shops : shops.filter((s) => authUser?.shops?.some((a) => a.shopId === s.id));
+
+	                          const shopIds =
+	                            requestedRole === "ADMIN"
+	                              ? []
+	                              : requestedRole === "SALES"
+	                                ? [newUserForm.primaryShopId].filter(Boolean)
+	                                : newUserForm.shopIds;
+
+	                          const primaryShopId =
+	                            requestedRole === "ADMIN"
+	                              ? null
+	                              : requestedRole === "SALES"
+	                                ? newUserForm.primaryShopId || null
+	                                : newUserForm.primaryShopId || null;
+
+	                          if (requestedRole === "SALES" && shopIds.length !== 1) {
+	                            throw new Error("SALES users must be assigned to exactly one shop.");
+	                          }
+	                          if (requestedRole === "MANAGER" && shopIds.length < 1) {
+	                            throw new Error("MANAGER users must be assigned to at least one shop.");
+	                          }
+	                          if (requestedRole !== "ADMIN") {
+	                            const allowedIds = new Set(allowedShops.map((s) => s.id));
+	                            for (const sid of shopIds) {
+	                              if (!allowedIds.has(sid)) {
+	                                throw new Error("You can only assign users to shops you have access to.");
+	                              }
+	                            }
+	                          }
+
+	                          await createUser(auth.token, {
+	                            fullName: newUserForm.fullName,
+	                            mobileNumber: newUserForm.mobileNumber,
+	                            email: newUserForm.email ? newUserForm.email : null,
+	                            role: requestedRole,
+	                            password: newUserForm.password,
+	                            shopIds,
+	                            primaryShopId,
+	                            notes: newUserForm.notes ? newUserForm.notes : null,
+	                            isActive: newUserForm.isActive
+	                          });
+
+	                          setSuccess("User created.");
+	                          setNewUserForm((prev) => ({
+	                            ...prev,
+	                            fullName: "",
+	                            mobileNumber: "",
+	                            email: "",
+	                            password: "",
+	                            confirmPassword: "",
+	                            notes: "",
+	                            isActive: true
+	                          }));
+	                          await refreshUsers();
+	                        } catch (caught: unknown) {
+	                          setError(caught instanceof Error ? caught.message : "Failed to create user");
+	                        } finally {
+	                          setUsersBusy(false);
+	                        }
+	                      }}
+	                    >
+	                      <TextField
+	                        label="Full name"
+	                        value={newUserForm.fullName}
+	                        onChange={(event) => setNewUserForm((prev) => ({ ...prev, fullName: event.target.value }))}
+	                        required
+	                      />
+	                      <TextField
+	                        label="Mobile number"
+	                        value={newUserForm.mobileNumber}
+	                        onChange={(event) => setNewUserForm((prev) => ({ ...prev, mobileNumber: event.target.value }))}
+	                        placeholder="0700 000 000"
+	                        required
+	                      />
+	                      <TextField
+	                        label="Email (optional)"
+	                        value={newUserForm.email}
+	                        onChange={(event) => setNewUserForm((prev) => ({ ...prev, email: event.target.value }))}
+	                        placeholder="name@example.com"
+	                      />
+
+	                      <SelectField
+	                        label="Role"
+	                        value={authUser?.role === "ADMIN" ? newUserForm.role : "SALES"}
+	                        onChange={(event) =>
+	                          setNewUserForm((prev) => ({
+	                            ...prev,
+	                            role:
+	                              event.target.value === "ADMIN"
+	                                ? "ADMIN"
+	                                : event.target.value === "MANAGER"
+	                                  ? "MANAGER"
+	                                  : "SALES"
+	                          }))
+	                        }
+	                        disabled={authUser?.role !== "ADMIN"}
+	                      >
+	                        <option value="SALES">Sales</option>
+	                        <option value="MANAGER">Manager</option>
+	                        <option value="ADMIN">Admin</option>
+	                      </SelectField>
+
+	                      {(() => {
+	                        const actorRole = authUser?.role ?? "SALES";
+	                        const requestedRole = actorRole === "ADMIN" ? newUserForm.role : "SALES";
+	                        const allowedShops =
+	                          actorRole === "ADMIN" ? shops : shops.filter((s) => authUser?.shops?.some((a) => a.shopId === s.id));
+
+	                        if (requestedRole === "ADMIN") {
+	                          return null;
+	                        }
+
+	                        if (requestedRole === "SALES") {
+	                          return (
+	                            <SelectField
+	                              label="Shop"
+	                              value={newUserForm.primaryShopId}
+	                              onChange={(event) =>
+	                                setNewUserForm((prev) => ({ ...prev, primaryShopId: event.target.value, shopIds: [event.target.value] }))
+	                              }
+	                              required
+	                            >
+	                              <option value="" disabled>
+	                                Select shop...
+	                              </option>
+	                              {allowedShops.map((s) => (
+	                                <option key={s.id} value={s.id}>
+	                                  {s.code} • {s.name}
+	                                </option>
+	                              ))}
+	                            </SelectField>
+	                          );
+	                        }
+
+	                        return (
+	                          <div style={{ gridColumn: "1 / -1" }}>
+	                            <div className="hint" style={{ marginBottom: "0.4rem" }}>
+	                              Shops (choose one or more)
+	                            </div>
+	                            <div className="note" style={{ display: "grid", gap: "0.35rem" }}>
+	                              {allowedShops.map((s) => {
+	                                const checked = newUserForm.shopIds.includes(s.id);
+	                                return (
+	                                  <label key={s.id} className="checkbox" style={{ margin: 0 }}>
+	                                    <input
+	                                      type="checkbox"
+	                                      checked={checked}
+	                                      onChange={(event) => {
+	                                        const isChecked = event.target.checked;
+	                                        setNewUserForm((prev) => {
+	                                          const nextShopIds = isChecked
+	                                            ? Array.from(new Set([...prev.shopIds, s.id]))
+	                                            : prev.shopIds.filter((id) => id !== s.id);
+	                                          const nextPrimary =
+	                                            prev.primaryShopId && nextShopIds.includes(prev.primaryShopId)
+	                                              ? prev.primaryShopId
+	                                              : nextShopIds[0] ?? "";
+	                                          return { ...prev, shopIds: nextShopIds, primaryShopId: nextPrimary };
+	                                        });
+	                                      }}
+	                                    />
+	                                    {s.code} • {s.name}
+	                                  </label>
+	                                );
+	                              })}
+	                            </div>
+
+	                            <div style={{ marginTop: "0.65rem", maxWidth: 520 }}>
+	                              <SelectField
+	                                label="Primary shop"
+	                                value={newUserForm.primaryShopId}
+	                                onChange={(event) => setNewUserForm((prev) => ({ ...prev, primaryShopId: event.target.value }))}
+	                                disabled={!newUserForm.shopIds.length}
+	                              >
+	                                <option value="">(none)</option>
+	                                {allowedShops
+	                                  .filter((s) => newUserForm.shopIds.includes(s.id))
+	                                  .map((s) => (
+	                                    <option key={s.id} value={s.id}>
+	                                      {s.code} • {s.name}
+	                                    </option>
+	                                  ))}
+	                              </SelectField>
+	                            </div>
+	                          </div>
+	                        );
+	                      })()}
+
+	                      <TextField
+	                        label="Password"
+	                        type="password"
+	                        value={newUserForm.password}
+	                        onChange={(event) => setNewUserForm((prev) => ({ ...prev, password: event.target.value }))}
+	                        autoComplete="new-password"
+	                        required
+	                      />
+	                      <TextField
+	                        label="Confirm password"
+	                        type="password"
+	                        value={newUserForm.confirmPassword}
+	                        onChange={(event) => setNewUserForm((prev) => ({ ...prev, confirmPassword: event.target.value }))}
+	                        autoComplete="new-password"
+	                        required
+	                      />
+	                      <TextAreaField
+	                        label="Notes (optional)"
+	                        value={newUserForm.notes}
+	                        onChange={(event) => setNewUserForm((prev) => ({ ...prev, notes: event.target.value }))}
+	                      />
+	                      <label className="checkbox">
+	                        <input
+	                          type="checkbox"
+	                          checked={newUserForm.isActive}
+	                          onChange={(event) => setNewUserForm((prev) => ({ ...prev, isActive: event.target.checked }))}
+	                        />
+	                        Active
+	                      </label>
+	                      <Button type="submit" disabled={usersBusy}>
+	                        {usersBusy ? "Saving..." : "Create user"}
+	                      </Button>
+	                    </form>
+	                  </section>
+	                ) : null}
+
+	                <section className="card" style={{ gridColumn: "1 / -1" }}>
+	                  <h2>User List</h2>
+	                  {usersBusy ? <p className="hint">Loading...</p> : null}
+	                  <Table>
+	                    <thead>
+	                      <tr>
+	                        <th>Name</th>
+	                        <th>Role</th>
+	                        <th>Phone</th>
+	                        <th>Email</th>
+	                        <th>Shops</th>
+	                        <th>Active</th>
+	                        <th>Actions</th>
+	                      </tr>
+	                    </thead>
+	                    <tbody>
+	                      {users.length ? (
+	                        users.map((u) => (
+	                          <tr key={u.id} className={editingUserId === u.id ? "isSelected" : ""}>
+	                            <td>{u.fullName}</td>
+	                            <td>{u.role}</td>
+	                            <td>{u.mobileNumber}</td>
+	                            <td>{u.email ?? "-"}</td>
+	                            <td>{shopCodesForUser.get(u.id) || "-"}</td>
+	                            <td>{u.isActive ? "Yes" : "No"}</td>
+	                            <td>
+	                              <div className="approvalActions">
+	                                <button
+	                                  data-variant="ghost"
+	                                  type="button"
+	                                  onClick={() => {
+	                                    setEditingUserId(u.id);
+	                                    const shopIds = (u.shops ?? []).map((s) => s.shopId);
+	                                    const primary = (u.shops ?? []).find((s) => s.isPrimary)?.shopId ?? shopIds[0] ?? "";
+	                                    setEditingUserForm({
+	                                      fullName: u.fullName,
+	                                      email: u.email ?? "",
+	                                      role: u.role,
+	                                      shopIds,
+	                                      primaryShopId: primary,
+	                                      notes: u.notes ?? "",
+	                                      isActive: u.isActive
+	                                    });
+	                                  }}
+	                                >
+	                                  Edit
+	                                </button>
+	                                <button
+	                                  data-variant="ghost"
+	                                  type="button"
+	                                  disabled={usersBusy}
+	                                  onClick={async () => {
+	                                    if (!auth) {
+	                                      return;
+	                                    }
+	                                    const ok = window.confirm("Generate a password reset link for this user?");
+	                                    if (!ok) {
+	                                      return;
+	                                    }
+	                                    setError(null);
+	                                    setSuccess(null);
+	                                    setUsersBusy(true);
+	                                    try {
+	                                      const result = await adminResetUserPassword(auth.token, u.id, { notes: "UI reset link" });
+	                                      setLastPasswordReset({ resetLink: result.resetLink, expiresAt: result.expiresAt });
+	                                      setSuccess("Reset link generated.");
+	                                    } catch (caught: unknown) {
+	                                      setError(caught instanceof Error ? caught.message : "Failed to generate reset link");
+	                                    } finally {
+	                                      setUsersBusy(false);
+	                                    }
+	                                  }}
+	                                >
+	                                  Reset password
+	                                </button>
+	                              </div>
+	                            </td>
+	                          </tr>
+	                        ))
+	                      ) : (
+	                        <tr>
+	                          <td colSpan={7}>No users found.</td>
+	                        </tr>
+	                      )}
+	                    </tbody>
+	                  </Table>
+	                </section>
+	              </>
+	            )}
+	          </>
+	        ) : activeView === "help" ? (
+	          <>
+	            <section className="card" style={{ gridColumn: "1 / -1" }}>
+	              <h2>Help & Documentation</h2>
+	              <p className="hint">
+	                Role-aware guidance for the core workflows. This content matches the current system behavior.
+	              </p>
+	              <div className="tabs" style={{ marginTop: "0.85rem" }}>
+	                <button
+	                  className={`tab ${helpTopic === "users" ? "isActive" : ""}`}
+	                  type="button"
+	                  onClick={() => setHelpTopic("users")}
+	                >
+	                  Users
+	                </button>
+	                <button
+	                  className={`tab ${helpTopic === "passwords" ? "isActive" : ""}`}
+	                  type="button"
+	                  onClick={() => setHelpTopic("passwords")}
+	                >
+	                  Passwords
+	                </button>
+	                <button
+	                  className={`tab ${helpTopic === "invoicing" ? "isActive" : ""}`}
+	                  type="button"
+	                  onClick={() => setHelpTopic("invoicing")}
+	                >
+	                  Invoicing
+	                </button>
+	              </div>
+	            </section>
+
+	            {helpTopic === "users" ? (
+	              <>
+	                <section className="card" style={{ gridColumn: "1 / -1" }}>
+	                  <h2>How To Create Users</h2>
+	                  {authUser?.role === "SALES" ? (
+	                    <div className="note">
+	                      <strong>Sales staff cannot create users.</strong> Ask an Admin or Manager to create your account.
+	                    </div>
+	                  ) : (
+	                    <div className="note">
+	                      <strong>Who can create users?</strong> Admins and Managers. Managers can create <strong>SALES</strong> users only.
+	                    </div>
+	                  )}
+	                  <div className="divider" />
+	                  <ol className="stack">
+	                    <li>
+	                      Open the sidebar and go to <strong>Admin → Users</strong>.
+	                    </li>
+	                    <li>
+	                      Fill in <strong>Full name</strong>, <strong>Mobile number</strong>, and <strong>Password</strong>.
+	                    </li>
+	                    <li>
+	                      Choose the <strong>Role</strong>:
+	                      <div className="hint">
+	                        Admin: full access. Manager: manages sales staff in assigned shops. Sales: assigned to exactly one shop.
+	                      </div>
+	                    </li>
+	                    <li>
+	                      Assign <strong>Shop(s)</strong>:
+	                      <div className="hint">
+	                        Sales users must have exactly one shop. Managers must have at least one shop. Admins do not require shops.
+	                      </div>
+	                    </li>
+	                    <li>
+	                      Click <strong>Create user</strong>.
+	                    </li>
+	                  </ol>
+		                  <div className="divider" />
+		                  <div className="note">
+		                    <strong>Custom roles / permissions:</strong> Not supported in v1. Roles are fixed to Admin / Manager / Sales.
+		                    <div style={{ marginTop: "0.4rem" }}>
+		                      <strong>Link user to customer/client record:</strong> Not applicable in v1. Customers are managed separately under <strong>Customers</strong>.
+		                    </div>
+		                  </div>
+		                </section>
+	              </>
+	            ) : helpTopic === "passwords" ? (
+	              <>
+	                <section className="card" style={{ gridColumn: "1 / -1" }}>
+	                  <h2>How To Change Or Reset Password</h2>
+	                  <div className="note">
+	                    <strong>Password policy:</strong> at least 8 characters, with at least one letter and one number.
+	                  </div>
+	                  <div className="divider" />
+	                  <h3 style={{ marginTop: 0 }}>Change your own password</h3>
+	                  <ol className="stack">
+	                    <li>
+	                      Go to <strong>Dashboard → Profile</strong>.
+	                    </li>
+	                    <li>
+	                      Click <strong>Change password</strong>.
+	                    </li>
+	                    <li>
+	                      Enter your current password, then a new password, then confirm.
+	                    </li>
+	                  </ol>
+	                  <div className="divider" />
+	                  {authUser?.role === "ADMIN" || authUser?.role === "MANAGER" ? (
+	                    <>
+	                      <h3 style={{ marginTop: 0 }}>Admin/Manager reset for a user</h3>
+	                      <ol className="stack">
+	                        <li>
+	                          Go to <strong>Admin → Users</strong>.
+	                        </li>
+	                        <li>
+	                          Click <strong>Reset password</strong> for the user.
+	                        </li>
+	                        <li>
+	                          Copy the generated reset link and send it to the user.
+	                        </li>
+	                      </ol>
+	                      <div className="note">
+	                        Managers can reset passwords for SALES users in their shops only.
+	                      </div>
+	                      <div className="divider" />
+	                    </>
+	                  ) : null}
+	                  <h3 style={{ marginTop: 0 }}>Forgot password (from login)</h3>
+	                  <ol className="stack">
+	                    <li>
+	                      On the login screen, click <strong>Forgot password?</strong>
+	                    </li>
+	                    <li>
+	                      Enter your mobile number (or email) and submit.
+	                    </li>
+		                  </ol>
+		                  <div className="note">
+		                    <strong>Security:</strong> the system will not confirm whether an account exists. Reset links expire (default 30 minutes) and can be used once. After a change/reset, existing sessions are invalidated and the user may need to log in again. In this build, delivery is queued (not automatically sent), so ask an admin/manager for the reset link if needed.
+		                  </div>
+		                </section>
+	              </>
+	            ) : (
+	              <>
+	                <section className="card" style={{ gridColumn: "1 / -1" }}>
+	                  <h2>How Invoicing Relates To A Sale</h2>
+	                  <div className="note">
+	                    <strong>Sale</strong> = the POS transaction (stock movement + who recorded it).
+	                    <br />
+	                    <strong>Invoice</strong> = the bill/request for payment (can exist with or without a sale).
+	                    <br />
+	                    <strong>Payment</strong> = money received against an invoice (installments supported).
+	                  </div>
+	                  <div className="divider" />
+		                  <pre style={{ whiteSpace: "pre-wrap", margin: 0 }}>
+{`Sale (POS)
+  - Payment method: CASH / MOBILE_MONEY / CARD / CREDIT
+  - Deducts stock immediately
+
+Invoice
+  - Number format: SHOPCODE-000001 (sequential per shop)
+  - Status lifecycle: DRAFT -> ISSUED -> PARTIALLY_PAID -> PAID
+  - VOID is admin-only
+
+If payment method = CREDIT:
+  Sale  ->  Invoice (auto-created, status ISSUED, balance = total)  ->  Payments (installments)
+
+Payments update invoice status:
+  ISSUED -> PARTIALLY_PAID -> PAID`}
+		                  </pre>
+	                  <div className="divider" />
+	                  <h3 style={{ marginTop: 0 }}>Examples</h3>
+	                  <ul className="stack">
+	                    <li>
+	                      <strong>Cash sale:</strong> record the sale in POS. No invoice is required.
+	                    </li>
+	                    <li>
+	                      <strong>Credit sale:</strong> record the sale in POS with payment method CREDIT and select a customer. The system creates an ISSUED invoice automatically.
+	                    </li>
+	                    <li>
+	                      <strong>Manual invoice:</strong> go to Invoices and create a new invoice (Draft or Issued). Record payments as installments.
+	                    </li>
+	                  </ul>
+	                </section>
+	              </>
+	            )}
+	          </>
+	        ) : activeView === "customers" ? (
+	          <>
+	            <section className="card" style={{ gridColumn: "1 / -1" }}>
+	              <h2>Customers</h2>
               <p className="hint">Create and manage customers for invoicing, credit, and reminders.</p>
             </section>
 
@@ -3014,17 +3842,28 @@ export default function App(): JSX.Element {
           </>
         ) : activeView === "invoices" ? (
           <>
-            <section className="card" style={{ gridColumn: "1 / -1" }}>
-              <div className="meta" style={{ gridTemplateColumns: "1fr auto", alignItems: "start" }}>
-                <div>
-                  <h2 style={{ marginBottom: 0 }}>Invoices</h2>
-                  <p className="hint">Create invoices, print them, and record installment payments (cash/mobile money/card).</p>
-                </div>
-                <div className="approvalActions">
-                  {canManageInvoices ? (
-                    <Button
-                      icon={<IconInvoices width={18} height={18} />}
-                      onClick={() => {
+	            <section className="card" style={{ gridColumn: "1 / -1" }}>
+	              <div className="meta" style={{ gridTemplateColumns: "1fr auto", alignItems: "start" }}>
+	                <div>
+	                  <h2 style={{ marginBottom: 0 }}>Invoices</h2>
+	                  <p className="hint">Create invoices, print them, and record installment payments (cash/mobile money/card).</p>
+	                </div>
+	                <div className="approvalActions">
+	                  <Button
+	                    variant="ghost"
+	                    size="sm"
+	                    icon={<IconHelp width={18} height={18} />}
+	                    onClick={() => {
+	                      setHelpTopic("invoicing");
+	                      setActiveView("help");
+	                    }}
+	                  >
+	                    Help
+	                  </Button>
+	                  {canManageInvoices ? (
+	                    <Button
+	                      icon={<IconInvoices width={18} height={18} />}
+	                      onClick={() => {
                         const firstCustomerId = activeCustomerOptions[0]?.value ?? "";
                         if (firstCustomerId) {
                           setNewInvoiceForm((prev) => (prev.customerId ? prev : { ...prev, customerId: firstCustomerId }));
@@ -3032,12 +3871,12 @@ export default function App(): JSX.Element {
                         setInvoiceCreateOpen(true);
                       }}
                     >
-                      New invoice
-                    </Button>
-                  ) : null}
-                </div>
-              </div>
-            </section>
+	                      New invoice
+	                    </Button>
+	                  ) : null}
+	                </div>
+	              </div>
+	            </section>
 
             {!canManageInvoices ? (
               <section className="card" style={{ gridColumn: "1 / -1" }}>
@@ -4563,15 +5402,28 @@ export default function App(): JSX.Element {
           </>
         ) : activeView === "sales" ? (
           <>
-            <section className="card" style={{ gridColumn: "1 / -1" }}>
-              <h2>Sales (POS)</h2>
-              <p className="hint">
-                Record sales (cash/mobile money/card/credit). Credit sales auto-create an ISSUED invoice.
-              </p>
-
-              <form
-                className="form form--three"
-                onSubmit={(event) => {
+	            <section className="card" style={{ gridColumn: "1 / -1" }}>
+	              <h2>Sales (POS)</h2>
+	              <p className="hint">
+	                Record sales (cash/mobile money/card/credit). Credit sales auto-create an ISSUED invoice.
+	              </p>
+	              <div className="approvalActions" style={{ justifyContent: "flex-end" }}>
+	                <Button
+	                  variant="ghost"
+	                  size="sm"
+	                  icon={<IconHelp width={18} height={18} />}
+	                  onClick={() => {
+	                    setHelpTopic("invoicing");
+	                    setActiveView("help");
+	                  }}
+	                >
+	                  Help
+	                </Button>
+	              </div>
+	
+	              <form
+	                className="form form--three"
+	                onSubmit={(event) => {
                   event.preventDefault();
                   void refreshSalesData();
                 }}
@@ -8356,9 +9208,9 @@ export default function App(): JSX.Element {
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
 
       {/* Phase 3: invoice creation and payments are the most common actions; keep them in fast modals. */}
-      {authUser ? (
-        <>
-          <Modal
+	      {authUser ? (
+	        <>
+	          <Modal
             open={invoiceCreateOpen}
             title="New Invoice"
             onClose={() => setInvoiceCreateOpen(false)}
@@ -8692,9 +9544,457 @@ export default function App(): JSX.Element {
             ) : (
               <div className="note">Select an invoice first on the Invoices screen.</div>
             )}
-          </Modal>
-        </>
-      ) : null}
-    </div>
-  );
-}
+	          </Modal>
+	        </>
+	      ) : null}
+
+	      <Modal
+	        open={forgotPasswordOpen}
+	        title="Forgot Password"
+	        onClose={() => {
+	          setForgotPasswordOpen(false);
+	          setForgotPasswordForm({ mobileNumber: "", email: "" });
+	        }}
+	        size="sm"
+	        footer={
+	          <div className="approvalActions" style={{ justifyContent: "flex-end" }}>
+	            <Button
+	              variant="ghost"
+	              onClick={() => {
+	                setForgotPasswordOpen(false);
+	                setForgotPasswordForm({ mobileNumber: "", email: "" });
+	              }}
+	              disabled={loading}
+	            >
+	              Cancel
+	            </Button>
+	            <Button form="forgot-password-form" type="submit" disabled={loading}>
+	              {loading ? "Sending..." : "Send reset link"}
+	            </Button>
+	          </div>
+	        }
+	      >
+	        <form
+	          id="forgot-password-form"
+	          className="form"
+	          onSubmit={async (event) => {
+	            event.preventDefault();
+	            setError(null);
+	            setSuccess(null);
+	            const mobile = forgotPasswordForm.mobileNumber.trim();
+	            const email = forgotPasswordForm.email.trim();
+	            if (!mobile && !email) {
+	              setError("Enter your mobile number or email.");
+	              return;
+	            }
+	            setLoading(true);
+	            try {
+	              await forgotPassword({
+	                mobileNumber: mobile ? mobile : undefined,
+	                email: email ? email : undefined
+	              });
+	              setSuccess("If an account exists, a reset link has been queued. Ask an admin/manager if you don’t receive it.");
+	              setForgotPasswordOpen(false);
+	              setForgotPasswordForm({ mobileNumber: "", email: "" });
+	            } catch (caught: unknown) {
+	              setError(caught instanceof Error ? caught.message : "Failed to request reset link");
+	            } finally {
+	              setLoading(false);
+	            }
+	          }}
+	        >
+	          <TextField
+	            label="Mobile number (optional)"
+	            value={forgotPasswordForm.mobileNumber}
+	            onChange={(event) => setForgotPasswordForm((prev) => ({ ...prev, mobileNumber: event.target.value }))}
+	            placeholder="0700 000 000"
+	            autoComplete="username"
+	          />
+	          <TextField
+	            label="Email (optional)"
+	            value={forgotPasswordForm.email}
+	            onChange={(event) => setForgotPasswordForm((prev) => ({ ...prev, email: event.target.value }))}
+	            placeholder="name@example.com"
+	            autoComplete="email"
+	          />
+	          <div className="note" style={{ gridColumn: "1 / -1" }}>
+	            For security, this form will not confirm whether the account exists. Reset links expire after a short time. In this build, delivery is queued (not automatically sent).
+	          </div>
+	        </form>
+	      </Modal>
+
+	      {authUser ? (
+	        <Modal
+	          open={changePasswordOpen}
+	          title="Change Password"
+	          onClose={() => {
+	            setChangePasswordOpen(false);
+	            setChangePasswordForm({ currentPassword: "", newPassword: "", confirmNewPassword: "" });
+	          }}
+	          size="sm"
+	          footer={
+	            <div className="approvalActions" style={{ justifyContent: "flex-end" }}>
+	              <Button
+	                variant="ghost"
+	                onClick={() => {
+	                  setChangePasswordOpen(false);
+	                  setChangePasswordForm({ currentPassword: "", newPassword: "", confirmNewPassword: "" });
+	                }}
+	                disabled={loading}
+	              >
+	                Cancel
+	              </Button>
+	              <Button form="change-password-form" type="submit" disabled={loading}>
+	                {loading ? "Saving..." : "Update password"}
+	              </Button>
+	            </div>
+	          }
+	        >
+	          <form
+	            id="change-password-form"
+	            className="form"
+	            onSubmit={async (event) => {
+	              event.preventDefault();
+	              if (!auth) {
+	                return;
+	              }
+	              setError(null);
+	              setSuccess(null);
+	              if (!changePasswordForm.newPassword || changePasswordForm.newPassword !== changePasswordForm.confirmNewPassword) {
+	                setError("Passwords do not match.");
+	                return;
+	              }
+	              setLoading(true);
+	              try {
+	                const result = await changePassword(auth.token, {
+	                  currentPassword: changePasswordForm.currentPassword,
+	                  newPassword: changePasswordForm.newPassword
+	                });
+	                const nextAuth: AuthState = { token: result.token, user: auth.user };
+	                setAuth(nextAuth);
+	                writeStoredAuth(nextAuth);
+	                setChangePasswordOpen(false);
+	                setChangePasswordForm({ currentPassword: "", newPassword: "", confirmNewPassword: "" });
+	                setSuccess("Password updated.");
+	              } catch (caught: unknown) {
+	                setError(caught instanceof Error ? caught.message : "Failed to change password");
+	              } finally {
+	                setLoading(false);
+	              }
+	            }}
+	          >
+	            <TextField
+	              label="Current password"
+	              type="password"
+	              value={changePasswordForm.currentPassword}
+	              onChange={(event) => setChangePasswordForm((prev) => ({ ...prev, currentPassword: event.target.value }))}
+	              autoComplete="current-password"
+	              required
+	            />
+	            <TextField
+	              label="New password"
+	              type="password"
+	              value={changePasswordForm.newPassword}
+	              onChange={(event) => setChangePasswordForm((prev) => ({ ...prev, newPassword: event.target.value }))}
+	              helper="At least 8 characters with at least one letter and one number."
+	              autoComplete="new-password"
+	              required
+	            />
+	            <TextField
+	              label="Confirm new password"
+	              type="password"
+	              value={changePasswordForm.confirmNewPassword}
+	              onChange={(event) => setChangePasswordForm((prev) => ({ ...prev, confirmNewPassword: event.target.value }))}
+	              autoComplete="new-password"
+	              required
+	            />
+	          </form>
+	        </Modal>
+	      ) : null}
+
+	      <Modal
+	        open={lastPasswordReset ? true : false}
+	        title="Password Reset Link"
+	        onClose={() => setLastPasswordReset(null)}
+	        size="md"
+	        footer={
+	          <div className="approvalActions" style={{ justifyContent: "flex-end" }}>
+	            <Button variant="ghost" onClick={() => setLastPasswordReset(null)}>
+	              Close
+	            </Button>
+	            <Button
+	              variant="secondary"
+	              onClick={async () => {
+	                const link = lastPasswordReset?.resetLink ?? "";
+	                if (!link) {
+	                  return;
+	                }
+	                try {
+	                  await navigator.clipboard.writeText(link);
+	                  setSuccess("Copied reset link.");
+	                } catch {
+	                  window.prompt("Copy reset link:", link);
+	                }
+	              }}
+	            >
+	              Copy link
+	            </Button>
+	          </div>
+	        }
+	      >
+	        {lastPasswordReset ? (
+	          <>
+	            <div className="note">
+	              Share this link with the user. It expires at <strong>{lastPasswordReset.expiresAt}</strong> and can be used once.
+	            </div>
+	            <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", margin: 0 }}>{lastPasswordReset.resetLink}</pre>
+	          </>
+	        ) : null}
+	      </Modal>
+
+	      {authUser && editingUserId && editingUserForm ? (
+	        <Modal
+	          open={true}
+	          title="Edit User"
+	          onClose={() => {
+	            setEditingUserId(null);
+	            setEditingUserForm(null);
+	          }}
+	          size="lg"
+	          footer={
+	            <div className="approvalActions" style={{ justifyContent: "flex-end" }}>
+	              <Button
+	                variant="ghost"
+	                onClick={() => {
+	                  setEditingUserId(null);
+	                  setEditingUserForm(null);
+	                }}
+	                disabled={usersBusy}
+	              >
+	                Cancel
+	              </Button>
+	              <Button form="edit-user-form" type="submit" disabled={usersBusy}>
+	                {usersBusy ? "Saving..." : "Save changes"}
+	              </Button>
+	            </div>
+	          }
+	        >
+	          <form
+	            id="edit-user-form"
+	            className="form"
+	            onSubmit={async (event) => {
+	              event.preventDefault();
+	              if (!auth || !editingUserId || !editingUserForm) {
+	                return;
+	              }
+	              setError(null);
+	              setSuccess(null);
+	              setUsersBusy(true);
+	              try {
+	                const actorRole = authUser.role;
+	                const allowedShops =
+	                  actorRole === "ADMIN" ? shops : shops.filter((s) => authUser.shops?.some((a) => a.shopId === s.id));
+
+	                const requestedRole = actorRole === "ADMIN" ? editingUserForm.role : "SALES";
+	                const shopIds =
+	                  requestedRole === "ADMIN"
+	                    ? []
+	                    : requestedRole === "SALES"
+	                      ? [editingUserForm.primaryShopId].filter(Boolean)
+	                      : editingUserForm.shopIds;
+
+	                if (requestedRole === "SALES" && shopIds.length !== 1) {
+	                  throw new Error("SALES users must be assigned to exactly one shop.");
+	                }
+	                if (requestedRole === "MANAGER" && shopIds.length < 1) {
+	                  throw new Error("MANAGER users must be assigned to at least one shop.");
+	                }
+	                if (requestedRole !== "ADMIN") {
+	                  const allowedIds = new Set(allowedShops.map((s) => s.id));
+	                  for (const sid of shopIds) {
+	                    if (!allowedIds.has(sid)) {
+	                      throw new Error("You can only assign users to shops you have access to.");
+	                    }
+	                  }
+	                }
+
+	                const updated = await updateUser(auth.token, editingUserId, {
+	                  fullName: editingUserForm.fullName,
+	                  email: editingUserForm.email ? editingUserForm.email : null,
+	                  ...(actorRole === "ADMIN" ? { role: requestedRole } : {}),
+	                  shopIds,
+	                  primaryShopId:
+	                    requestedRole === "ADMIN"
+	                      ? null
+	                      : requestedRole === "SALES"
+	                        ? editingUserForm.primaryShopId || null
+	                        : editingUserForm.primaryShopId || null,
+	                  notes: editingUserForm.notes ? editingUserForm.notes : null,
+	                  isActive: editingUserForm.isActive
+	                });
+
+	                setSuccess("User updated.");
+	                setEditingUserId(null);
+	                setEditingUserForm(null);
+	                await refreshUsers();
+
+	                // If you edited yourself, refresh the in-memory profile.
+	                if (authUser.id === updated.id) {
+	                  const me = await getMe(auth.token);
+	                  const nextAuth: AuthState = { token: auth.token, user: me };
+	                  setAuth(nextAuth);
+	                  writeStoredAuth(nextAuth);
+	                }
+	              } catch (caught: unknown) {
+	                setError(caught instanceof Error ? caught.message : "Failed to update user");
+	              } finally {
+	                setUsersBusy(false);
+	              }
+	            }}
+	          >
+	            <TextField
+	              label="Full name"
+	              value={editingUserForm.fullName}
+	              onChange={(event) => setEditingUserForm((prev) => (prev ? { ...prev, fullName: event.target.value } : prev))}
+	              required
+	            />
+	            <TextField
+	              label="Email (optional)"
+	              value={editingUserForm.email}
+	              onChange={(event) => setEditingUserForm((prev) => (prev ? { ...prev, email: event.target.value } : prev))}
+	              placeholder="name@example.com"
+	            />
+	            <SelectField
+	              label="Role"
+	              value={authUser.role === "ADMIN" ? editingUserForm.role : "SALES"}
+	              onChange={(event) =>
+	                setEditingUserForm((prev) =>
+	                  prev
+	                    ? {
+	                        ...prev,
+	                        role:
+	                          event.target.value === "ADMIN"
+	                            ? "ADMIN"
+	                            : event.target.value === "MANAGER"
+	                              ? "MANAGER"
+	                              : "SALES"
+	                      }
+	                    : prev
+	                )
+	              }
+	              disabled={authUser.role !== "ADMIN"}
+	            >
+	              <option value="SALES">Sales</option>
+	              <option value="MANAGER">Manager</option>
+	              <option value="ADMIN">Admin</option>
+	            </SelectField>
+
+	            {(() => {
+	              const actorRole = authUser.role;
+	              const requestedRole = actorRole === "ADMIN" ? editingUserForm.role : "SALES";
+	              const allowedShops =
+	                actorRole === "ADMIN" ? shops : shops.filter((s) => authUser.shops?.some((a) => a.shopId === s.id));
+
+	              if (requestedRole === "ADMIN") {
+	                return null;
+	              }
+
+	              if (requestedRole === "SALES") {
+	                return (
+	                  <SelectField
+	                    label="Shop"
+	                    value={editingUserForm.primaryShopId}
+	                    onChange={(event) =>
+	                      setEditingUserForm((prev) => (prev ? { ...prev, primaryShopId: event.target.value, shopIds: [event.target.value] } : prev))
+	                    }
+	                    required
+	                  >
+	                    <option value="" disabled>
+	                      Select shop...
+	                    </option>
+	                    {allowedShops.map((s) => (
+	                      <option key={s.id} value={s.id}>
+	                        {s.code} • {s.name}
+	                      </option>
+	                    ))}
+	                  </SelectField>
+	                );
+	              }
+
+	              return (
+	                <div style={{ gridColumn: "1 / -1" }}>
+	                  <div className="hint" style={{ marginBottom: "0.4rem" }}>
+	                    Shops (choose one or more)
+	                  </div>
+	                  <div className="note" style={{ display: "grid", gap: "0.35rem" }}>
+	                    {allowedShops.map((s) => {
+	                      const checked = editingUserForm.shopIds.includes(s.id);
+	                      return (
+	                        <label key={s.id} className="checkbox" style={{ margin: 0 }}>
+	                          <input
+	                            type="checkbox"
+	                            checked={checked}
+	                            onChange={(event) => {
+	                              const isChecked = event.target.checked;
+	                              setEditingUserForm((prev) => {
+	                                if (!prev) {
+	                                  return prev;
+	                                }
+	                                const nextShopIds = isChecked
+	                                  ? Array.from(new Set([...prev.shopIds, s.id]))
+	                                  : prev.shopIds.filter((id) => id !== s.id);
+	                                const nextPrimary =
+	                                  prev.primaryShopId && nextShopIds.includes(prev.primaryShopId)
+	                                    ? prev.primaryShopId
+	                                    : nextShopIds[0] ?? "";
+	                                return { ...prev, shopIds: nextShopIds, primaryShopId: nextPrimary };
+	                              });
+	                            }}
+	                          />
+	                          {s.code} • {s.name}
+	                        </label>
+	                      );
+	                    })}
+	                  </div>
+	                  <div style={{ marginTop: "0.65rem", maxWidth: 520 }}>
+	                    <SelectField
+	                      label="Primary shop"
+	                      value={editingUserForm.primaryShopId}
+	                      onChange={(event) =>
+	                        setEditingUserForm((prev) => (prev ? { ...prev, primaryShopId: event.target.value } : prev))
+	                      }
+	                      disabled={!editingUserForm.shopIds.length}
+	                    >
+	                      <option value="">(none)</option>
+	                      {allowedShops
+	                        .filter((s) => editingUserForm.shopIds.includes(s.id))
+	                        .map((s) => (
+	                          <option key={s.id} value={s.id}>
+	                            {s.code} • {s.name}
+	                          </option>
+	                        ))}
+	                    </SelectField>
+	                  </div>
+	                </div>
+	              );
+	            })()}
+
+	            <TextAreaField
+	              label="Notes (optional)"
+	              value={editingUserForm.notes}
+	              onChange={(event) => setEditingUserForm((prev) => (prev ? { ...prev, notes: event.target.value } : prev))}
+	            />
+	            <label className="checkbox">
+	              <input
+	                type="checkbox"
+	                checked={editingUserForm.isActive}
+	                onChange={(event) => setEditingUserForm((prev) => (prev ? { ...prev, isActive: event.target.checked } : prev))}
+	              />
+	              Active
+	            </label>
+	          </form>
+	        </Modal>
+	      ) : null}
+	    </div>
+	  );
+	}
