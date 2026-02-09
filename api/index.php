@@ -454,10 +454,10 @@ function jwt_ttl_seconds(): int {
   return $ttl > 0 ? $ttl : 43200;
 }
 
-function jwt_sign(string $userId): string {
+function jwt_sign(string $userId, int $tokenVersion = 0): string {
   $header = ["alg" => "HS256", "typ" => "JWT"];
   $now = time();
-  $payload = ["sub" => $userId, "iat" => $now, "exp" => $now + jwt_ttl_seconds()];
+  $payload = ["sub" => $userId, "ver" => $tokenVersion, "iat" => $now, "exp" => $now + jwt_ttl_seconds()];
 
   $encodedHeader = base64url_encode(json_encode($header, JSON_UNESCAPED_SLASHES));
   $encodedPayload = base64url_encode(json_encode($payload, JSON_UNESCAPED_SLASHES));
@@ -491,6 +491,93 @@ function jwt_verify(string $token): array {
   }
 
   return $payload;
+}
+
+function phase10_password_reset_ttl_minutes(): int {
+  $raw = trim((string)(getenv("BDK_PASSWORD_RESET_TTL_MINUTES") ?: ""));
+  $ttl = $raw !== "" ? (int)$raw : 30;
+  if ($ttl < 5) {
+    $ttl = 5;
+  }
+  if ($ttl > 180) {
+    $ttl = 180;
+  }
+  return $ttl;
+}
+
+function phase10_password_requirements_message(): string {
+  return "Password must be at least 8 characters and include at least one letter and one number.";
+}
+
+function phase10_validate_password(string $password): void {
+  $pw = (string)$password;
+  if (strlen($pw) < 8) {
+    json_response(400, ["error" => "ValidationError", "message" => phase10_password_requirements_message()]);
+  }
+  if (!preg_match('/[A-Za-z]/', $pw) || !preg_match('/\\d/', $pw)) {
+    json_response(400, ["error" => "ValidationError", "message" => phase10_password_requirements_message()]);
+  }
+}
+
+function phase10_hash_password(string $password): string {
+  $hash = password_hash($password, PASSWORD_BCRYPT, ["cost" => 12]);
+  if (!is_string($hash) || $hash === "") {
+    json_response(500, ["error" => "InternalServerError", "message" => "Failed to hash password"]);
+  }
+  return $hash;
+}
+
+function phase10_new_reset_token(): string {
+  // URL-safe token (never stored directly; only SHA-256 hash is stored).
+  return base64url_encode(random_bytes(32));
+}
+
+function phase10_hash_reset_token(string $token): string {
+  return hash("sha256", $token);
+}
+
+function phase10_request_scheme(): string {
+  $https = isset($_SERVER["HTTPS"]) ? (string)$_SERVER["HTTPS"] : "";
+  if ($https !== "" && strtolower($https) !== "off") {
+    return "https";
+  }
+  $forwarded = isset($_SERVER["HTTP_X_FORWARDED_PROTO"]) ? (string)$_SERVER["HTTP_X_FORWARDED_PROTO"] : "";
+  if ($forwarded !== "") {
+    $parts = array_map("trim", explode(",", $forwarded));
+    $candidate = strtolower((string)($parts[0] ?? ""));
+    if ($candidate === "https" || $candidate === "http") {
+      return $candidate;
+    }
+  }
+  return "http";
+}
+
+function phase10_public_base_url(): string {
+  $env = trim((string)(getenv("BDK_PUBLIC_BASE_URL") ?: ""));
+  if ($env !== "") {
+    return rtrim($env, "/");
+  }
+
+  $host = isset($_SERVER["HTTP_HOST"]) && is_string($_SERVER["HTTP_HOST"]) ? $_SERVER["HTTP_HOST"] : "localhost";
+  $scheme = phase10_request_scheme();
+  $requestUri = isset($_SERVER["REQUEST_URI"]) && is_string($_SERVER["REQUEST_URI"]) ? $_SERVER["REQUEST_URI"] : "/";
+  $path = parse_url($requestUri, PHP_URL_PATH);
+  if (!is_string($path) || $path === "") {
+    $path = "/";
+  }
+
+  $basePath = "";
+  $pos = strpos($path, "/api/");
+  if ($pos !== false) {
+    $basePath = substr($path, 0, $pos);
+  }
+
+  $basePath = rtrim($basePath, "/");
+  return $scheme . "://" . $host . $basePath;
+}
+
+function phase10_reset_link(string $token): string {
+  return phase10_public_base_url() . "/?resetToken=" . rawurlencode($token);
 }
 
 function should_use_mysql(): bool {
@@ -607,16 +694,34 @@ function phase1_load_assignments(PDO $pdo, string $userId): array {
 function phase1_find_user_by_phone(PDO $pdo, string $phone): ?array {
   return phase1_db_fetch_one(
     $pdo,
-    "SELECT u.id, u.full_name, u.phone, u.password_hash, u.role_id, u.is_active, u.notes, u.created_at, u.updated_at, r.name AS role_name " .
+    "SELECT u.id, u.full_name, u.phone, u.email, u.password_hash, u.token_version, u.role_id, u.is_active, u.notes, u.created_at, u.updated_at, r.name AS role_name " .
     "FROM users u JOIN roles r ON r.id = u.role_id WHERE u.phone = :phone LIMIT 1",
     [":phone" => $phone]
+  );
+}
+
+function phase1_normalize_email(string $value): string {
+  $trimmed = trim($value);
+  return $trimmed !== "" ? strtolower($trimmed) : "";
+}
+
+function phase1_find_user_by_email(PDO $pdo, string $email): ?array {
+  $normalized = phase1_normalize_email($email);
+  if ($normalized === "") {
+    return null;
+  }
+  return phase1_db_fetch_one(
+    $pdo,
+    "SELECT u.id, u.full_name, u.phone, u.email, u.password_hash, u.token_version, u.role_id, u.is_active, u.notes, u.created_at, u.updated_at, r.name AS role_name " .
+    "FROM users u JOIN roles r ON r.id = u.role_id WHERE u.email = :email LIMIT 1",
+    [":email" => $normalized]
   );
 }
 
 function phase1_find_user_by_id(PDO $pdo, string $userId): ?array {
   return phase1_db_fetch_one(
     $pdo,
-    "SELECT u.id, u.full_name, u.phone, u.password_hash, u.role_id, u.is_active, u.notes, u.created_at, u.updated_at, r.name AS role_name " .
+    "SELECT u.id, u.full_name, u.phone, u.email, u.password_hash, u.token_version, u.role_id, u.is_active, u.notes, u.created_at, u.updated_at, r.name AS role_name " .
     "FROM users u JOIN roles r ON r.id = u.role_id WHERE u.id = :id LIMIT 1",
     [":id" => $userId]
   );
@@ -627,7 +732,9 @@ function phase1_public_user(array $user, array $assignments): array {
     "id" => (string)$user["id"],
     "fullName" => (string)$user["full_name"],
     "mobileNumber" => (string)$user["phone"],
+    "email" => $user["email"] ?? null,
     "role" => (string)$user["role_name"],
+    "isActive" => (int)($user["is_active"] ?? 0) === 1,
     "notes" => $user["notes"] ?? null,
     "createdAt" => (string)$user["created_at"],
     "updatedAt" => (string)$user["updated_at"],
@@ -665,6 +772,12 @@ function phase1_require_auth(PDO $pdo): array {
   $user = phase1_find_user_by_id($pdo, $userId);
   if (!$user || (int)($user["is_active"] ?? 0) !== 1) {
     json_response(401, ["error" => "HttpError", "message" => "Invalid user"]);
+  }
+
+  $tokenVersion = (int)($payload["ver"] ?? 0);
+  $expectedVersion = (int)($user["token_version"] ?? 0);
+  if ($tokenVersion !== $expectedVersion) {
+    json_response(401, ["error" => "HttpError", "message" => "Session expired. Please login again."]);
   }
 
   $assignments = phase1_load_assignments($pdo, (string)$user["id"]);
@@ -1116,7 +1229,7 @@ function phase9_get_active_template(PDO $pdo, string $templateKey, string $chann
   return $row && is_array($row) ? $row : null;
 }
 
-function phase9_enqueue_message(PDO $pdo, array $params): array {
+function phase9_enqueue_message(PDO $pdo, array $params, bool $fatal = true): array {
   $id = create_id("msgq");
   $templateId = isset($params["templateId"]) && is_string($params["templateId"]) ? $params["templateId"] : null;
   $templateKey = isset($params["templateKey"]) && is_string($params["templateKey"]) ? trim($params["templateKey"]) : "";
@@ -1133,11 +1246,18 @@ function phase9_enqueue_message(PDO $pdo, array $params): array {
   $notes = array_key_exists("notes", $params) ? $params["notes"] : null;
   $createdByUserId = array_key_exists("createdByUserId", $params) ? $params["createdByUserId"] : null;
 
+  $fail = function (int $status, string $error, string $message) use ($fatal): void {
+    if ($fatal) {
+      json_response($status, ["error" => $error, "message" => $message]);
+    }
+    throw new RuntimeException($message);
+  };
+
   if ($templateKey === "" || $toAddress === "" || $renderedBody === "") {
-    json_response(400, ["error" => "ValidationError", "message" => "templateKey, toAddress, and renderedBody are required"]);
+    $fail(400, "ValidationError", "templateKey, toAddress, and renderedBody are required");
   }
   if (!in_array($channel, ["SMS", "WHATSAPP", "EMAIL"], true)) {
-    json_response(400, ["error" => "ValidationError", "message" => "Invalid channel"]);
+    $fail(400, "ValidationError", "Invalid channel");
   }
   if (!in_array($recipientType, ["CUSTOMER", "USER", "RAW"], true)) {
     $recipientType = "RAW";
@@ -1195,7 +1315,7 @@ function phase9_enqueue_message(PDO $pdo, array $params): array {
         return ["created" => false, "id" => (string)$existing["id"], "dedupeKey" => $dedupe];
       }
     }
-    json_response(500, ["error" => "InternalServerError", "message" => "Failed to enqueue message"]);
+    $fail(500, "InternalServerError", "Failed to enqueue message");
   }
 
   try {
@@ -1216,6 +1336,166 @@ function phase9_enqueue_message(PDO $pdo, array $params): array {
   }
 
   return ["created" => true, "id" => $id, "dedupeKey" => $dedupe];
+}
+
+function phase10_enqueue_password_reset(PDO $pdo, array $userRow, string $resetLink, ?string $actorUserId, ?string $notes): array {
+  $fullName = isset($userRow["full_name"]) && is_string($userRow["full_name"]) ? trim($userRow["full_name"]) : "";
+  $fullName = $fullName !== "" ? $fullName : "User";
+  $userId = isset($userRow["id"]) && is_string($userRow["id"]) ? $userRow["id"] : null;
+
+  $expiresMinutes = phase10_password_reset_ttl_minutes();
+  $vars = [
+    "fullName" => $fullName,
+    "resetLink" => $resetLink,
+    "expiresMinutes" => (string)$expiresMinutes,
+  ];
+
+  $targets = [];
+  $email = isset($userRow["email"]) && is_string($userRow["email"]) ? trim($userRow["email"]) : "";
+  if ($email !== "" && strpos($email, "@") !== false) {
+    $targets[] = ["channel" => "EMAIL", "toAddress" => $email];
+  }
+  $phone = isset($userRow["phone"]) && is_string($userRow["phone"]) ? trim($userRow["phone"]) : "";
+  if ($phone !== "") {
+    // Prefer WhatsApp if available, fallback SMS. Provider integration can be added later.
+    $targets[] = ["channel" => "WHATSAPP", "toAddress" => $phone];
+    $targets[] = ["channel" => "SMS", "toAddress" => $phone];
+  }
+
+  $results = [];
+
+  foreach ($targets as $t) {
+    $channel = (string)($t["channel"] ?? "");
+    $toAddress = (string)($t["toAddress"] ?? "");
+    if ($channel === "" || $toAddress === "") {
+      continue;
+    }
+
+    $tpl = phase9_get_active_template($pdo, "USER_PASSWORD_RESET", $channel);
+    if (!$tpl) {
+      $results[] = ["channel" => $channel, "toAddress" => $toAddress, "queued" => false, "reason" => "Missing template"];
+      continue;
+    }
+
+    $subjectTpl = isset($tpl["subject"]) && is_string($tpl["subject"]) ? trim($tpl["subject"]) : "";
+    $bodyTpl = isset($tpl["body"]) && is_string($tpl["body"]) ? (string)$tpl["body"] : "";
+    $renderedSubject = $subjectTpl !== "" ? phase9_render_template($subjectTpl, $vars) : null;
+    $renderedBody = phase9_render_template($bodyTpl, $vars);
+
+    try {
+      $res = phase9_enqueue_message(
+        $pdo,
+        [
+          "templateId" => (string)($tpl["id"] ?? ""),
+          "templateKey" => "USER_PASSWORD_RESET",
+          "channel" => $channel,
+          "recipientType" => "USER",
+          "recipientUserId" => $userId,
+          "toAddress" => $toAddress,
+          "renderedSubject" => $renderedSubject,
+          "renderedBody" => $renderedBody,
+          "payload" => ["resetLink" => $resetLink],
+          "status" => "QUEUED",
+          "dedupeKey" => null,
+          "notes" => $notes,
+          "createdByUserId" => $actorUserId,
+        ],
+        false
+      );
+      $results[] = [
+        "channel" => $channel,
+        "toAddress" => $toAddress,
+        "queued" => true,
+        "created" => (bool)($res["created"] ?? true),
+        "queueId" => (string)($res["id"] ?? ""),
+      ];
+    } catch (Throwable $error) {
+      $results[] = ["channel" => $channel, "toAddress" => $toAddress, "queued" => false, "reason" => $error->getMessage()];
+    }
+  }
+
+  return $results;
+}
+
+function phase10_sync_user_assignments(PDO $pdo, string $userId, array $nextShopIds, ?string $primaryShopId, ?string $notes): void {
+  $clean = [];
+  $seen = [];
+  foreach ($nextShopIds as $value) {
+    if (!is_string($value)) {
+      continue;
+    }
+    $id = trim($value);
+    if ($id === "" || isset($seen[$id])) {
+      continue;
+    }
+    $seen[$id] = true;
+    $clean[] = $id;
+  }
+
+  $primary = is_string($primaryShopId) ? trim($primaryShopId) : "";
+  if ($primary === "" || !isset($seen[$primary])) {
+    $primary = isset($clean[0]) ? (string)$clean[0] : "";
+  }
+
+  $current = phase1_db_fetch_all(
+    $pdo,
+    "SELECT id, shop_id, is_primary FROM user_shop_assignment WHERE user_id = :user_id AND unassigned_at IS NULL FOR UPDATE",
+    [":user_id" => $userId]
+  );
+
+  $currentByShop = [];
+  foreach ($current as $row) {
+    if (!is_array($row)) {
+      continue;
+    }
+    $shopId = isset($row["shop_id"]) && is_string($row["shop_id"]) ? $row["shop_id"] : "";
+    $assignId = isset($row["id"]) && is_string($row["id"]) ? $row["id"] : "";
+    if ($shopId !== "" && $assignId !== "") {
+      $currentByShop[$shopId] = $assignId;
+    }
+  }
+
+  // Unassign removed shops.
+  foreach ($currentByShop as $shopId => $assignId) {
+    if (!isset($seen[$shopId])) {
+      phase1_db_execute(
+        $pdo,
+        "UPDATE user_shop_assignment SET unassigned_at = NOW(), is_primary = 0, updated_at = NOW() WHERE id = :id",
+        [":id" => $assignId]
+      );
+    }
+  }
+
+  // Insert new assignments.
+  foreach ($clean as $shopId) {
+    if (isset($currentByShop[$shopId])) {
+      continue;
+    }
+    $stmt = $pdo->prepare(
+      "INSERT INTO user_shop_assignment (id, user_id, shop_id, is_primary, notes, assigned_at, created_at, updated_at) " .
+      "VALUES (:id, :user_id, :shop_id, 0, :notes, NOW(), NOW(), NOW())"
+    );
+    $stmt->execute([
+      ":id" => create_id("assign"),
+      ":user_id" => $userId,
+      ":shop_id" => $shopId,
+      ":notes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+    ]);
+  }
+
+  // Clear primary flag, then set it for the chosen shop (if any).
+  phase1_db_execute(
+    $pdo,
+    "UPDATE user_shop_assignment SET is_primary = 0, updated_at = NOW() WHERE user_id = :user_id AND unassigned_at IS NULL",
+    [":user_id" => $userId]
+  );
+  if ($primary !== "") {
+    phase1_db_execute(
+      $pdo,
+      "UPDATE user_shop_assignment SET is_primary = 1, updated_at = NOW() WHERE user_id = :user_id AND shop_id = :shop_id AND unassigned_at IS NULL",
+      [":user_id" => $userId, ":shop_id" => $primary]
+    );
+  }
 }
 
 function phase1_handle(string $method, string $route): void {
@@ -1245,8 +1525,155 @@ function phase1_handle(string $method, string $route): void {
     }
 
     $assignments = phase1_load_assignments($pdo, (string)$user["id"]);
-    $token = jwt_sign((string)$user["id"]);
+    $token = jwt_sign((string)$user["id"], (int)($user["token_version"] ?? 0));
     json_response(200, ["data" => ["token" => $token, "user" => phase1_public_user($user, $assignments)]]);
+  }
+
+  // Password reset flows must be reachable without authentication.
+  if ($method === "POST" && $route === "auth/forgot-password") {
+    $body = read_json_body();
+    $mobile = isset($body["mobileNumber"]) && is_string($body["mobileNumber"]) ? normalize_mobile_number($body["mobileNumber"]) : "";
+    $email = isset($body["email"]) && is_string($body["email"]) ? phase1_normalize_email($body["email"]) : "";
+    $notes = array_key_exists("notes", $body) ? $body["notes"] : null;
+
+    if ($mobile === "" && $email === "") {
+      json_response(400, ["error" => "ValidationError", "message" => "mobileNumber or email is required"]);
+    }
+    if ($notes !== null && !is_string($notes)) {
+      json_response(400, ["error" => "ValidationError", "message" => "notes must be a string or null"]);
+    }
+
+    $user = null;
+    if ($email !== "") {
+      $user = phase1_find_user_by_email($pdo, $email);
+    }
+    if (!$user && $mobile !== "") {
+      $user = phase1_find_user_by_phone($pdo, $mobile);
+    }
+
+    // Never reveal whether a user exists.
+    if ($user && (int)($user["is_active"] ?? 0) === 1) {
+      $token = phase10_new_reset_token();
+      $tokenHash = phase10_hash_reset_token($token);
+      $ttlMinutes = phase10_password_reset_ttl_minutes();
+      $expiresAt = gmdate("Y-m-d H:i:s", time() + ($ttlMinutes * 60));
+      $resetLink = phase10_reset_link($token);
+
+      $tokenId = create_id("pwrt");
+      try {
+        $stmt = $pdo->prepare(
+          "INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at, used_at, created_by_user_id, notes) " .
+          "VALUES (:id, :user_id, :token_hash, :expires_at, NULL, NULL, :notes)"
+        );
+        $stmt->execute([
+          ":id" => $tokenId,
+          ":user_id" => (string)$user["id"],
+          ":token_hash" => $tokenHash,
+          ":expires_at" => $expiresAt,
+          ":notes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+        ]);
+
+        $queueResults = phase10_enqueue_password_reset($pdo, $user, $resetLink, null, "Forgot password");
+
+        phase1_audit_log(
+          $pdo,
+          null,
+          "CREATE",
+          "password_reset_token",
+          $tokenId,
+          null,
+          [
+            "id" => $tokenId,
+            "userId" => (string)$user["id"],
+            "expiresAt" => $expiresAt,
+            "queued" => $queueResults,
+          ],
+          is_string($notes) && trim($notes) !== "" ? trim($notes) : null
+        );
+      } catch (Throwable $error) {
+        // Best-effort: don't leak internals or user existence.
+      }
+    }
+
+    json_response(200, ["data" => ["ok" => true]]);
+  }
+
+  if ($method === "POST" && $route === "auth/reset-password") {
+    $body = read_json_body();
+    $token = isset($body["token"]) && is_string($body["token"]) ? trim($body["token"]) : "";
+    $newPassword = isset($body["newPassword"]) && is_string($body["newPassword"]) ? $body["newPassword"] : "";
+
+    if ($token === "" || $newPassword === "") {
+      json_response(400, ["error" => "ValidationError", "message" => "token and newPassword are required"]);
+    }
+
+    phase10_validate_password($newPassword);
+    $tokenHash = phase10_hash_reset_token($token);
+
+    try {
+      $pdo->beginTransaction();
+
+      $row = phase1_db_fetch_one(
+        $pdo,
+        "SELECT t.id, t.user_id, t.expires_at, t.used_at, u.is_active, u.token_version " .
+        "FROM password_reset_tokens t JOIN users u ON u.id = t.user_id " .
+        "WHERE t.token_hash = :token_hash LIMIT 1 FOR UPDATE",
+        [":token_hash" => $tokenHash]
+      );
+
+      if (!$row) {
+        $pdo->rollBack();
+        json_response(400, ["error" => "ValidationError", "message" => "Invalid or expired token"]);
+      }
+      if ($row["used_at"] !== null) {
+        $pdo->rollBack();
+        json_response(400, ["error" => "ValidationError", "message" => "Invalid or expired token"]);
+      }
+      $expiresAt = (string)($row["expires_at"] ?? "");
+      if ($expiresAt === "" || strtotime($expiresAt) === false || strtotime($expiresAt) < time()) {
+        $pdo->rollBack();
+        json_response(400, ["error" => "ValidationError", "message" => "Invalid or expired token"]);
+      }
+      if ((int)($row["is_active"] ?? 0) !== 1) {
+        $pdo->rollBack();
+        json_response(400, ["error" => "ValidationError", "message" => "Account is inactive"]);
+      }
+
+      $userId = (string)$row["user_id"];
+      $hash = phase10_hash_password($newPassword);
+
+      phase1_db_execute(
+        $pdo,
+        "UPDATE users SET password_hash = :hash, token_version = token_version + 1, updated_at = NOW() WHERE id = :id",
+        [":hash" => $hash, ":id" => $userId]
+      );
+
+      $usedAt = gmdate("Y-m-d H:i:s");
+      phase1_db_execute(
+        $pdo,
+        "UPDATE password_reset_tokens SET used_at = :used_at, updated_at = NOW() WHERE id = :id",
+        [":used_at" => $usedAt, ":id" => (string)$row["id"]]
+      );
+
+      $pdo->commit();
+
+      phase1_audit_log(
+        $pdo,
+        null,
+        "RESET_PASSWORD",
+        "user",
+        $userId,
+        null,
+        ["method" => "reset_token", "tokenId" => (string)$row["id"], "usedAt" => $usedAt]
+      );
+
+      json_response(200, ["data" => ["ok" => true]]);
+    } catch (Throwable $error) {
+      if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+      }
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to reset password"]);
+    }
   }
 
   $auth = phase1_require_auth($pdo);
@@ -1256,6 +1683,50 @@ function phase1_handle(string $method, string $route): void {
 
   if ($method === "GET" && $route === "auth/me") {
     json_response(200, ["data" => phase1_public_user($authUser, $assignments)]);
+  }
+
+  if ($method === "POST" && $route === "auth/change-password") {
+    $body = read_json_body();
+    $currentPassword = isset($body["currentPassword"]) && is_string($body["currentPassword"]) ? $body["currentPassword"] : "";
+    $newPassword = isset($body["newPassword"]) && is_string($body["newPassword"]) ? $body["newPassword"] : "";
+
+    if ($currentPassword === "" || $newPassword === "") {
+      json_response(400, ["error" => "ValidationError", "message" => "currentPassword and newPassword are required"]);
+    }
+
+    phase10_validate_password($newPassword);
+
+    $hash = (string)($authUser["password_hash"] ?? "");
+    if ($hash === "" || !password_verify($currentPassword, $hash)) {
+      json_response(400, ["error" => "ValidationError", "message" => "Current password is incorrect"]);
+    }
+
+    $actorUserId = (string)($authUser["id"] ?? "");
+    $before = ["method" => "change_password"];
+
+    try {
+      $pdo->beginTransaction();
+
+      $newHash = phase10_hash_password($newPassword);
+      phase1_db_execute(
+        $pdo,
+        "UPDATE users SET password_hash = :hash, token_version = token_version + 1, updated_at = NOW() WHERE id = :id",
+        [":hash" => $newHash, ":id" => $actorUserId]
+      );
+
+      $newVersion = (int)($authUser["token_version"] ?? 0) + 1;
+      $newToken = jwt_sign($actorUserId, $newVersion);
+
+      $pdo->commit();
+
+      phase1_audit_log($pdo, $actorUserId !== "" ? $actorUserId : null, "CHANGE_PASSWORD", "user", $actorUserId, $before, ["method" => "change_password"]);
+      json_response(200, ["data" => ["token" => $newToken]]);
+    } catch (Throwable $error) {
+      if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+      }
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to change password"]);
+    }
   }
 
   if ($method === "GET" && $route === "shops") {
@@ -1291,7 +1762,7 @@ function phase1_handle(string $method, string $route): void {
     if ($roleName === "ADMIN") {
       $rows = phase1_db_fetch_all(
         $pdo,
-        "SELECT u.id, u.full_name, u.phone, u.is_active, u.notes, u.created_at, u.updated_at, r.name AS role_name " .
+        "SELECT u.id, u.full_name, u.phone, u.email, u.is_active, u.notes, u.created_at, u.updated_at, r.name AS role_name " .
         "FROM users u JOIN roles r ON r.id = u.role_id ORDER BY u.created_at DESC",
         []
       );
@@ -1324,7 +1795,7 @@ function phase1_handle(string $method, string $route): void {
 
     $rows = phase1_db_fetch_all(
       $pdo,
-      "SELECT DISTINCT u.id, u.full_name, u.phone, u.is_active, u.notes, u.created_at, u.updated_at, r.name AS role_name " .
+      "SELECT DISTINCT u.id, u.full_name, u.phone, u.email, u.is_active, u.notes, u.created_at, u.updated_at, r.name AS role_name " .
       "FROM users u " .
       "JOIN roles r ON r.id = u.role_id " .
       "JOIN user_shop_assignment a ON a.user_id = u.id AND a.unassigned_at IS NULL " .
@@ -1339,6 +1810,421 @@ function phase1_handle(string $method, string $route): void {
     }, $rows);
 
     json_response(200, ["data" => $users]);
+  }
+
+  if ($method === "POST" && $route === "users") {
+    phase1_require_role($roleName, ["ADMIN", "MANAGER"]);
+    $body = read_json_body();
+
+    $fullName = isset($body["fullName"]) && is_string($body["fullName"]) ? trim($body["fullName"]) : "";
+    $mobile = isset($body["mobileNumber"]) && is_string($body["mobileNumber"]) ? normalize_mobile_number($body["mobileNumber"]) : "";
+    $email = array_key_exists("email", $body) ? $body["email"] : null;
+    $password = isset($body["password"]) && is_string($body["password"]) ? $body["password"] : "";
+    $requestedRole = isset($body["role"]) && is_string($body["role"]) ? strtoupper(trim($body["role"])) : "";
+    $notes = array_key_exists("notes", $body) ? $body["notes"] : null;
+    $isActive = array_key_exists("isActive", $body) ? (bool)$body["isActive"] : true;
+    $shopIds = array_key_exists("shopIds", $body) && is_array($body["shopIds"]) ? $body["shopIds"] : [];
+    $primaryShopId = isset($body["primaryShopId"]) && is_string($body["primaryShopId"]) ? trim($body["primaryShopId"]) : null;
+
+    if ($fullName === "" || $mobile === "" || $password === "" || $requestedRole === "") {
+      json_response(400, ["error" => "ValidationError", "message" => "fullName, mobileNumber, password, and role are required"]);
+    }
+    if (!in_array($requestedRole, ["ADMIN", "MANAGER", "SALES"], true)) {
+      json_response(400, ["error" => "ValidationError", "message" => "role must be ADMIN, MANAGER, or SALES"]);
+    }
+    if ($notes !== null && !is_string($notes)) {
+      json_response(400, ["error" => "ValidationError", "message" => "notes must be a string or null"]);
+    }
+    if ($email !== null && !is_string($email)) {
+      json_response(400, ["error" => "ValidationError", "message" => "email must be a string or null"]);
+    }
+    $emailNorm = $email !== null ? phase1_normalize_email((string)$email) : "";
+    if ($email !== null && $emailNorm !== "" && !filter_var($emailNorm, FILTER_VALIDATE_EMAIL)) {
+      json_response(400, ["error" => "ValidationError", "message" => "Invalid email"]);
+    }
+
+    if ($roleName === "MANAGER" && $requestedRole !== "SALES") {
+      json_response(403, ["error" => "HttpError", "message" => "Managers can only create SALES users"]);
+    }
+
+    phase10_validate_password($password);
+
+    if ($requestedRole === "SALES") {
+      if (count($shopIds) !== 1 || !is_string($shopIds[0]) || trim((string)$shopIds[0]) === "") {
+        json_response(400, ["error" => "ValidationError", "message" => "shopIds must contain exactly one shop for SALES users"]);
+      }
+    } elseif ($requestedRole === "MANAGER") {
+      if (count($shopIds) < 1) {
+        json_response(400, ["error" => "ValidationError", "message" => "shopIds must contain at least one shop for MANAGER users"]);
+      }
+    } else {
+      // Admin can be created without shop assignments.
+      $shopIds = [];
+      $primaryShopId = null;
+    }
+
+    // Validate shops and enforce manager scope.
+    foreach ($shopIds as $sid) {
+      if (!is_string($sid) || trim($sid) === "") {
+        json_response(400, ["error" => "ValidationError", "message" => "Invalid shopIds entry"]);
+      }
+      $sidTrim = trim($sid);
+      if ($roleName === "MANAGER") {
+        phase1_require_shop_access($roleName, $assignments, $sidTrim);
+      }
+      $shopRow = phase1_db_fetch_one($pdo, "SELECT id FROM shops WHERE id = :id LIMIT 1", [":id" => $sidTrim]);
+      if (!$shopRow) {
+        json_response(400, ["error" => "ValidationError", "message" => "Invalid shopId"]);
+      }
+    }
+
+    $roleRow = phase1_db_fetch_one($pdo, "SELECT id FROM roles WHERE name = :name LIMIT 1", [":name" => $requestedRole]);
+    if (!$roleRow) {
+      json_response(400, ["error" => "ValidationError", "message" => "Role is not configured"]);
+    }
+
+    $userId = create_id("user");
+    $hash = phase10_hash_password($password);
+    $actorUserId = (string)($authUser["id"] ?? "");
+
+    try {
+      $pdo->beginTransaction();
+
+      $stmt = $pdo->prepare(
+        "INSERT INTO users (id, full_name, phone, email, password_hash, token_version, role_id, is_active, notes, created_at, updated_at) " .
+        "VALUES (:id, :full_name, :phone, :email, :password_hash, 0, :role_id, :is_active, :notes, NOW(), NOW())"
+      );
+      $stmt->execute([
+        ":id" => $userId,
+        ":full_name" => $fullName,
+        ":phone" => $mobile,
+        ":email" => $emailNorm !== "" ? $emailNorm : null,
+        ":password_hash" => $hash,
+        ":role_id" => (string)$roleRow["id"],
+        ":is_active" => $isActive ? 1 : 0,
+        ":notes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+      ]);
+
+      if (count($shopIds) > 0) {
+        phase10_sync_user_assignments($pdo, $userId, $shopIds, $primaryShopId, "User assignment");
+      }
+
+      $pdo->commit();
+    } catch (PDOException $error) {
+      if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+      }
+      $info = $error->errorInfo;
+      $code = is_array($info) && isset($info[1]) ? (int)$info[1] : 0;
+      if ($code === 1062) {
+        json_response(400, ["error" => "ValidationError", "message" => "Mobile number or email already exists"]);
+      }
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to create user"]);
+    } catch (Throwable $error) {
+      if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+      }
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to create user"]);
+    }
+
+    $created = phase1_find_user_by_id($pdo, $userId);
+    if (!$created) {
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to read created user"]);
+    }
+    $createdAssignments = phase1_load_assignments($pdo, $userId);
+    $public = phase1_public_user($created, $createdAssignments);
+    phase1_audit_log($pdo, $actorUserId !== "" ? $actorUserId : null, "CREATE", "user", $userId, null, $public);
+    json_response(201, ["data" => $public]);
+  }
+
+  if ($method === "PATCH" && preg_match('/^users\\/([^\\/]+)$/', $route, $matches) === 1) {
+    phase1_require_role($roleName, ["ADMIN", "MANAGER"]);
+    $targetId = (string)$matches[1];
+    $body = read_json_body();
+
+    $existing = phase1_db_fetch_one(
+      $pdo,
+      "SELECT u.id, u.full_name, u.phone, u.email, u.role_id, u.is_active, u.notes, u.created_at, u.updated_at, r.name AS role_name " .
+      "FROM users u JOIN roles r ON r.id = u.role_id WHERE u.id = :id LIMIT 1",
+      [":id" => $targetId]
+    );
+    if (!$existing) {
+      json_response(404, ["error" => "HttpError", "message" => "User not found"]);
+    }
+
+    $actorUserId = (string)($authUser["id"] ?? "");
+    $targetRole = (string)($existing["role_name"] ?? "");
+    $targetAssignments = phase1_load_assignments($pdo, $targetId);
+
+    if ($roleName === "MANAGER") {
+      if ($targetRole !== "SALES") {
+        json_response(403, ["error" => "HttpError", "message" => "Managers can only update SALES users"]);
+      }
+      // Ensure manager shares at least one shop with the target.
+      $managerShops = phase1_assigned_shop_ids($assignments);
+      $allowed = false;
+      foreach ($targetAssignments as $arow) {
+        $sid = isset($arow["shop_id"]) && is_string($arow["shop_id"]) ? $arow["shop_id"] : "";
+        if ($sid !== "" && in_array($sid, $managerShops, true)) {
+          $allowed = true;
+          break;
+        }
+      }
+      if (!$allowed) {
+        json_response(403, ["error" => "HttpError", "message" => "Forbidden"]);
+      }
+    }
+
+    $nextFullName = (string)($existing["full_name"] ?? "");
+    $nextEmail = $existing["email"] === null ? null : (string)$existing["email"];
+    $nextIsActive = (int)($existing["is_active"] ?? 0) === 1;
+    $nextNotes = $existing["notes"] ?? null;
+    $nextRole = $targetRole;
+    $nextShopIds = array_map(function ($row) {
+      return isset($row["shop_id"]) && is_string($row["shop_id"]) ? $row["shop_id"] : "";
+    }, $targetAssignments);
+    $nextPrimaryShopId = null;
+    foreach ($targetAssignments as $row) {
+      if ((int)($row["is_primary"] ?? 0) === 1) {
+        $sid = isset($row["shop_id"]) && is_string($row["shop_id"]) ? $row["shop_id"] : "";
+        if ($sid !== "") {
+          $nextPrimaryShopId = $sid;
+        }
+      }
+    }
+
+    if (array_key_exists("fullName", $body)) {
+      $value = is_string($body["fullName"]) ? trim($body["fullName"]) : "";
+      if ($value === "") {
+        json_response(400, ["error" => "ValidationError", "message" => "fullName cannot be empty"]);
+      }
+      $nextFullName = $value;
+    }
+    if (array_key_exists("email", $body)) {
+      $value = $body["email"];
+      if ($value === null) {
+        $nextEmail = null;
+      } elseif (is_string($value)) {
+        $norm = phase1_normalize_email($value);
+        if ($norm !== "" && !filter_var($norm, FILTER_VALIDATE_EMAIL)) {
+          json_response(400, ["error" => "ValidationError", "message" => "Invalid email"]);
+        }
+        $nextEmail = $norm !== "" ? $norm : null;
+      } else {
+        json_response(400, ["error" => "ValidationError", "message" => "email must be a string or null"]);
+      }
+    }
+    if (array_key_exists("isActive", $body)) {
+      $nextIsActive = (bool)$body["isActive"];
+    }
+    if (array_key_exists("notes", $body)) {
+      $value = $body["notes"];
+      if ($value !== null && !is_string($value)) {
+        json_response(400, ["error" => "ValidationError", "message" => "notes must be a string or null"]);
+      }
+      $nextNotes = is_string($value) && trim($value) !== "" ? trim($value) : null;
+    }
+    if (array_key_exists("role", $body)) {
+      if ($roleName !== "ADMIN") {
+        json_response(403, ["error" => "HttpError", "message" => "Only admins can change roles"]);
+      }
+      $value = is_string($body["role"]) ? strtoupper(trim($body["role"])) : "";
+      if (!in_array($value, ["ADMIN", "MANAGER", "SALES"], true)) {
+        json_response(400, ["error" => "ValidationError", "message" => "role must be ADMIN, MANAGER, or SALES"]);
+      }
+      $nextRole = $value;
+    }
+    if (array_key_exists("shopIds", $body)) {
+      if (!is_array($body["shopIds"])) {
+        json_response(400, ["error" => "ValidationError", "message" => "shopIds must be an array"]);
+      }
+      $nextShopIds = $body["shopIds"];
+    }
+    if (array_key_exists("primaryShopId", $body)) {
+      $nextPrimaryShopId = is_string($body["primaryShopId"]) && trim($body["primaryShopId"]) !== "" ? trim($body["primaryShopId"]) : null;
+    }
+
+    if ($nextRole === "SALES") {
+      if (!is_array($nextShopIds) || count($nextShopIds) !== 1) {
+        json_response(400, ["error" => "ValidationError", "message" => "SALES users must have exactly one shop assignment"]);
+      }
+    }
+    if ($nextRole === "MANAGER") {
+      if (!is_array($nextShopIds) || count($nextShopIds) < 1) {
+        json_response(400, ["error" => "ValidationError", "message" => "MANAGER users must have at least one shop assignment"]);
+      }
+    }
+    if ($nextRole === "ADMIN") {
+      $nextShopIds = [];
+      $nextPrimaryShopId = null;
+    }
+
+    // Validate shops and enforce manager scope.
+    if (is_array($nextShopIds)) {
+      foreach ($nextShopIds as $sid) {
+        if (!is_string($sid) || trim($sid) === "") {
+          json_response(400, ["error" => "ValidationError", "message" => "Invalid shopIds entry"]);
+        }
+        $sidTrim = trim($sid);
+        if ($roleName === "MANAGER") {
+          phase1_require_shop_access($roleName, $assignments, $sidTrim);
+        }
+        $shopRow = phase1_db_fetch_one($pdo, "SELECT id FROM shops WHERE id = :id LIMIT 1", [":id" => $sidTrim]);
+        if (!$shopRow) {
+          json_response(400, ["error" => "ValidationError", "message" => "Invalid shopId"]);
+        }
+      }
+    }
+
+    $roleId = (string)($existing["role_id"] ?? "");
+    if ($nextRole !== $targetRole) {
+      $roleRow = phase1_db_fetch_one($pdo, "SELECT id FROM roles WHERE name = :name LIMIT 1", [":name" => $nextRole]);
+      if (!$roleRow) {
+        json_response(400, ["error" => "ValidationError", "message" => "Role is not configured"]);
+      }
+      $roleId = (string)$roleRow["id"];
+    }
+
+    $beforePublic = phase1_public_user($existing, $targetAssignments);
+
+    try {
+      $pdo->beginTransaction();
+
+      $stmt = $pdo->prepare(
+        "UPDATE users SET full_name = :full_name, email = :email, role_id = :role_id, is_active = :is_active, notes = :notes, updated_at = NOW() WHERE id = :id"
+      );
+      $stmt->execute([
+        ":id" => $targetId,
+        ":full_name" => $nextFullName,
+        ":email" => $nextEmail,
+        ":role_id" => $roleId,
+        ":is_active" => $nextIsActive ? 1 : 0,
+        ":notes" => $nextNotes,
+      ]);
+
+      if ($nextRole !== "ADMIN") {
+        phase10_sync_user_assignments($pdo, $targetId, is_array($nextShopIds) ? $nextShopIds : [], $nextPrimaryShopId, "User assignment");
+      } else {
+        // Ensure any existing assignments are cleared.
+        phase10_sync_user_assignments($pdo, $targetId, [], null, "User assignment");
+      }
+
+      $pdo->commit();
+    } catch (PDOException $error) {
+      if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+      }
+      $info = $error->errorInfo;
+      $code = is_array($info) && isset($info[1]) ? (int)$info[1] : 0;
+      if ($code === 1062) {
+        json_response(400, ["error" => "ValidationError", "message" => "Mobile number or email already exists"]);
+      }
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to update user"]);
+    } catch (Throwable $error) {
+      if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+      }
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to update user"]);
+    }
+
+    $updated = phase1_find_user_by_id($pdo, $targetId);
+    if (!$updated) {
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to read updated user"]);
+    }
+    $updatedAssignments = phase1_load_assignments($pdo, $targetId);
+    $afterPublic = phase1_public_user($updated, $updatedAssignments);
+    phase1_audit_log($pdo, $actorUserId !== "" ? $actorUserId : null, "UPDATE", "user", $targetId, $beforePublic, $afterPublic);
+    json_response(200, ["data" => $afterPublic]);
+  }
+
+  if ($method === "POST" && preg_match('/^users\\/([^\\/]+)\\/password-reset$/', $route, $matches) === 1) {
+    phase1_require_role($roleName, ["ADMIN", "MANAGER"]);
+    $targetId = (string)$matches[1];
+    $body = read_json_body();
+    $notes = array_key_exists("notes", $body) ? $body["notes"] : null;
+    if ($notes !== null && !is_string($notes)) {
+      json_response(400, ["error" => "ValidationError", "message" => "notes must be a string or null"]);
+    }
+
+    $target = phase1_find_user_by_id($pdo, $targetId);
+    if (!$target) {
+      json_response(404, ["error" => "HttpError", "message" => "User not found"]);
+    }
+
+    if ($roleName === "MANAGER" && (string)($target["role_name"] ?? "") !== "SALES") {
+      json_response(403, ["error" => "HttpError", "message" => "Managers can only reset passwords for SALES users"]);
+    }
+
+    if ($roleName === "MANAGER") {
+      // Ensure manager shares at least one shop with the target.
+      $targetAssignments = phase1_load_assignments($pdo, $targetId);
+      $managerShops = phase1_assigned_shop_ids($assignments);
+      $allowed = false;
+      foreach ($targetAssignments as $arow) {
+        $sid = isset($arow["shop_id"]) && is_string($arow["shop_id"]) ? $arow["shop_id"] : "";
+        if ($sid !== "" && in_array($sid, $managerShops, true)) {
+          $allowed = true;
+          break;
+        }
+      }
+      if (!$allowed) {
+        json_response(403, ["error" => "HttpError", "message" => "Forbidden"]);
+      }
+    }
+
+    if ((int)($target["is_active"] ?? 0) !== 1) {
+      json_response(400, ["error" => "ValidationError", "message" => "User is inactive"]);
+    }
+
+    $token = phase10_new_reset_token();
+    $tokenHash = phase10_hash_reset_token($token);
+    $ttlMinutes = phase10_password_reset_ttl_minutes();
+    $expiresAt = gmdate("Y-m-d H:i:s", time() + ($ttlMinutes * 60));
+    $resetLink = phase10_reset_link($token);
+    $tokenId = create_id("pwrt");
+    $actorUserId = (string)($authUser["id"] ?? "");
+
+    try {
+      $stmt = $pdo->prepare(
+        "INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at, used_at, created_by_user_id, notes) " .
+        "VALUES (:id, :user_id, :token_hash, :expires_at, NULL, :created_by_user_id, :notes)"
+      );
+      $stmt->execute([
+        ":id" => $tokenId,
+        ":user_id" => $targetId,
+        ":token_hash" => $tokenHash,
+        ":expires_at" => $expiresAt,
+        ":created_by_user_id" => $actorUserId !== "" ? $actorUserId : null,
+        ":notes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+      ]);
+    } catch (Throwable $error) {
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to create password reset token"]);
+    }
+
+    $queueResults = [];
+    try {
+      $queueResults = phase10_enqueue_password_reset($pdo, $target, $resetLink, $actorUserId, "Admin reset");
+    } catch (Throwable $error) {
+      $queueResults = [];
+    }
+
+    phase1_audit_log(
+      $pdo,
+      $actorUserId !== "" ? $actorUserId : null,
+      "CREATE",
+      "password_reset_token",
+      $tokenId,
+      null,
+      [
+        "id" => $tokenId,
+        "userId" => $targetId,
+        "expiresAt" => $expiresAt,
+        "queued" => $queueResults,
+      ],
+      is_string($notes) && trim($notes) !== "" ? trim($notes) : null
+    );
+
+    json_response(201, ["data" => ["resetLink" => $resetLink, "expiresAt" => $expiresAt, "queued" => $queueResults]]);
   }
 
   if ($method === "GET" && $route === "expense-categories") {
