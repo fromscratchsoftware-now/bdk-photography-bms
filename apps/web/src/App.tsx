@@ -1093,7 +1093,7 @@ export default function App(): JSX.Element {
         <p className="eyebrow">BDK Photography</p>
         <h1>Business Management System</h1>
         <p className="subtitle">
-          Phases 1-4: authentication (JWT), master data, customers, invoices/payments, sales POS, and reconciliation locks.
+          Phases 1-5: authentication (JWT), master data, customers, invoices/payments, sales POS, reconciliation locks, and expenses.
         </p>
 
         <div className="divider" style={{ background: "rgba(255,255,255,0.22)" }} />
@@ -1219,9 +1219,10 @@ export default function App(): JSX.Element {
                 <li>Phase 2: Master data (expense categories, product categories, products)</li>
                 <li>Phase 3: Customers, invoices, and installment payments</li>
                 <li>Phase 4: Sales (POS) + daily reconciliation locks</li>
+                <li>Phase 5: Expenses (payment source: salesperson cash vs admin/bank)</li>
               </ul>
               <div className="note">
-                Next phases will add workshop production, inventory/transfers, cash workflows, expenses, messaging, and reporting.
+                Next phases will add workshop production, inventory/transfers, cash workflows, messaging, and reporting.
               </div>
             </section>
           </>
@@ -1316,7 +1317,6 @@ export default function App(): JSX.Element {
                 <li>Workshop (full sheets, cutting, yield, waste)</li>
                 <li>Inventory and transfers (workshop → shops)</li>
                 <li>Cash tracking with approvals, banking</li>
-                <li>Expenses with payment-source logic</li>
                 <li>Messaging (SMS / WhatsApp / Email)</li>
                 <li>Capital dashboard + exports</li>
                 <li>Reports (sales, inventory, cash movement, credit aging)</li>
