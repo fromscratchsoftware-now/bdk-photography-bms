@@ -56,6 +56,26 @@ function json_response(int $status, $payload): void {
   exit;
 }
 
+function debug_enabled(): bool {
+  $env = strtolower(trim((string)(getenv("BDK_DEBUG") ?: "")));
+  if (in_array($env, ["1", "true", "yes", "on"], true)) {
+    return true;
+  }
+  $q = isset($_GET["debug"]) && is_string($_GET["debug"]) ? strtolower(trim($_GET["debug"])) : "";
+  return in_array($q, ["1", "true", "yes", "on"], true);
+}
+
+// Prevent blank HTTP 500s in production when an uncaught Throwable occurs.
+// By default we return a generic message; append `?debug=1` (admin-only endpoints) or set BDK_DEBUG=1 to see details.
+set_exception_handler(function (Throwable $error): void {
+  $msg = debug_enabled()
+    ? ($error->getMessage() . " (" . basename($error->getFile()) . ":" . (string)$error->getLine() . ")")
+    : "Unexpected server error";
+  // Best-effort logging (SiteGround shared hosting may route this to a central log).
+  error_log("[bdk-api] Uncaught: " . $error->getMessage() . " in " . $error->getFile() . ":" . (string)$error->getLine());
+  json_response(500, ["error" => "InternalServerError", "message" => $msg]);
+});
+
 function file_response(string $contentType, string $filename, string $body): void {
   http_response_code(200);
   header("Content-Type: " . $contentType);
