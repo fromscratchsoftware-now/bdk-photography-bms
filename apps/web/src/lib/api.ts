@@ -692,7 +692,6 @@ export function listProducts(token: string): Promise<Product[]> {
 export function createProduct(
   token: string,
   payload: {
-    skuCode: string;
     name: string;
     categoryId: string;
     productType: ProductType;
@@ -718,7 +717,6 @@ export function updateProduct(
   token: string,
   id: string,
   payload: Partial<{
-    skuCode: string;
     name: string;
     categoryId: string;
     productType: ProductType;

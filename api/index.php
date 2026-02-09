@@ -2965,7 +2965,9 @@ function phase1_handle(string $method, string $route): void {
     phase1_require_role($roleName, ["ADMIN"]);
     $body = read_json_body();
 
-    $skuCode = isset($body["skuCode"]) && is_string($body["skuCode"]) ? trim($body["skuCode"]) : "";
+    if (array_key_exists("skuCode", $body)) {
+      json_response(400, ["error" => "ValidationError", "message" => "skuCode is auto-generated and cannot be set"]);
+    }
     $name = isset($body["name"]) && is_string($body["name"]) ? trim($body["name"]) : "";
     $categoryId = isset($body["categoryId"]) && is_string($body["categoryId"]) ? trim($body["categoryId"]) : "";
     $productType = isset($body["productType"]) && is_string($body["productType"]) ? trim($body["productType"]) : "";
@@ -2976,8 +2978,8 @@ function phase1_handle(string $method, string $route): void {
     $boardSizeCode = array_key_exists("boardSizeCode", $body) && is_string($body["boardSizeCode"]) ? trim($body["boardSizeCode"]) : null;
     $notes = array_key_exists("notes", $body) ? $body["notes"] : null;
 
-    if ($skuCode === "" || $name === "" || $categoryId === "" || $unitOfMeasure === "" || $sellingPrice < 1) {
-      json_response(400, ["error" => "ValidationError", "message" => "skuCode, name, categoryId, unitOfMeasure, and sellingPrice are required"]);
+    if ($name === "" || $categoryId === "" || $unitOfMeasure === "" || $sellingPrice < 1) {
+      json_response(400, ["error" => "ValidationError", "message" => "name, categoryId, unitOfMeasure, and sellingPrice are required"]);
     }
     if ($productType !== "BOARD" && $productType !== "NON_BOARD") {
       json_response(400, ["error" => "ValidationError", "message" => "productType must be BOARD or NON_BOARD"]);
@@ -3015,32 +3017,45 @@ function phase1_handle(string $method, string $route): void {
 
     $id = create_id("prod");
 
-    try {
-      $stmt = $pdo->prepare(
-        "INSERT INTO products (id, sku_code, name, category_id, product_type, unit_of_measure, cost_price, selling_price, is_active, board_size_code, yield_per_sheet, notes) " .
-        "VALUES (:id, :sku_code, :name, :category_id, :product_type, :unit_of_measure, :cost_price, :selling_price, :is_active, :board_size_code, :yield_per_sheet, :notes)"
-      );
-      $stmt->execute([
-        ":id" => $id,
-        ":sku_code" => $skuCode,
-        ":name" => $name,
-        ":category_id" => $categoryId,
-        ":product_type" => $productType,
-        ":unit_of_measure" => $unitOfMeasure,
-        ":cost_price" => $costPrice,
-        ":selling_price" => $sellingPrice,
-        ":is_active" => $isActive ? 1 : 0,
-        ":board_size_code" => $boardSizeCode,
-        ":yield_per_sheet" => $yieldPerSheet,
-        ":notes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
-      ]);
-    } catch (PDOException $error) {
-      $info = $error->errorInfo;
-      $code = is_array($info) && isset($info[1]) ? (int)$info[1] : 0;
-      if ($code === 1062) {
-        json_response(400, ["error" => "ValidationError", "message" => "skuCode already exists"]);
+    $attempt = 0;
+    $createdSkuCode = "";
+    $inserted = false;
+    while ($attempt < 12) {
+      $attempt++;
+      $createdSkuCode = phase1_generate_product_sku_code($productType);
+
+      try {
+        $stmt = $pdo->prepare(
+          "INSERT INTO products (id, sku_code, name, category_id, product_type, unit_of_measure, cost_price, selling_price, is_active, board_size_code, yield_per_sheet, notes) " .
+          "VALUES (:id, :sku_code, :name, :category_id, :product_type, :unit_of_measure, :cost_price, :selling_price, :is_active, :board_size_code, :yield_per_sheet, :notes)"
+        );
+        $stmt->execute([
+          ":id" => $id,
+          ":sku_code" => $createdSkuCode,
+          ":name" => $name,
+          ":category_id" => $categoryId,
+          ":product_type" => $productType,
+          ":unit_of_measure" => $unitOfMeasure,
+          ":cost_price" => $costPrice,
+          ":selling_price" => $sellingPrice,
+          ":is_active" => $isActive ? 1 : 0,
+          ":board_size_code" => $boardSizeCode,
+          ":yield_per_sheet" => $yieldPerSheet,
+          ":notes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+        ]);
+        $inserted = true;
+        break;
+      } catch (PDOException $error) {
+        $info = $error->errorInfo;
+        $code = is_array($info) && isset($info[1]) ? (int)$info[1] : 0;
+        if ($code === 1062) {
+          continue;
+        }
+        json_response(500, ["error" => "InternalServerError", "message" => "Failed to create product"]);
       }
-      json_response(500, ["error" => "InternalServerError", "message" => "Failed to create product"]);
+    }
+    if (!$inserted) {
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to allocate a unique SKU code"]);
     }
 
     $row = phase1_db_fetch_one(
@@ -3080,6 +3095,10 @@ function phase1_handle(string $method, string $route): void {
     $id = (string)$matches[1];
     $body = read_json_body();
 
+    if (array_key_exists("skuCode", $body)) {
+      json_response(400, ["error" => "ValidationError", "message" => "skuCode is not editable"]);
+    }
+
     $existing = phase1_db_fetch_one(
       $pdo,
       "SELECT p.id, p.sku_code, p.name, p.category_id, c.name AS category_name, p.product_type, p.unit_of_measure, " .
@@ -3091,7 +3110,6 @@ function phase1_handle(string $method, string $route): void {
       json_response(404, ["error" => "HttpError", "message" => "Product not found"]);
     }
 
-    $nextSkuCode = (string)$existing["sku_code"];
     $nextName = (string)$existing["name"];
     $nextCategoryId = (string)$existing["category_id"];
     $nextProductType = (string)$existing["product_type"];
@@ -3101,14 +3119,6 @@ function phase1_handle(string $method, string $route): void {
     $nextIsActive = (int)$existing["is_active"] === 1;
     $nextBoardSizeCode = $existing["board_size_code"] === null ? null : (string)$existing["board_size_code"];
     $nextNotes = $existing["notes"] ?? null;
-
-    if (array_key_exists("skuCode", $body)) {
-      $value = is_string($body["skuCode"]) ? trim($body["skuCode"]) : "";
-      if ($value === "") {
-        json_response(400, ["error" => "ValidationError", "message" => "skuCode cannot be empty"]);
-      }
-      $nextSkuCode = $value;
-    }
     if (array_key_exists("name", $body)) {
       $value = is_string($body["name"]) ? trim($body["name"]) : "";
       if ($value === "") {
@@ -3210,13 +3220,12 @@ function phase1_handle(string $method, string $route): void {
 
     try {
       $stmt = $pdo->prepare(
-        "UPDATE products SET sku_code = :sku_code, name = :name, category_id = :category_id, product_type = :product_type, " .
+        "UPDATE products SET name = :name, category_id = :category_id, product_type = :product_type, " .
           "unit_of_measure = :unit_of_measure, cost_price = :cost_price, selling_price = :selling_price, is_active = :is_active, " .
           "board_size_code = :board_size_code, yield_per_sheet = :yield_per_sheet, notes = :notes, updated_at = NOW() WHERE id = :id"
       );
       $stmt->execute([
         ":id" => $id,
-        ":sku_code" => $nextSkuCode,
         ":name" => $nextName,
         ":category_id" => $nextCategoryId,
         ":product_type" => $nextProductType,
@@ -3229,11 +3238,6 @@ function phase1_handle(string $method, string $route): void {
         ":notes" => $nextNotes,
       ]);
     } catch (PDOException $error) {
-      $info = $error->errorInfo;
-      $code = is_array($info) && isset($info[1]) ? (int)$info[1] : 0;
-      if ($code === 1062) {
-        json_response(400, ["error" => "ValidationError", "message" => "skuCode already exists"]);
-      }
       json_response(500, ["error" => "InternalServerError", "message" => "Failed to update product"]);
     }
 
@@ -10517,6 +10521,16 @@ function create_id(string $prefix): string {
   $bytes = random_bytes(16);
   $hex = bin2hex($bytes);
   return $prefix . "-" . substr($hex, 0, 8) . "-" . substr($hex, 8, 4) . "-" . substr($hex, 12, 4) . "-" . substr($hex, 16, 4) . "-" . substr($hex, 20);
+}
+
+function phase1_generate_product_sku_code(string $productType): string {
+  $normalized = strtoupper(trim($productType));
+  $prefix = $normalized === "BOARD" ? "BDK-B" : "BDK-N";
+  // YYMMDD keeps the SKU compact while still sortable by creation date.
+  $date = gmdate("ymd");
+  // 3 random bytes -> 6 hex characters. Collision risk is negligible; we also retry on duplicates.
+  $suffix = strtoupper(bin2hex(random_bytes(3)));
+  return $prefix . "-" . $date . "-" . $suffix;
 }
 
 $method = $_SERVER["REQUEST_METHOD"] ?? "GET";

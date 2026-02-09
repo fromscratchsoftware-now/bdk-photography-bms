@@ -714,7 +714,6 @@ export default function App(): JSX.Element {
 
   const [editingProductId, setEditingProductId] = useState<string | null>(null);
   const [editingProductForm, setEditingProductForm] = useState<{
-    skuCode: string;
     name: string;
     categoryId: string;
     productType: "BOARD" | "NON_BOARD";
@@ -726,7 +725,6 @@ export default function App(): JSX.Element {
     notes: string;
   } | null>(null);
   const [newProductForm, setNewProductForm] = useState<{
-    skuCode: string;
     name: string;
     categoryId: string;
     productType: "BOARD" | "NON_BOARD";
@@ -737,7 +735,6 @@ export default function App(): JSX.Element {
     boardSizeCode: "A4C" | "A3C" | "A2C";
     notes: string;
   }>({
-    skuCode: "",
     name: "",
     categoryId: "",
     productType: "BOARD",
@@ -5417,6 +5414,7 @@ Payments update invoice status:
               <>
                 <section className="card" style={{ gridColumn: "1 / -1" }}>
                   <h2>Create Product</h2>
+                  <p className="hint">SKU code is auto-generated on save.</p>
                   {productCategories.length ? (
                     <form
                       className="form form--three"
@@ -5430,7 +5428,6 @@ Payments update invoice status:
                         setMasterBusy(true);
                         try {
                           await createProduct(auth.token, {
-                            skuCode: newProductForm.skuCode,
                             name: newProductForm.name,
                             categoryId: newProductForm.categoryId,
                             productType: newProductForm.productType,
@@ -5443,7 +5440,6 @@ Payments update invoice status:
                           });
                           setNewProductForm((prev) => ({
                             ...prev,
-                            skuCode: "",
                             name: "",
                             costPrice: "",
                             sellingPrice: "",
@@ -5509,14 +5505,6 @@ Payments update invoice status:
                           </select>
                         </label>
                       ) : null}
-                      <label>
-                        SKU Code
-                        <input
-                          value={newProductForm.skuCode}
-                          onChange={(event) => setNewProductForm((prev) => ({ ...prev, skuCode: event.target.value }))}
-                          required
-                        />
-                      </label>
                       <label>
                         Name
                         <input
@@ -5626,7 +5614,6 @@ Payments update invoice status:
                                     onClick={() => {
                                       setEditingProductId(p.id);
                                       setEditingProductForm({
-                                        skuCode: p.skuCode,
                                         name: p.name,
                                         categoryId: p.categoryId,
                                         productType: p.productType,
@@ -5681,6 +5668,14 @@ Payments update invoice status:
                     <div className="approvalRow">
                       <div>
                         <p className="subhead">Edit Product</p>
+                        {(() => {
+                          const sku = products.find((p) => p.id === editingProductId)?.skuCode ?? "";
+                          return sku ? (
+                            <div className="note" style={{ marginBottom: "0.85rem" }}>
+                              SKU: <strong>{sku}</strong> (not editable)
+                            </div>
+                          ) : null;
+                        })()}
                         <form
                           className="form form--three"
                           onSubmit={async (event) => {
@@ -5693,7 +5688,6 @@ Payments update invoice status:
                             setMasterBusy(true);
                             try {
                               await updateProduct(auth.token, editingProductId, {
-                                skuCode: editingProductForm.skuCode,
                                 name: editingProductForm.name,
                                 categoryId: editingProductForm.categoryId,
                                 productType: editingProductForm.productType,
@@ -5775,16 +5769,6 @@ Payments update invoice status:
                               </select>
                             </label>
                           ) : null}
-                          <label>
-                            SKU Code
-                            <input
-                              value={editingProductForm.skuCode}
-                              onChange={(event) =>
-                                setEditingProductForm((prev) => (prev ? { ...prev, skuCode: event.target.value } : prev))
-                              }
-                              required
-                            />
-                          </label>
                           <label>
                             Name
                             <input
