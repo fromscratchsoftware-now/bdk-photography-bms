@@ -9,6 +9,7 @@ import {
   createInvoice,
   createInvoicePayment,
   createInventoryTransfer,
+  createMessagingTemplate,
   createReconciliationLock,
   createSale,
   createStockReceipt,
@@ -45,6 +46,9 @@ import {
   listInventoryTransfers,
   listInvoicePayments,
   listInvoices,
+  listMessagingLogs,
+  listMessagingQueue,
+  listMessagingTemplates,
   listMyNotifications,
   listReconciliationLocks,
   listSales,
@@ -58,7 +62,11 @@ import {
   login,
   markNotificationRead,
   receiveInventoryTransfer,
+  runAdminDailySummary,
+  runOverdueReminders,
   shipInventoryTransfer,
+  updateMessagingQueueStatus,
+  updateMessagingTemplate,
   updateSale,
   updateCustomer,
   updateInvoice,
@@ -86,7 +94,14 @@ import {
   type InventoryStockRow,
   type InventoryTransfer,
   type InventoryTransferStatus,
+  type MessagingChannel,
+  type MessagingLogEvent,
+  type MessagingQueueItem,
+  type MessagingQueueStatus,
+  type MessagingTemplate,
   type NotificationItem,
+  type OverdueRemindersRunResult,
+  type AdminDailySummaryRunResult,
   type PlReport,
   type Product,
   type ProductCategory,
@@ -111,10 +126,11 @@ type AuthState = {
   user: AuthUser;
 };
 
-type ActiveView = "overview" | "customers" | "invoices" | "inventory" | "sales" | "expenses" | "cash" | "reports" | "master-data";
+type ActiveView = "overview" | "customers" | "invoices" | "inventory" | "sales" | "expenses" | "cash" | "reports" | "messaging" | "master-data";
 type MasterSection = "expense-categories" | "product-categories" | "products";
 type ReportSection = "sales" | "invoices" | "cash" | "expenses" | "pl";
 type InventorySection = "stock" | "transfers" | "workshop";
+type MessagingSection = "templates" | "queue" | "logs" | "jobs";
 
 const AUTH_STORAGE_KEY = "bdk.auth.phase1.v1";
 
@@ -474,6 +490,60 @@ export default function App(): JSX.Element {
     lines: [{ productId: "", quantity: "1" }]
   });
 
+  const [messagingSection, setMessagingSection] = useState<MessagingSection>("templates");
+  const [messagingBusy, setMessagingBusy] = useState(false);
+  const [messagingTemplates, setMessagingTemplates] = useState<MessagingTemplate[]>([]);
+  const [messagingQueue, setMessagingQueue] = useState<MessagingQueueItem[]>([]);
+  const [messagingLogs, setMessagingLogs] = useState<MessagingLogEvent[]>([]);
+  const [messagingQueueFilters, setMessagingQueueFilters] = useState<{
+    status: MessagingQueueStatus | "";
+    channel: MessagingChannel | "";
+    dateFrom: string;
+    dateTo: string;
+    queueId: string;
+  }>({
+    status: "",
+    channel: "",
+    dateFrom: daysAgoLocalYmd(29),
+    dateTo: todayLocalYmd(),
+    queueId: ""
+  });
+
+  const [newMessagingTemplateForm, setNewMessagingTemplateForm] = useState<{
+    templateKey: string;
+    channel: MessagingChannel;
+    subject: string;
+    body: string;
+    notes: string;
+    isActive: boolean;
+  }>({
+    templateKey: "OVERDUE_INVOICE_REMINDER",
+    channel: "WHATSAPP",
+    subject: "",
+    body: "",
+    notes: "",
+    isActive: true
+  });
+
+  const [editingMessagingTemplateId, setEditingMessagingTemplateId] = useState<string | null>(null);
+  const [editingMessagingTemplateForm, setEditingMessagingTemplateForm] = useState<{
+    subject: string;
+    body: string;
+    notes: string;
+    isActive: boolean;
+  } | null>(null);
+
+  const [runOverdueRemindersForm, setRunOverdueRemindersForm] = useState<{ asOfDate: string; notes: string }>({
+    asOfDate: todayLocalYmd(),
+    notes: ""
+  });
+  const [runDailySummaryForm, setRunDailySummaryForm] = useState<{ date: string; notes: string }>({
+    date: todayLocalYmd(),
+    notes: ""
+  });
+  const [lastOverdueRunResult, setLastOverdueRunResult] = useState<OverdueRemindersRunResult | null>(null);
+  const [lastDailySummaryResult, setLastDailySummaryResult] = useState<AdminDailySummaryRunResult | null>(null);
+
   const [masterBusy, setMasterBusy] = useState(false);
   const [editingExpenseCategoryId, setEditingExpenseCategoryId] = useState<string | null>(null);
   const [editingExpenseCategoryForm, setEditingExpenseCategoryForm] = useState<{
@@ -558,6 +628,7 @@ export default function App(): JSX.Element {
   const canReceiveStock = authUser?.role === "ADMIN";
   const canRecordDamages = authUser?.role === "ADMIN" || authUser?.role === "SALES";
   const canViewWorkshop = authUser?.role === "ADMIN" || authUser?.role === "MANAGER";
+  const canManageMessaging = authUser?.role === "ADMIN";
 
   const shopCodesForUser = useMemo(() => {
     const map = new Map<string, string>();
@@ -621,6 +692,25 @@ export default function App(): JSX.Element {
       lines: [{ productId: "", sheetsUsed: "1", actualGood: "", actualDamaged: "0", actualWaste: "0", notes: "" }]
     });
     setNewInvTransferForm({ toShopId: "", notes: "", lines: [{ productId: "", quantity: "1" }] });
+    setMessagingSection("templates");
+    setMessagingTemplates([]);
+    setMessagingQueue([]);
+    setMessagingLogs([]);
+    setMessagingQueueFilters({ status: "", channel: "", dateFrom: daysAgoLocalYmd(29), dateTo: todayLocalYmd(), queueId: "" });
+    setNewMessagingTemplateForm({
+      templateKey: "OVERDUE_INVOICE_REMINDER",
+      channel: "WHATSAPP",
+      subject: "",
+      body: "",
+      notes: "",
+      isActive: true
+    });
+    setEditingMessagingTemplateId(null);
+    setEditingMessagingTemplateForm(null);
+    setRunOverdueRemindersForm({ asOfDate: todayLocalYmd(), notes: "" });
+    setRunDailySummaryForm({ date: todayLocalYmd(), notes: "" });
+    setLastOverdueRunResult(null);
+    setLastDailySummaryResult(null);
     setSuccess(null);
     setError(message ?? null);
   }
@@ -1709,6 +1799,96 @@ export default function App(): JSX.Element {
     inventoryDateRange.dateTo
   ]);
 
+  async function refreshMessagingTemplatesData(): Promise<void> {
+    if (!auth || !canManageMessaging) {
+      return;
+    }
+    setMessagingBusy(true);
+    setError(null);
+    try {
+      const templates = await listMessagingTemplates(auth.token);
+      setMessagingTemplates(templates);
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to load templates");
+    } finally {
+      setMessagingBusy(false);
+    }
+  }
+
+  async function refreshMessagingQueueData(): Promise<void> {
+    if (!auth || !canManageMessaging) {
+      return;
+    }
+    setMessagingBusy(true);
+    setError(null);
+    try {
+      const data = await listMessagingQueue(auth.token, {
+        status: messagingQueueFilters.status || undefined,
+        channel: messagingQueueFilters.channel || undefined,
+        dateFrom: messagingQueueFilters.dateFrom || undefined,
+        dateTo: messagingQueueFilters.dateTo || undefined
+      });
+      setMessagingQueue(data.items);
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to load queue");
+    } finally {
+      setMessagingBusy(false);
+    }
+  }
+
+  async function refreshMessagingLogsData(): Promise<void> {
+    if (!auth || !canManageMessaging) {
+      return;
+    }
+    setMessagingBusy(true);
+    setError(null);
+    try {
+      const data = await listMessagingLogs(auth.token, {
+        queueId: messagingQueueFilters.queueId ? messagingQueueFilters.queueId : undefined,
+        dateFrom: messagingQueueFilters.dateFrom || undefined,
+        dateTo: messagingQueueFilters.dateTo || undefined
+      });
+      setMessagingLogs(data.items);
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to load logs");
+    } finally {
+      setMessagingBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!auth || !canManageMessaging) {
+      return;
+    }
+    if (activeView !== "messaging") {
+      return;
+    }
+    if (messagingSection === "templates") {
+      void refreshMessagingTemplatesData();
+      return;
+    }
+    if (messagingSection === "queue") {
+      void refreshMessagingQueueData();
+      return;
+    }
+    if (messagingSection === "logs") {
+      void refreshMessagingLogsData();
+      return;
+    }
+    // jobs: no auto refresh
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    activeView,
+    auth?.token,
+    canManageMessaging,
+    messagingSection,
+    messagingQueueFilters.status,
+    messagingQueueFilters.channel,
+    messagingQueueFilters.dateFrom,
+    messagingQueueFilters.dateTo,
+    messagingQueueFilters.queueId
+  ]);
+
   async function submitLogin(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     setError(null);
@@ -1733,6 +1913,11 @@ export default function App(): JSX.Element {
     return <div className="page loading">Loading...</div>;
   }
 
+  function formatUGX(amount: number): string {
+    const safe = Number.isFinite(amount) ? Math.trunc(amount) : 0;
+    return `UGX ${safe.toLocaleString("en-US")}`;
+  }
+
   function escapeHtml(value: string): string {
     return value
       .replace(/&/g, "&amp;")
@@ -1750,8 +1935,8 @@ export default function App(): JSX.Element {
         (l) => `<tr>
   <td>${escapeHtml(l.description)}</td>
   <td style="text-align:right;">${l.quantity}</td>
-  <td style="text-align:right;">${l.unitPrice}</td>
-  <td style="text-align:right;">${l.lineTotal}</td>
+  <td style="text-align:right;">${formatUGX(l.unitPrice)}</td>
+  <td style="text-align:right;">${formatUGX(l.lineTotal)}</td>
 </tr>`
       )
       .join("");
@@ -1761,7 +1946,7 @@ export default function App(): JSX.Element {
         (p) => `<tr>
   <td>${escapeHtml(p.createdAt)}</td>
   <td>${escapeHtml(p.method)}</td>
-  <td style="text-align:right;">${p.amount}</td>
+  <td style="text-align:right;">${formatUGX(p.amount)}</td>
   <td>${escapeHtml(p.notes ?? "")}</td>
 </tr>`
       )
@@ -1845,15 +2030,15 @@ export default function App(): JSX.Element {
         ${lineRows || '<tr><td colspan="4">No lines</td></tr>'}
         <tr class="totals">
           <td colspan="3" class="right"><strong>Total</strong></td>
-          <td class="right"><strong>${invoice.totalAmount}</strong></td>
+          <td class="right"><strong>${formatUGX(invoice.totalAmount)}</strong></td>
         </tr>
         <tr class="totals">
           <td colspan="3" class="right"><strong>Paid</strong></td>
-          <td class="right"><strong>${invoice.paidAmount}</strong></td>
+          <td class="right"><strong>${formatUGX(invoice.paidAmount)}</strong></td>
         </tr>
         <tr class="totals">
           <td colspan="3" class="right"><strong>Balance</strong></td>
-          <td class="right"><strong>${invoice.balance}</strong></td>
+          <td class="right"><strong>${formatUGX(invoice.balance)}</strong></td>
         </tr>
       </tbody>
     </table>
@@ -2004,6 +2189,15 @@ export default function App(): JSX.Element {
               onClick={() => setActiveView("reports")}
             >
               Reports
+            </button>
+          ) : null}
+          {canManageMessaging ? (
+            <button
+              className={`tab ${activeView === "messaging" ? "isActive" : ""}`}
+              type="button"
+              onClick={() => setActiveView("messaging")}
+            >
+              Messaging
             </button>
           ) : null}
           {canManageMasterData ? (
@@ -2742,8 +2936,8 @@ export default function App(): JSX.Element {
                             {inv.customerFirstName} {inv.customerLastName}
                           </td>
                           <td>{inv.status}</td>
-                          <td>{inv.totalAmount}</td>
-                          <td>{inv.balance}</td>
+                          <td>{formatUGX(inv.totalAmount)}</td>
+                          <td>{formatUGX(inv.balance)}</td>
                           <td>
                             <div className="approvalActions">
                               <button
@@ -2869,8 +3063,8 @@ export default function App(): JSX.Element {
                         <tr key={l.id}>
                           <td>{l.description}</td>
                           <td>{l.quantity}</td>
-                          <td>{l.unitPrice}</td>
-                          <td>{l.lineTotal}</td>
+                          <td>{formatUGX(l.unitPrice)}</td>
+                          <td>{formatUGX(l.lineTotal)}</td>
                         </tr>
                       ))}
                       <tr>
@@ -2878,7 +3072,7 @@ export default function App(): JSX.Element {
                           <strong>Total</strong>
                         </td>
                         <td>
-                          <strong>{selectedInvoice.invoice.totalAmount}</strong>
+                          <strong>{formatUGX(selectedInvoice.invoice.totalAmount)}</strong>
                         </td>
                       </tr>
                       <tr>
@@ -2886,7 +3080,7 @@ export default function App(): JSX.Element {
                           <strong>Paid</strong>
                         </td>
                         <td>
-                          <strong>{selectedInvoice.invoice.paidAmount}</strong>
+                          <strong>{formatUGX(selectedInvoice.invoice.paidAmount)}</strong>
                         </td>
                       </tr>
                       <tr>
@@ -2894,7 +3088,7 @@ export default function App(): JSX.Element {
                           <strong>Balance</strong>
                         </td>
                         <td>
-                          <strong>{selectedInvoice.invoice.balance}</strong>
+                          <strong>{formatUGX(selectedInvoice.invoice.balance)}</strong>
                         </td>
                       </tr>
                     </tbody>
@@ -2920,7 +3114,7 @@ export default function App(): JSX.Element {
                           <tr key={p.id}>
                             <td>{p.createdAt}</td>
                             <td>{p.method}</td>
-                            <td>{p.amount}</td>
+                            <td>{formatUGX(p.amount)}</td>
                             <td>{p.notes ?? "-"}</td>
                           </tr>
                         ))
@@ -4451,7 +4645,7 @@ export default function App(): JSX.Element {
                     />
                   </label>
 
-                  <div className="lineHint">Total (UGX): {saleDraftTotal}</div>
+                  <div className="lineHint">Total: {formatUGX(saleDraftTotal)}</div>
 
                   <div className="lines" style={{ gridColumn: "1 / -1" }}>
                     <div className="linesHead">Line items</div>
@@ -4544,7 +4738,7 @@ export default function App(): JSX.Element {
                               placeholder="Optional"
                             />
                           </label>
-                          <div className="lineTotal">Line total: {lineTotal}</div>
+                          <div className="lineTotal">Line total: {formatUGX(lineTotal)}</div>
                           <div className="approvalActions">
                             <button
                               data-variant="ghost"
@@ -4640,7 +4834,7 @@ export default function App(): JSX.Element {
                             <td>{sale.saleDate}</td>
                             {isSalesUser ? null : <td>{sale.userFullName}</td>}
                             <td>{sale.paymentMethod}</td>
-                            <td className="right">{sale.totalAmount}</td>
+                            <td className="right">{formatUGX(sale.totalAmount)}</td>
                             <td>{sale.invoiceNumber ?? "-"}</td>
                             <td>{sale.isVoid ? "VOID" : "ACTIVE"}</td>
                             <td>
@@ -4706,7 +4900,7 @@ export default function App(): JSX.Element {
                     </div>
                   </div>
                   <div className="hint">
-                    {selectedSale.sale.paymentMethod} • UGX {selectedSale.sale.totalAmount} •{" "}
+                    {selectedSale.sale.paymentMethod} • {formatUGX(selectedSale.sale.totalAmount)} •{" "}
                     {selectedSale.sale.isVoid ? "VOID" : "ACTIVE"}
                   </div>
                 </div>
@@ -4730,8 +4924,8 @@ export default function App(): JSX.Element {
                           <td>{line.skuCode}</td>
                           <td>{line.productName}</td>
                           <td className="right">{line.quantity}</td>
-                          <td className="right">{line.unitPrice}</td>
-                          <td className="right">{line.lineTotal}</td>
+                          <td className="right">{formatUGX(line.unitPrice)}</td>
+                          <td className="right">{formatUGX(line.lineTotal)}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -5001,7 +5195,7 @@ export default function App(): JSX.Element {
                           <td>{expense.expenseDate}</td>
                           <td>{expense.shopCode}</td>
                           <td>{expense.categoryName}</td>
-                          <td className="right">{expense.amountUGX}</td>
+                          <td className="right">{formatUGX(expense.amountUGX)}</td>
                           <td>{expense.paymentSource}</td>
                           <td>{expense.paymentSource === "SALESPERSON_CASH" ? expense.paidByFullName ?? "-" : "-"}</td>
                           <td>{expense.isVoid ? "VOID" : "ACTIVE"}</td>
@@ -5052,26 +5246,26 @@ export default function App(): JSX.Element {
               {cashSummary ? (
                 <>
                   <p className="hint" style={{ marginTop: 0 }}>
-                    <strong>Cash at hand:</strong> UGX {cashSummary.cashAtHand}
+                    <strong>Cash at hand:</strong> {formatUGX(cashSummary.cashAtHand)}
                   </p>
                   <ul className="stack">
                     <li>
-                      <strong>Cash sales:</strong> {cashSummary.cashSales}
+                      <strong>Cash sales:</strong> {formatUGX(cashSummary.cashSales)}
                     </li>
                     <li>
-                      <strong>Cash invoice payments:</strong> {cashSummary.cashInvoicePayments}
+                      <strong>Cash invoice payments:</strong> {formatUGX(cashSummary.cashInvoicePayments)}
                     </li>
                     <li>
-                      <strong>Cash expenses:</strong> {cashSummary.cashExpenses}
+                      <strong>Cash expenses:</strong> {formatUGX(cashSummary.cashExpenses)}
                     </li>
                     <li>
-                      <strong>Transfers sent:</strong> {cashSummary.transfersSent}
+                      <strong>Transfers sent:</strong> {formatUGX(cashSummary.transfersSent)}
                     </li>
                     <li>
-                      <strong>Transfers received:</strong> {cashSummary.transfersReceived}
+                      <strong>Transfers received:</strong> {formatUGX(cashSummary.transfersReceived)}
                     </li>
                     <li>
-                      <strong>Banked:</strong> {cashSummary.banked}
+                      <strong>Banked:</strong> {formatUGX(cashSummary.banked)}
                     </li>
                   </ul>
                   <p className="hint">Computed at {cashSummary.computedAt}</p>
@@ -5160,7 +5354,7 @@ export default function App(): JSX.Element {
                             <td>{transfer.createdAt.slice(0, 10)}</td>
                             <td>{transfer.shopCode}</td>
                             <td>{transfer.senderFullName}</td>
-                            <td className="right">{transfer.amountUGX}</td>
+                            <td className="right">{formatUGX(transfer.amountUGX)}</td>
                             <td>{transfer.requestNotes ?? "-"}</td>
                             <td>
                               <button
@@ -5240,7 +5434,7 @@ export default function App(): JSX.Element {
                             <td>{req.createdAt.slice(0, 10)}</td>
                             <td>{req.shopCode}</td>
                             <td>{req.userFullName}</td>
-                            <td className="right">{req.amountUGX}</td>
+                            <td className="right">{formatUGX(req.amountUGX)}</td>
                             <td>{req.requestNotes ?? "-"}</td>
                             <td>
                               <button
@@ -5293,7 +5487,7 @@ export default function App(): JSX.Element {
                             <td>{req.createdAt.slice(0, 10)}</td>
                             <td>{req.shopCode}</td>
                             {authUser.role !== "SALES" ? <td>{req.userFullName}</td> : null}
-                            <td className="right">{req.amountUGX}</td>
+                            <td className="right">{formatUGX(req.amountUGX)}</td>
                             <td>{req.status}</td>
                             <td>{req.requestNotes ?? "-"}</td>
                           </tr>
@@ -5370,8 +5564,8 @@ export default function App(): JSX.Element {
                           <tr key={item.userId}>
                             <td>{item.fullName}</td>
                             <td>{item.shopCode ?? "-"}</td>
-                            <td className="right">{item.cashAtHand}</td>
-                            <td className="right">{item.bankedTotal}</td>
+                            <td className="right">{formatUGX(item.cashAtHand)}</td>
+                            <td className="right">{formatUGX(item.bankedTotal)}</td>
                           </tr>
                         ))
                       ) : (
@@ -5386,8 +5580,8 @@ export default function App(): JSX.Element {
                           <th colSpan={2} style={{ textAlign: "right" }}>
                             Totals
                           </th>
-                          <th className="right">{adminCashOverview.totals.cashAtHand}</th>
-                          <th className="right">{adminCashOverview.totals.bankedTotal}</th>
+                          <th className="right">{formatUGX(adminCashOverview.totals.cashAtHand)}</th>
+                          <th className="right">{formatUGX(adminCashOverview.totals.bankedTotal)}</th>
                         </tr>
                       </tfoot>
                     ) : null}
@@ -5534,19 +5728,19 @@ export default function App(): JSX.Element {
                         <strong>Sales:</strong> {salesReport.totals.saleCount}
                       </li>
                       <li>
-                        <strong>Total revenue (UGX):</strong> {salesReport.totals.totalAmount}
+                        <strong>Total revenue:</strong> {formatUGX(salesReport.totals.totalAmount)}
                       </li>
                       <li>
-                        <strong>Cash:</strong> {salesReport.totals.cashAmount}
+                        <strong>Cash:</strong> {formatUGX(salesReport.totals.cashAmount)}
                       </li>
                       <li>
-                        <strong>Mobile Money:</strong> {salesReport.totals.mobileMoneyAmount}
+                        <strong>Mobile Money:</strong> {formatUGX(salesReport.totals.mobileMoneyAmount)}
                       </li>
                       <li>
-                        <strong>Card:</strong> {salesReport.totals.cardAmount}
+                        <strong>Card:</strong> {formatUGX(salesReport.totals.cardAmount)}
                       </li>
                       <li>
-                        <strong>Credit:</strong> {salesReport.totals.creditAmount}
+                        <strong>Credit:</strong> {formatUGX(salesReport.totals.creditAmount)}
                       </li>
                     </ul>
                   ) : (
@@ -5577,11 +5771,11 @@ export default function App(): JSX.Element {
                               <td>{row.periodStart}</td>
                               <td>{row.periodEnd}</td>
                               <td className="right">{row.saleCount}</td>
-                              <td className="right">{row.totalAmount}</td>
-                              <td className="right">{row.cashAmount}</td>
-                              <td className="right">{row.mobileMoneyAmount}</td>
-                              <td className="right">{row.cardAmount}</td>
-                              <td className="right">{row.creditAmount}</td>
+                              <td className="right">{formatUGX(row.totalAmount)}</td>
+                              <td className="right">{formatUGX(row.cashAmount)}</td>
+                              <td className="right">{formatUGX(row.mobileMoneyAmount)}</td>
+                              <td className="right">{formatUGX(row.cardAmount)}</td>
+                              <td className="right">{formatUGX(row.creditAmount)}</td>
                             </tr>
                           ))
                         ) : (
@@ -5650,16 +5844,16 @@ export default function App(): JSX.Element {
                         <strong>Invoices:</strong> {invoiceReport.summary.count}
                       </li>
                       <li>
-                        <strong>Total (UGX):</strong> {invoiceReport.summary.totalAmount}
+                        <strong>Total:</strong> {formatUGX(invoiceReport.summary.totalAmount)}
                       </li>
                       <li>
-                        <strong>Paid:</strong> {invoiceReport.summary.paidAmount}
+                        <strong>Paid:</strong> {formatUGX(invoiceReport.summary.paidAmount)}
                       </li>
                       <li>
-                        <strong>Balance:</strong> {invoiceReport.summary.balance}
+                        <strong>Balance:</strong> {formatUGX(invoiceReport.summary.balance)}
                       </li>
                       <li>
-                        <strong>Overdue:</strong> {invoiceReport.summary.overdueCount} (UGX {invoiceReport.summary.overdueBalance})
+                        <strong>Overdue:</strong> {invoiceReport.summary.overdueCount} ({formatUGX(invoiceReport.summary.overdueBalance)})
                       </li>
                     </ul>
                   ) : (
@@ -5695,9 +5889,9 @@ export default function App(): JSX.Element {
                               <td>{inv.status}</td>
                               <td>{inv.invoiceDate}</td>
                               <td>{inv.dueDate ?? "-"}</td>
-                              <td className="right">{inv.totalAmount}</td>
-                              <td className="right">{inv.paidAmount}</td>
-                              <td className="right">{inv.balance}</td>
+                              <td className="right">{formatUGX(inv.totalAmount)}</td>
+                              <td className="right">{formatUGX(inv.paidAmount)}</td>
+                              <td className="right">{formatUGX(inv.balance)}</td>
                               <td>{inv.isOverdue ? "YES" : "NO"}</td>
                             </tr>
                           ))
@@ -5757,10 +5951,10 @@ export default function App(): JSX.Element {
                   {cashReport ? (
                     <ul className="stack">
                       <li>
-                        <strong>Cash at hand (as of):</strong> UGX {cashReport.totals.cashAtHand}
+                        <strong>Cash at hand (as of):</strong> {formatUGX(cashReport.totals.cashAtHand)}
                       </li>
                       <li>
-                        <strong>Banked (range):</strong> UGX {cashReport.totals.bankedInRange}
+                        <strong>Banked (range):</strong> {formatUGX(cashReport.totals.bankedInRange)}
                       </li>
                     </ul>
                   ) : (
@@ -5786,8 +5980,8 @@ export default function App(): JSX.Element {
                             <tr key={item.userId}>
                               <td>{item.fullName}</td>
                               <td>{item.shopCode}</td>
-                              <td className="right">{item.cashAtHandAsOf}</td>
-                              <td className="right">{item.bankedInRange}</td>
+                              <td className="right">{formatUGX(item.cashAtHandAsOf)}</td>
+                              <td className="right">{formatUGX(item.bankedInRange)}</td>
                             </tr>
                           ))
                         ) : (
@@ -5844,13 +6038,13 @@ export default function App(): JSX.Element {
                         <strong>Expenses:</strong> {expenseReport.summary.count}
                       </li>
                       <li>
-                        <strong>Total (UGX):</strong> {expenseReport.summary.totalAmount}
+                        <strong>Total:</strong> {formatUGX(expenseReport.summary.totalAmount)}
                       </li>
                       <li>
-                        <strong>Salesperson cash:</strong> {expenseReport.summary.salespersonCashAmount}
+                        <strong>Salesperson cash:</strong> {formatUGX(expenseReport.summary.salespersonCashAmount)}
                       </li>
                       <li>
-                        <strong>Admin/bank:</strong> {expenseReport.summary.adminBankAmount}
+                        <strong>Admin/bank:</strong> {formatUGX(expenseReport.summary.adminBankAmount)}
                       </li>
                     </ul>
                   ) : (
@@ -5875,7 +6069,7 @@ export default function App(): JSX.Element {
                             <tr key={row.categoryId}>
                               <td>{row.categoryName}</td>
                               <td className="right">{row.expenseCount}</td>
-                              <td className="right">{row.totalAmount}</td>
+                              <td className="right">{formatUGX(row.totalAmount)}</td>
                             </tr>
                           ))
                         ) : (
@@ -5910,7 +6104,7 @@ export default function App(): JSX.Element {
                               <td>{exp.expenseDate}</td>
                               <td>{exp.shopCode}</td>
                               <td>{exp.categoryName}</td>
-                              <td className="right">{exp.amountUGX}</td>
+                              <td className="right">{formatUGX(exp.amountUGX)}</td>
                               <td>{exp.paymentSource}</td>
                               <td>{exp.paymentSource === "SALESPERSON_CASH" ? exp.paidByFullName ?? "-" : "-"}</td>
                               <td>{exp.notes ?? "-"}</td>
@@ -5968,13 +6162,13 @@ export default function App(): JSX.Element {
                   {plReport ? (
                     <ul className="stack">
                       <li>
-                        <strong>Revenue (UGX):</strong> {plReport.revenue} ({plReport.saleCount} sales)
+                        <strong>Revenue:</strong> {formatUGX(plReport.revenue)} ({plReport.saleCount} sales)
                       </li>
                       <li>
-                        <strong>Expenses (UGX):</strong> {plReport.expenses} ({plReport.expenseCount} expenses)
+                        <strong>Expenses:</strong> {formatUGX(plReport.expenses)} ({plReport.expenseCount} expenses)
                       </li>
                       <li>
-                        <strong>Profit (UGX):</strong> {plReport.profit}
+                        <strong>Profit:</strong> {formatUGX(plReport.profit)}
                       </li>
                     </ul>
                   ) : (
@@ -5997,7 +6191,7 @@ export default function App(): JSX.Element {
                           plReport.revenueByPaymentMethod.map((row) => (
                             <tr key={row.paymentMethod}>
                               <td>{row.paymentMethod}</td>
-                              <td className="right">{row.totalAmount}</td>
+                              <td className="right">{formatUGX(row.totalAmount)}</td>
                             </tr>
                           ))
                         ) : (
@@ -6025,7 +6219,7 @@ export default function App(): JSX.Element {
                           plReport.expensesByPaymentSource.map((row) => (
                             <tr key={row.paymentSource}>
                               <td>{row.paymentSource}</td>
-                              <td className="right">{row.totalAmount}</td>
+                              <td className="right">{formatUGX(row.totalAmount)}</td>
                             </tr>
                           ))
                         ) : (
@@ -6036,6 +6230,759 @@ export default function App(): JSX.Element {
                       </tbody>
                     </table>
                   </div>
+                </section>
+              </>
+            )}
+          </>
+        ) : activeView === "messaging" ? (
+          <>
+            <section className="card" style={{ gridColumn: "1 / -1" }}>
+              <h2>Phase 9: Messaging (Scaffolding)</h2>
+              <p className="hint">
+                Admin-only templates + queue + delivery logs for SMS / WhatsApp / Email. Sending is not integrated yet; queue items can be marked as sent/failed manually.
+              </p>
+
+              <div className="tabs" style={{ marginTop: "0.9rem" }}>
+                <button
+                  className={`tab ${messagingSection === "templates" ? "isActive" : ""}`}
+                  type="button"
+                  onClick={() => setMessagingSection("templates")}
+                >
+                  Templates
+                </button>
+                <button
+                  className={`tab ${messagingSection === "queue" ? "isActive" : ""}`}
+                  type="button"
+                  onClick={() => setMessagingSection("queue")}
+                >
+                  Queue
+                </button>
+                <button
+                  className={`tab ${messagingSection === "logs" ? "isActive" : ""}`}
+                  type="button"
+                  onClick={() => setMessagingSection("logs")}
+                >
+                  Logs
+                </button>
+                <button
+                  className={`tab ${messagingSection === "jobs" ? "isActive" : ""}`}
+                  type="button"
+                  onClick={() => setMessagingSection("jobs")}
+                >
+                  Jobs
+                </button>
+              </div>
+
+              <div style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap", marginTop: "1rem" }}>
+                <button
+                  type="button"
+                  data-variant="ghost"
+                  onClick={() => {
+                    if (messagingSection === "templates") {
+                      void refreshMessagingTemplatesData();
+                      return;
+                    }
+                    if (messagingSection === "queue") {
+                      void refreshMessagingQueueData();
+                      return;
+                    }
+                    if (messagingSection === "logs") {
+                      void refreshMessagingLogsData();
+                      return;
+                    }
+                  }}
+                  disabled={messagingBusy}
+                >
+                  {messagingBusy ? "Refreshing..." : "Refresh"}
+                </button>
+              </div>
+            </section>
+
+            {messagingSection === "templates" ? (
+              <>
+                <section className="card">
+                  <h2>Create Template</h2>
+                  <form
+                    className="form"
+                    onSubmit={async (event) => {
+                      event.preventDefault();
+                      if (!auth) {
+                        return;
+                      }
+                      setError(null);
+                      setSuccess(null);
+                      setMessagingBusy(true);
+                      try {
+                        await createMessagingTemplate(auth.token, {
+                          templateKey: newMessagingTemplateForm.templateKey,
+                          channel: newMessagingTemplateForm.channel,
+                          subject: newMessagingTemplateForm.subject ? newMessagingTemplateForm.subject : null,
+                          body: newMessagingTemplateForm.body,
+                          isActive: newMessagingTemplateForm.isActive,
+                          notes: newMessagingTemplateForm.notes ? newMessagingTemplateForm.notes : null
+                        });
+                        setNewMessagingTemplateForm((prev) => ({ ...prev, subject: "", body: "", notes: "", isActive: true }));
+                        setSuccess("Template created.");
+                        await refreshMessagingTemplatesData();
+                      } catch (caught: unknown) {
+                        setError(caught instanceof Error ? caught.message : "Failed to create template");
+                      } finally {
+                        setMessagingBusy(false);
+                      }
+                    }}
+                  >
+                    <label>
+                      Template key
+                      <input
+                        value={newMessagingTemplateForm.templateKey}
+                        onChange={(event) => setNewMessagingTemplateForm((prev) => ({ ...prev, templateKey: event.target.value.toUpperCase() }))}
+                        placeholder="OVERDUE_INVOICE_REMINDER"
+                        required
+                      />
+                    </label>
+                    <label>
+                      Channel
+                      <select
+                        value={newMessagingTemplateForm.channel}
+                        onChange={(event) =>
+                          setNewMessagingTemplateForm((prev) => ({
+                            ...prev,
+                            channel: event.target.value === "SMS" ? "SMS" : event.target.value === "EMAIL" ? "EMAIL" : "WHATSAPP"
+                          }))
+                        }
+                      >
+                        <option value="WHATSAPP">WhatsApp</option>
+                        <option value="SMS">SMS</option>
+                        <option value="EMAIL">Email</option>
+                      </select>
+                    </label>
+                    <label>
+                      Subject (email only, optional)
+                      <input
+                        value={newMessagingTemplateForm.subject}
+                        onChange={(event) => setNewMessagingTemplateForm((prev) => ({ ...prev, subject: event.target.value }))}
+                        placeholder="BDK Daily Summary ({{date}})"
+                      />
+                    </label>
+                    <label>
+                      Body
+                      <textarea
+                        value={newMessagingTemplateForm.body}
+                        onChange={(event) => setNewMessagingTemplateForm((prev) => ({ ...prev, body: event.target.value }))}
+                        rows={6}
+                        required
+                      />
+                    </label>
+                    <label>
+                      Notes (optional)
+                      <input
+                        value={newMessagingTemplateForm.notes}
+                        onChange={(event) => setNewMessagingTemplateForm((prev) => ({ ...prev, notes: event.target.value }))}
+                      />
+                    </label>
+                    <label style={{ display: "flex", gap: "0.6rem", alignItems: "center" }}>
+                      <input
+                        type="checkbox"
+                        checked={newMessagingTemplateForm.isActive}
+                        onChange={(event) => setNewMessagingTemplateForm((prev) => ({ ...prev, isActive: event.target.checked }))}
+                      />
+                      Active
+                    </label>
+                    <button type="submit" disabled={messagingBusy}>
+                      {messagingBusy ? "Saving..." : "Create"}
+                    </button>
+                  </form>
+                </section>
+
+                <section className="card" style={{ gridColumn: "1 / -1" }}>
+                  <h2>Templates</h2>
+                  <div className="tableWrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Key</th>
+                          <th>Channel</th>
+                          <th>Active</th>
+                          <th>Updated</th>
+                          <th>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {messagingTemplates.length ? (
+                          messagingTemplates.map((tpl) => (
+                            <tr key={tpl.id} className={editingMessagingTemplateId === tpl.id ? "isSelected" : ""}>
+                              <td>{tpl.templateKey}</td>
+                              <td>{tpl.channel}</td>
+                              <td>{tpl.isActive ? "Yes" : "No"}</td>
+                              <td>{tpl.updatedAt.slice(0, 19).replace("T", " ")}</td>
+                              <td>
+                                <div className="approvalActions">
+                                  <button
+                                    data-variant="ghost"
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingMessagingTemplateId(tpl.id);
+                                      setEditingMessagingTemplateForm({
+                                        subject: tpl.subject ?? "",
+                                        body: tpl.body,
+                                        notes: tpl.notes ?? "",
+                                        isActive: tpl.isActive
+                                      });
+                                    }}
+                                  >
+                                    Edit
+                                  </button>
+                                  <button
+                                    data-variant="ghost"
+                                    type="button"
+                                    onClick={async () => {
+                                      if (!auth) {
+                                        return;
+                                      }
+                                      setError(null);
+                                      setSuccess(null);
+                                      setMessagingBusy(true);
+                                      try {
+                                        await updateMessagingTemplate(auth.token, tpl.id, { isActive: !tpl.isActive });
+                                        setSuccess("Template updated.");
+                                        await refreshMessagingTemplatesData();
+                                      } catch (caught: unknown) {
+                                        setError(caught instanceof Error ? caught.message : "Failed to update template");
+                                      } finally {
+                                        setMessagingBusy(false);
+                                      }
+                                    }}
+                                  >
+                                    {tpl.isActive ? "Deactivate" : "Activate"}
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan={5}>No templates found.</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {editingMessagingTemplateId && editingMessagingTemplateForm ? (
+                    <div className="approvalRow">
+                      <div>
+                        <p className="subhead">Edit Template</p>
+                        <form
+                          className="form"
+                          onSubmit={async (event) => {
+                            event.preventDefault();
+                            if (!auth) {
+                              return;
+                            }
+                            setError(null);
+                            setSuccess(null);
+                            setMessagingBusy(true);
+                            try {
+                              await updateMessagingTemplate(auth.token, editingMessagingTemplateId, {
+                                subject: editingMessagingTemplateForm.subject ? editingMessagingTemplateForm.subject : null,
+                                body: editingMessagingTemplateForm.body,
+                                notes: editingMessagingTemplateForm.notes ? editingMessagingTemplateForm.notes : null,
+                                isActive: editingMessagingTemplateForm.isActive
+                              });
+                              setSuccess("Template saved.");
+                              setEditingMessagingTemplateId(null);
+                              setEditingMessagingTemplateForm(null);
+                              await refreshMessagingTemplatesData();
+                            } catch (caught: unknown) {
+                              setError(caught instanceof Error ? caught.message : "Failed to save template");
+                            } finally {
+                              setMessagingBusy(false);
+                            }
+                          }}
+                        >
+                          <label>
+                            Subject (optional)
+                            <input
+                              value={editingMessagingTemplateForm.subject}
+                              onChange={(event) => setEditingMessagingTemplateForm((prev) => (prev ? { ...prev, subject: event.target.value } : prev))}
+                            />
+                          </label>
+                          <label>
+                            Body
+                            <textarea
+                              value={editingMessagingTemplateForm.body}
+                              onChange={(event) => setEditingMessagingTemplateForm((prev) => (prev ? { ...prev, body: event.target.value } : prev))}
+                              rows={8}
+                              required
+                            />
+                          </label>
+                          <label>
+                            Notes (optional)
+                            <input
+                              value={editingMessagingTemplateForm.notes}
+                              onChange={(event) => setEditingMessagingTemplateForm((prev) => (prev ? { ...prev, notes: event.target.value } : prev))}
+                            />
+                          </label>
+                          <label style={{ display: "flex", gap: "0.6rem", alignItems: "center" }}>
+                            <input
+                              type="checkbox"
+                              checked={editingMessagingTemplateForm.isActive}
+                              onChange={(event) =>
+                                setEditingMessagingTemplateForm((prev) => (prev ? { ...prev, isActive: event.target.checked } : prev))
+                              }
+                            />
+                            Active
+                          </label>
+                          <div className="approvalActions">
+                            <button type="submit" disabled={messagingBusy}>
+                              {messagingBusy ? "Saving..." : "Save"}
+                            </button>
+                            <button
+                              type="button"
+                              data-variant="ghost"
+                              onClick={() => {
+                                setEditingMessagingTemplateId(null);
+                                setEditingMessagingTemplateForm(null);
+                              }}
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </form>
+                      </div>
+                    </div>
+                  ) : null}
+                </section>
+              </>
+            ) : messagingSection === "queue" ? (
+              <>
+                <section className="card" style={{ gridColumn: "1 / -1" }}>
+                  <h2>Queue Filters</h2>
+                  <form
+                    className="form form--three"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void refreshMessagingQueueData();
+                    }}
+                  >
+                    <label>
+                      Status
+                      <select
+                        value={messagingQueueFilters.status}
+                        onChange={(event) =>
+                          setMessagingQueueFilters((prev) => ({
+                            ...prev,
+                            status:
+                              event.target.value === "QUEUED"
+                                ? "QUEUED"
+                                : event.target.value === "SENT"
+                                  ? "SENT"
+                                  : event.target.value === "FAILED"
+                                    ? "FAILED"
+                                    : event.target.value === "CANCELLED"
+                                      ? "CANCELLED"
+                                      : ""
+                          }))
+                        }
+                      >
+                        <option value="">All</option>
+                        <option value="QUEUED">Queued</option>
+                        <option value="SENT">Sent</option>
+                        <option value="FAILED">Failed</option>
+                        <option value="CANCELLED">Cancelled</option>
+                      </select>
+                    </label>
+                    <label>
+                      Channel
+                      <select
+                        value={messagingQueueFilters.channel}
+                        onChange={(event) =>
+                          setMessagingQueueFilters((prev) => ({
+                            ...prev,
+                            channel:
+                              event.target.value === "SMS" ? "SMS" : event.target.value === "EMAIL" ? "EMAIL" : event.target.value === "WHATSAPP" ? "WHATSAPP" : ""
+                          }))
+                        }
+                      >
+                        <option value="">All</option>
+                        <option value="WHATSAPP">WhatsApp</option>
+                        <option value="SMS">SMS</option>
+                        <option value="EMAIL">Email</option>
+                      </select>
+                    </label>
+                    <label>
+                      Date from
+                      <input
+                        type="date"
+                        value={messagingQueueFilters.dateFrom}
+                        onChange={(event) => setMessagingQueueFilters((prev) => ({ ...prev, dateFrom: event.target.value }))}
+                      />
+                    </label>
+                    <label>
+                      Date to
+                      <input
+                        type="date"
+                        value={messagingQueueFilters.dateTo}
+                        onChange={(event) => setMessagingQueueFilters((prev) => ({ ...prev, dateTo: event.target.value }))}
+                      />
+                    </label>
+                    <button type="submit" disabled={messagingBusy}>
+                      {messagingBusy ? "Loading..." : "Run"}
+                    </button>
+                  </form>
+                </section>
+
+                <section className="card" style={{ gridColumn: "1 / -1" }}>
+                  <h2>Queue Items</h2>
+                  <div className="tableWrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Date</th>
+                          <th>Key</th>
+                          <th>Channel</th>
+                          <th>To</th>
+                          <th>Status</th>
+                          <th>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {messagingQueue.length ? (
+                          messagingQueue.map((item) => (
+                            <tr key={item.id} style={{ opacity: item.status === "QUEUED" ? 1 : 0.85 }}>
+                              <td>{item.createdAt.slice(0, 10)}</td>
+                              <td>{item.templateKey}</td>
+                              <td>{item.channel}</td>
+                              <td>{item.toAddress}</td>
+                              <td>{item.status}</td>
+                              <td>
+                                {item.status === "QUEUED" ? (
+                                  <div className="approvalActions">
+                                    <button
+                                      type="button"
+                                      data-variant="ghost"
+                                      disabled={messagingBusy}
+                                      onClick={async () => {
+                                        if (!auth) {
+                                          return;
+                                        }
+                                        const ok = window.confirm("Mark as SENT?");
+                                        if (!ok) {
+                                          return;
+                                        }
+                                        setError(null);
+                                        setSuccess(null);
+                                        setMessagingBusy(true);
+                                        try {
+                                          await updateMessagingQueueStatus(auth.token, item.id, { status: "SENT", message: "Marked sent manually" });
+                                          setSuccess("Queue item updated.");
+                                          await refreshMessagingQueueData();
+                                        } catch (caught: unknown) {
+                                          setError(caught instanceof Error ? caught.message : "Failed to update queue item");
+                                        } finally {
+                                          setMessagingBusy(false);
+                                        }
+                                      }}
+                                    >
+                                      Sent
+                                    </button>
+                                    <button
+                                      type="button"
+                                      data-variant="ghost"
+                                      disabled={messagingBusy}
+                                      onClick={async () => {
+                                        if (!auth) {
+                                          return;
+                                        }
+                                        const reason = window.prompt("Mark FAILED. Optional reason:");
+                                        setError(null);
+                                        setSuccess(null);
+                                        setMessagingBusy(true);
+                                        try {
+                                          await updateMessagingQueueStatus(auth.token, item.id, {
+                                            status: "FAILED",
+                                            message: "Marked failed manually",
+                                            errorMessage: reason ? reason : "Failed"
+                                          });
+                                          setSuccess("Queue item updated.");
+                                          await refreshMessagingQueueData();
+                                        } catch (caught: unknown) {
+                                          setError(caught instanceof Error ? caught.message : "Failed to update queue item");
+                                        } finally {
+                                          setMessagingBusy(false);
+                                        }
+                                      }}
+                                    >
+                                      Failed
+                                    </button>
+                                    <button
+                                      type="button"
+                                      data-variant="ghost"
+                                      disabled={messagingBusy}
+                                      onClick={async () => {
+                                        if (!auth) {
+                                          return;
+                                        }
+                                        const ok = window.confirm("Cancel this queued item?");
+                                        if (!ok) {
+                                          return;
+                                        }
+                                        setError(null);
+                                        setSuccess(null);
+                                        setMessagingBusy(true);
+                                        try {
+                                          await updateMessagingQueueStatus(auth.token, item.id, { status: "CANCELLED", message: "Cancelled by admin" });
+                                          setSuccess("Queue item cancelled.");
+                                          await refreshMessagingQueueData();
+                                        } catch (caught: unknown) {
+                                          setError(caught instanceof Error ? caught.message : "Failed to cancel queue item");
+                                        } finally {
+                                          setMessagingBusy(false);
+                                        }
+                                      }}
+                                    >
+                                      Cancel
+                                    </button>
+                                  </div>
+                                ) : (
+                                  "-"
+                                )}
+                              </td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan={6}>No queue items.</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {messagingQueue.length ? (
+                    <details style={{ marginTop: "0.9rem" }}>
+                      <summary className="hint">Show message bodies</summary>
+                      <div style={{ display: "grid", gap: "0.85rem", marginTop: "0.85rem" }}>
+                        {messagingQueue.slice(0, 12).map((item) => (
+                          <div key={`body-${item.id}`} className="note">
+                            <div className="hint">
+                              {item.templateKey} • {item.channel} • {item.toAddress} • {item.status}
+                            </div>
+                            {item.renderedSubject ? <div style={{ marginTop: "0.4rem" }}><strong>Subject:</strong> {item.renderedSubject}</div> : null}
+                            <pre style={{ whiteSpace: "pre-wrap", marginTop: "0.4rem" }}>{item.renderedBody}</pre>
+                            {item.errorMessage ? <div className="hint">Error: {item.errorMessage}</div> : null}
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                  ) : null}
+                </section>
+              </>
+            ) : messagingSection === "logs" ? (
+              <>
+                <section className="card" style={{ gridColumn: "1 / -1" }}>
+                  <h2>Logs Filters</h2>
+                  <form
+                    className="form form--three"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void refreshMessagingLogsData();
+                    }}
+                  >
+                    <label>
+                      Queue ID (optional)
+                      <input
+                        value={messagingQueueFilters.queueId}
+                        onChange={(event) => setMessagingQueueFilters((prev) => ({ ...prev, queueId: event.target.value }))}
+                        placeholder="msgq_..."
+                      />
+                    </label>
+                    <label>
+                      Date from
+                      <input
+                        type="date"
+                        value={messagingQueueFilters.dateFrom}
+                        onChange={(event) => setMessagingQueueFilters((prev) => ({ ...prev, dateFrom: event.target.value }))}
+                      />
+                    </label>
+                    <label>
+                      Date to
+                      <input
+                        type="date"
+                        value={messagingQueueFilters.dateTo}
+                        onChange={(event) => setMessagingQueueFilters((prev) => ({ ...prev, dateTo: event.target.value }))}
+                      />
+                    </label>
+                    <button type="submit" disabled={messagingBusy}>
+                      {messagingBusy ? "Loading..." : "Run"}
+                    </button>
+                  </form>
+                </section>
+
+                <section className="card" style={{ gridColumn: "1 / -1" }}>
+                  <h2>Logs</h2>
+                  <div className="tableWrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Date</th>
+                          <th>Queue</th>
+                          <th>Status</th>
+                          <th>Message</th>
+                          <th>By</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {messagingLogs.length ? (
+                          messagingLogs.map((log) => (
+                            <tr key={log.id}>
+                              <td>{log.createdAt.slice(0, 19).replace("T", " ")}</td>
+                              <td>{log.queueId}</td>
+                              <td>{log.status}</td>
+                              <td>{log.message ?? "-"}</td>
+                              <td>{log.createdByFullName ?? log.createdByUserId ?? "-"}</td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan={5}>No logs.</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              </>
+            ) : (
+              <>
+                <section className="card">
+                  <h2>Overdue Credit Reminders</h2>
+                  <p className="hint">Find overdue invoices (due date passed, balance &gt; 0) and enqueue reminders using templates.</p>
+                  <form
+                    className="form"
+                    onSubmit={async (event) => {
+                      event.preventDefault();
+                      if (!auth) {
+                        return;
+                      }
+                      setError(null);
+                      setSuccess(null);
+                      setMessagingBusy(true);
+                      try {
+                        const result = await runOverdueReminders(auth.token, {
+                          asOfDate: runOverdueRemindersForm.asOfDate ? runOverdueRemindersForm.asOfDate : undefined,
+                          notes: runOverdueRemindersForm.notes ? runOverdueRemindersForm.notes : null
+                        });
+                        setLastOverdueRunResult(result);
+                        setSuccess(`Queued reminders: ${result.createdCount} (skipped: ${result.skippedCount}).`);
+                        await refreshMessagingQueueData();
+                      } catch (caught: unknown) {
+                        setError(caught instanceof Error ? caught.message : "Failed to run reminders");
+                      } finally {
+                        setMessagingBusy(false);
+                      }
+                    }}
+                  >
+                    <label>
+                      As of date
+                      <input
+                        type="date"
+                        value={runOverdueRemindersForm.asOfDate}
+                        onChange={(event) => setRunOverdueRemindersForm((prev) => ({ ...prev, asOfDate: event.target.value }))}
+                      />
+                    </label>
+                    <label>
+                      Notes (optional)
+                      <input
+                        value={runOverdueRemindersForm.notes}
+                        onChange={(event) => setRunOverdueRemindersForm((prev) => ({ ...prev, notes: event.target.value }))}
+                      />
+                    </label>
+                    <button type="submit" disabled={messagingBusy}>
+                      {messagingBusy ? "Running..." : "Run reminders"}
+                    </button>
+                  </form>
+
+                  {lastOverdueRunResult ? (
+                    <div className="note" style={{ marginTop: "0.85rem" }}>
+                      <div>
+                        <strong>As of:</strong> {lastOverdueRunResult.asOfDate}
+                      </div>
+                      <div>
+                        <strong>Created:</strong> {lastOverdueRunResult.createdCount} • <strong>Skipped:</strong> {lastOverdueRunResult.skippedCount}
+                      </div>
+                      {lastOverdueRunResult.missingTemplates.length ? (
+                        <div className="hint">Missing templates: {lastOverdueRunResult.missingTemplates.map((t) => `${t.templateKey}/${t.channel}`).join(", ")}</div>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </section>
+
+                <section className="card">
+                  <h2>Admin Daily Summary</h2>
+                  <p className="hint">Generate a daily rollup and enqueue to WhatsApp (admins) and Email (configured recipients).</p>
+                  <form
+                    className="form"
+                    onSubmit={async (event) => {
+                      event.preventDefault();
+                      if (!auth) {
+                        return;
+                      }
+                      setError(null);
+                      setSuccess(null);
+                      setMessagingBusy(true);
+                      try {
+                        const result = await runAdminDailySummary(auth.token, {
+                          date: runDailySummaryForm.date ? runDailySummaryForm.date : undefined,
+                          notes: runDailySummaryForm.notes ? runDailySummaryForm.notes : null
+                        });
+                        setLastDailySummaryResult(result);
+                        setSuccess(`Queued daily summaries: ${result.createdCount} (skipped: ${result.skippedCount}).`);
+                        await refreshMessagingQueueData();
+                      } catch (caught: unknown) {
+                        setError(caught instanceof Error ? caught.message : "Failed to run daily summary");
+                      } finally {
+                        setMessagingBusy(false);
+                      }
+                    }}
+                  >
+                    <label>
+                      Date
+                      <input
+                        type="date"
+                        value={runDailySummaryForm.date}
+                        onChange={(event) => setRunDailySummaryForm((prev) => ({ ...prev, date: event.target.value }))}
+                      />
+                    </label>
+                    <label>
+                      Notes (optional)
+                      <input value={runDailySummaryForm.notes} onChange={(event) => setRunDailySummaryForm((prev) => ({ ...prev, notes: event.target.value }))} />
+                    </label>
+                    <button type="submit" disabled={messagingBusy}>
+                      {messagingBusy ? "Running..." : "Generate + queue summary"}
+                    </button>
+                  </form>
+
+                  {lastDailySummaryResult ? (
+                    <div className="note" style={{ marginTop: "0.85rem" }}>
+                      <div>
+                        <strong>Date:</strong> {lastDailySummaryResult.date}
+                      </div>
+                      <div>
+                        <strong>Created:</strong> {lastDailySummaryResult.createdCount} • <strong>Skipped:</strong> {lastDailySummaryResult.skippedCount}
+                      </div>
+                      {lastDailySummaryResult.emailRecipients.length ? (
+                        <div className="hint">Email recipients: {lastDailySummaryResult.emailRecipients.join(", ")}</div>
+                      ) : (
+                        <div className="hint">Email recipients: none configured (set BDK_ADMIN_DAILY_EMAILS)</div>
+                      )}
+                      {lastDailySummaryResult.missingTemplates.length ? (
+                        <div className="hint">
+                          Missing templates: {lastDailySummaryResult.missingTemplates.map((t) => `${t.templateKey}/${t.channel}`).join(", ")}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </section>
               </>
             )}
@@ -6700,7 +7647,7 @@ export default function App(): JSX.Element {
                                 ) : null}
                               </td>
                               <td>{p.categoryName}</td>
-                              <td>{p.sellingPrice}</td>
+                              <td>{formatUGX(p.sellingPrice)}</td>
                               <td>{p.isActive ? "Yes" : "No"}</td>
                               <td>
                                 <div className="approvalActions">

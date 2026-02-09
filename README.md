@@ -6,43 +6,54 @@ Mobile-first web system for workshop, shop inventory, sales, invoicing, credit/i
 
 ```txt
 bdk-photography-bms/
+  api/          # PHP API for SiteGround (/api/*)
   apps/
-    api/        # Express + TypeScript API
-    web/        # React + Vite frontend
+    api/        # Express + TypeScript API (local dev scaffold)
+    web/        # React frontend (built into /assets for SiteGround)
   packages/
     shared/     # Shared types + validators
+  scripts/      # MySQL migrations + seed scripts (Phase 1+)
   docs/
     BDK-Photography-SRD-v1.1.md
 ```
 
-## Implemented in This Initial Scaffold
+## Implemented (Phases 1-9)
 
-- Product setup and listing (boards and non-board items)
-- Inventory receiving and stock-on-hand listing
-- Sales with line items and stock deduction
-- Negative stock prevention
-- Cash tracking formula (derived cash-at-hand, no manual adjustments)
-- Expense payment source logic:
-  - `SALESPERSON_CASH` reduces user cash at hand
-  - `ADMIN_BANK` reduces bank cash
-- Cash transfer lifecycle:
-  - Pending -> Approved/Rejected
-- Banking lifecycle:
-  - Pending -> Approved/Rejected
-- Capital summary:
-  - cash at hand + bank cash + inventory value
-- Customers, invoices, installment payments, overdue list
+- Auth (JWT) + roles (Admin/Manager/Sales)
+- Master data: expense categories, product categories, products (BOARD/NON_BOARD, yields per sheet)
+- Customers + invoices + installment payments
+- Sales POS + reconciliation locks + edit/void rules
+- Expenses with payment source logic
+- Cash tracking (derived cash-at-hand, transfers approvals, banking approvals, in-app notifications)
+- Reports + exports (CSV/XLSX/PDF)
+- Workshop + inventory lifecycle:
+  - full sheet receiving, batches (yield/waste), workshop stock
+  - transfers workshop → shop (Draft → Shipped → Received)
+  - shop stock, non-board stock receipts, damages
+- Messaging scaffolding (Phase 9):
+  - messaging templates (admin editable)
+  - messaging queue + delivery logs
+  - jobs: overdue invoice reminders + admin daily summary (queue only; provider integration later)
 
 ## Setup
 
 Prerequisite: `Node.js 20+` and `npm 10+`.
 
-### Storage (SiteGround PHP API)
+### SiteGround Deployment (PHP + MySQL)
 
-By default, the SiteGround deployment stores data in `data/state.json`.
+The production deployment uses the PHP API in `api/index.php` and MySQL (Phase 1 relational schema).
 
-To switch to MySQL storage, configure `.env` with `BDK_STORAGE=mysql` and the `BDK_DB_*` credentials.
-The PHP API stores the same JSON state in a single MySQL row (`bdk_state_store`) for v1 compatibility.
+1. Create `.env` in the repo root on SiteGround (it is gitignored and blocked from web access via `.htaccess`).
+2. Run migrations from SSH (inside the repo folder):
+   - `php scripts/seed_phase1_foundation.php` (first time only)
+   - `php scripts/seed_demo_users.php` (optional demo users)
+   - `php scripts/migrate_phase2_master_data.php`
+   - `php scripts/migrate_phase3_customers_invoices.php`
+   - `php scripts/migrate_phase4_sales_pos.php`
+   - `php scripts/migrate_phase5_expenses.php`
+   - `php scripts/migrate_phase6_cash_tracking.php`
+   - `php scripts/migrate_phase8_inventory_workshop.php`
+   - `php scripts/migrate_phase9_messaging_notifications.php`
 
 ### Demo Logins (Seeded)
 
@@ -85,36 +96,51 @@ npm run dev
 
 - Auth:
   - `POST /api/auth/login` (returns `{ token, user }`)
-  - `GET /api/auth/me` (requires `x-user-id`)
-  - User creation is admin-only:
-    - `POST /api/admin/users` (requires `x-user-id` for an `ADMIN`)
-  - Most other `/api/*` endpoints require an `x-user-id` header. Only `GET /api/health` and `POST /api/auth/login` are public.
+  - `GET /api/auth/me` (requires `Authorization: Bearer <token>`)
 
-- `GET /api/meta/seed` (requires `x-user-id`)
 - `GET /api/health`
 - `GET /api/products`
 - `POST /api/products`
-- `GET /api/products/inventory`
-- `POST /api/products/inventory/receive`
+- Workshop + inventory:
+  - `GET /api/workshop/sheets/summary`
+  - `POST /api/workshop/sheets/receipts`
+  - `POST /api/workshop/batches`
+  - `GET /api/inventory/stock`
+  - `POST /api/inventory/receipts` (non-board receive)
+  - `POST /api/inventory/damages`
+  - `POST /api/inventory/transfers`
+  - `PATCH /api/inventory/transfers/:id/ship`
+  - `PATCH /api/inventory/transfers/:id/receive`
 - `GET /api/sales`
 - `POST /api/sales`
-- `POST /api/cash/expenses`
-- `POST /api/cash/transfers`
-- `PATCH /api/cash/transfers/:transferId/decision`
-- `POST /api/cash/bank-actions`
-- `PATCH /api/cash/bank-actions/:actionId/decision`
-- `GET /api/cash/dashboard/sales/:userId`
-- `GET /api/cash/dashboard/admin`
-- `GET /api/cash/capital/summary`
-- `POST /api/invoices/customers`
+- Expenses:
+  - `GET /api/expenses`
+  - `POST /api/expenses`
+- Cash:
+  - `GET /api/cash/me`
+  - `POST /api/cash/transfers`
+  - `PATCH /api/cash/transfers/:id/decision`
+  - `POST /api/cash/bankings`
+  - `PATCH /api/cash/bankings/:id/decision`
+  - `GET /api/cash/admin/overview`
 - `POST /api/invoices`
 - `POST /api/invoices/:invoiceId/payments`
-- `GET /api/invoices/overdue`
+- In-app notifications:
+  - `GET /api/notifications/me`
+  - `PATCH /api/notifications/:id/read`
+- Messaging scaffolding (admin-only):
+  - `GET /api/messaging/templates`
+  - `POST /api/messaging/templates`
+  - `PATCH /api/messaging/templates/:id`
+  - `GET /api/messaging/queue`
+  - `PATCH /api/messaging/queue/:id/status`
+  - `GET /api/messaging/logs`
+  - `POST /api/messaging/jobs/run-overdue-reminders`
+  - `POST /api/messaging/jobs/run-admin-daily-summary`
 
 ## Next Build Targets
 
-1. Persist data using PostgreSQL + Prisma migrations.
-2. Replace the current `x-user-id` header auth with real authentication (sessions/JWT) and secure password storage.
-3. Implement workshop batch module and transfer states (`Draft -> Shipped -> Received`).
-4. Add audit log table and write hooks for every mutating action.
-5. Add messaging providers (SMS/WhatsApp/Email) with template management and send logs.
+1. Integrate actual delivery providers (SMS/WhatsApp/Email), worker/cron, retries.
+2. Add audit log viewer UI.
+3. Add messaging templates management for more business events.
+4. Add report coverage for inventory movement + workshop yields/waste.

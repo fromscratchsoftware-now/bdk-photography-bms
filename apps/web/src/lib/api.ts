@@ -1424,6 +1424,85 @@ export interface InventoryTransfer {
   lines: InventoryTransferLine[];
 }
 
+// Phase 9 — Messaging (templates + queue + logs)
+export type MessagingChannel = "SMS" | "WHATSAPP" | "EMAIL";
+
+export interface MessagingTemplate {
+  id: string;
+  templateKey: string;
+  channel: MessagingChannel;
+  subject?: string | null;
+  body: string;
+  isActive: boolean;
+  notes?: string | null;
+  createdByUserId?: string | null;
+  createdByFullName?: string | null;
+  updatedByUserId?: string | null;
+  updatedByFullName?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type MessagingQueueStatus = "QUEUED" | "SENT" | "FAILED" | "CANCELLED";
+export type MessagingRecipientType = "CUSTOMER" | "USER" | "RAW";
+
+export interface MessagingQueueItem {
+  id: string;
+  templateId?: string | null;
+  templateKey: string;
+  channel: MessagingChannel;
+  recipientType: MessagingRecipientType;
+  recipientCustomerId?: string | null;
+  recipientUserId?: string | null;
+  toAddress: string;
+  renderedSubject?: string | null;
+  renderedBody: string;
+  payload?: Record<string, unknown> | null;
+  status: MessagingQueueStatus;
+  dedupeKey?: string | null;
+  errorMessage?: string | null;
+  notes?: string | null;
+  createdByUserId?: string | null;
+  createdByFullName?: string | null;
+  customerMobileNumber?: string | null;
+  customerFirstName?: string | null;
+  customerLastName?: string | null;
+  customerEmail?: string | null;
+  recipientUserFullName?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MessagingLogEvent {
+  id: string;
+  queueId: string;
+  status: MessagingQueueStatus;
+  message?: string | null;
+  meta?: Record<string, unknown> | null;
+  createdByUserId?: string | null;
+  createdByFullName?: string | null;
+  createdAt: string;
+}
+
+export interface OverdueRemindersRunResult {
+  templateKey: "OVERDUE_INVOICE_REMINDER";
+  asOfDate: string;
+  createdCount: number;
+  skippedCount: number;
+  byChannel: Record<MessagingChannel, { created: number; skipped: number }>;
+  missingTemplates: Array<{ templateKey: string; channel: MessagingChannel }>;
+}
+
+export interface AdminDailySummaryRunResult {
+  templateKey: "ADMIN_DAILY_SUMMARY";
+  date: string;
+  createdCount: number;
+  skippedCount: number;
+  byChannel: Record<"WHATSAPP" | "EMAIL", { created: number; skipped: number }>;
+  missingTemplates: Array<{ templateKey: string; channel: MessagingChannel }>;
+  emailRecipients: string[];
+}
+
 export function getWorkshopSheetSummary(token: string): Promise<WorkshopSheetSummary> {
   return request<WorkshopSheetSummary>("api/workshop/sheets/summary", undefined, token);
 }
@@ -1550,6 +1629,75 @@ export function receiveInventoryTransfer(
   return request<{ id: string; status: "RECEIVED" }>(
     `api/inventory/transfers/${transferId}/receive`,
     { method: "PATCH", body: JSON.stringify(input) },
+    token
+  );
+}
+
+export function listMessagingTemplates(token: string): Promise<MessagingTemplate[]> {
+  return request<MessagingTemplate[]>("api/messaging/templates", undefined, token);
+}
+
+export function createMessagingTemplate(
+  token: string,
+  input: { templateKey: string; channel: MessagingChannel; subject?: string | null; body: string; isActive?: boolean; notes?: string | null }
+): Promise<MessagingTemplate> {
+  return request<MessagingTemplate>("api/messaging/templates", { method: "POST", body: JSON.stringify(input) }, token);
+}
+
+export function updateMessagingTemplate(
+  token: string,
+  templateId: string,
+  input: { subject?: string | null; body?: string; isActive?: boolean; notes?: string | null }
+): Promise<MessagingTemplate> {
+  return request<MessagingTemplate>(`api/messaging/templates/${templateId}`, { method: "PATCH", body: JSON.stringify(input) }, token);
+}
+
+export function listMessagingQueue(
+  token: string,
+  params: { status?: MessagingQueueStatus; channel?: MessagingChannel; dateFrom?: string; dateTo?: string }
+): Promise<{ items: MessagingQueueItem[]; dateFrom: string; dateTo: string }> {
+  return request<{ items: MessagingQueueItem[]; dateFrom: string; dateTo: string }>(
+    withQuery("api/messaging/queue", { status: params.status, channel: params.channel, dateFrom: params.dateFrom, dateTo: params.dateTo }),
+    undefined,
+    token
+  );
+}
+
+export function updateMessagingQueueStatus(
+  token: string,
+  queueId: string,
+  input: { status: Exclude<MessagingQueueStatus, "QUEUED">; message?: string | null; errorMessage?: string | null }
+): Promise<MessagingQueueItem> {
+  return request<MessagingQueueItem>(
+    `api/messaging/queue/${queueId}/status`,
+    { method: "PATCH", body: JSON.stringify(input) },
+    token
+  );
+}
+
+export function listMessagingLogs(
+  token: string,
+  params: { queueId?: string; dateFrom?: string; dateTo?: string }
+): Promise<{ items: MessagingLogEvent[]; dateFrom: string; dateTo: string }> {
+  return request<{ items: MessagingLogEvent[]; dateFrom: string; dateTo: string }>(
+    withQuery("api/messaging/logs", { queueId: params.queueId, dateFrom: params.dateFrom, dateTo: params.dateTo }),
+    undefined,
+    token
+  );
+}
+
+export function runOverdueReminders(token: string, input: { asOfDate?: string; notes?: string | null }): Promise<OverdueRemindersRunResult> {
+  return request<OverdueRemindersRunResult>(
+    "api/messaging/jobs/run-overdue-reminders",
+    { method: "POST", body: JSON.stringify(input) },
+    token
+  );
+}
+
+export function runAdminDailySummary(token: string, input: { date?: string; notes?: string | null }): Promise<AdminDailySummaryRunResult> {
+  return request<AdminDailySummaryRunResult>(
+    "api/messaging/jobs/run-admin-daily-summary",
+    { method: "POST", body: JSON.stringify(input) },
     token
   );
 }

@@ -1050,6 +1050,158 @@ function phase1_shop_scope_sql(string $roleName, array $assignments, string $req
   return " AND " . $column . " IN (" . implode(", ", $placeholders) . ")";
 }
 
+// Phase 9 — Messaging scaffolding (SMS/WhatsApp/Email)
+function phase9_messaging_channel_normalize(string $value): string {
+  $channel = strtoupper(trim($value));
+  if (!in_array($channel, ["SMS", "WHATSAPP", "EMAIL"], true)) {
+    json_response(400, ["error" => "ValidationError", "message" => "channel must be SMS, WHATSAPP, or EMAIL"]);
+  }
+  return $channel;
+}
+
+function phase9_int_commas(int $amount): string {
+  return number_format($amount, 0, ".", ",");
+}
+
+function phase9_render_template(string $text, array $vars): string {
+  $out = $text;
+  foreach ($vars as $key => $value) {
+    if (!is_string($key) || $key === "") {
+      continue;
+    }
+    $needle = "{{" . $key . "}}";
+    $out = str_replace($needle, (string)$value, $out);
+  }
+  return $out;
+}
+
+function phase9_admin_daily_email_recipients(): array {
+  $raw = (string)(getenv("BDK_ADMIN_DAILY_EMAILS") ?: "");
+  $list = array_filter(array_map("trim", explode(",", $raw)), function ($value) {
+    return is_string($value) && $value !== "" && strpos($value, "@") !== false;
+  });
+  $unique = [];
+  foreach ($list as $email) {
+    $unique[strtolower($email)] = $email;
+  }
+  return array_values($unique);
+}
+
+function phase9_get_active_template(PDO $pdo, string $templateKey, string $channel): ?array {
+  if ($templateKey === "") {
+    return null;
+  }
+  $row = phase1_db_fetch_one(
+    $pdo,
+    "SELECT id, template_key, channel, subject, body, is_active, notes, created_by_user_id, updated_by_user_id, created_at, updated_at " .
+    "FROM messaging_templates WHERE template_key = :template_key AND channel = :channel AND is_active = 1 LIMIT 1",
+    [":template_key" => $templateKey, ":channel" => $channel]
+  );
+  return $row && is_array($row) ? $row : null;
+}
+
+function phase9_enqueue_message(PDO $pdo, array $params): array {
+  $id = create_id("msgq");
+  $templateId = isset($params["templateId"]) && is_string($params["templateId"]) ? $params["templateId"] : null;
+  $templateKey = isset($params["templateKey"]) && is_string($params["templateKey"]) ? trim($params["templateKey"]) : "";
+  $channel = isset($params["channel"]) && is_string($params["channel"]) ? strtoupper(trim($params["channel"])) : "";
+  $recipientType = isset($params["recipientType"]) && is_string($params["recipientType"]) ? strtoupper(trim($params["recipientType"])) : "RAW";
+  $recipientCustomerId = isset($params["recipientCustomerId"]) && is_string($params["recipientCustomerId"]) ? $params["recipientCustomerId"] : null;
+  $recipientUserId = isset($params["recipientUserId"]) && is_string($params["recipientUserId"]) ? $params["recipientUserId"] : null;
+  $toAddress = isset($params["toAddress"]) && is_string($params["toAddress"]) ? trim($params["toAddress"]) : "";
+  $renderedSubject = array_key_exists("renderedSubject", $params) ? $params["renderedSubject"] : null;
+  $renderedBody = isset($params["renderedBody"]) && is_string($params["renderedBody"]) ? $params["renderedBody"] : "";
+  $payload = array_key_exists("payload", $params) ? $params["payload"] : null;
+  $status = isset($params["status"]) && is_string($params["status"]) ? strtoupper(trim($params["status"])) : "QUEUED";
+  $dedupeKey = array_key_exists("dedupeKey", $params) ? $params["dedupeKey"] : null;
+  $notes = array_key_exists("notes", $params) ? $params["notes"] : null;
+  $createdByUserId = array_key_exists("createdByUserId", $params) ? $params["createdByUserId"] : null;
+
+  if ($templateKey === "" || $toAddress === "" || $renderedBody === "") {
+    json_response(400, ["error" => "ValidationError", "message" => "templateKey, toAddress, and renderedBody are required"]);
+  }
+  if (!in_array($channel, ["SMS", "WHATSAPP", "EMAIL"], true)) {
+    json_response(400, ["error" => "ValidationError", "message" => "Invalid channel"]);
+  }
+  if (!in_array($recipientType, ["CUSTOMER", "USER", "RAW"], true)) {
+    $recipientType = "RAW";
+  }
+  if (!in_array($status, ["QUEUED", "SENT", "FAILED", "CANCELLED"], true)) {
+    $status = "QUEUED";
+  }
+
+  $payloadJson = null;
+  if ($payload !== null) {
+    $encoded = json_encode($payload, JSON_UNESCAPED_SLASHES);
+    if (is_string($encoded)) {
+      $payloadJson = $encoded;
+    }
+  }
+
+  $dedupe = null;
+  if (is_string($dedupeKey) && trim($dedupeKey) !== "") {
+    $dedupe = substr(trim($dedupeKey), 0, 191);
+  }
+
+  try {
+    $stmt = $pdo->prepare(
+      "INSERT INTO messaging_queue (id, template_id, template_key, channel, recipient_type, recipient_customer_id, recipient_user_id, to_address, " .
+        "rendered_subject, rendered_body, payload_json, status, dedupe_key, notes, created_by_user_id) " .
+      "VALUES (:id, :template_id, :template_key, :channel, :recipient_type, :recipient_customer_id, :recipient_user_id, :to_address, " .
+        ":rendered_subject, :rendered_body, :payload_json, :status, :dedupe_key, :notes, :created_by_user_id)"
+    );
+    $stmt->execute([
+      ":id" => $id,
+      ":template_id" => $templateId,
+      ":template_key" => $templateKey,
+      ":channel" => $channel,
+      ":recipient_type" => $recipientType,
+      ":recipient_customer_id" => $recipientCustomerId,
+      ":recipient_user_id" => $recipientUserId,
+      ":to_address" => $toAddress,
+      ":rendered_subject" => is_string($renderedSubject) && trim($renderedSubject) !== "" ? substr(trim($renderedSubject), 0, 191) : null,
+      ":rendered_body" => $renderedBody,
+      ":payload_json" => $payloadJson,
+      ":status" => $status,
+      ":dedupe_key" => $dedupe,
+      ":notes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+      ":created_by_user_id" => is_string($createdByUserId) && trim($createdByUserId) !== "" ? trim($createdByUserId) : null,
+    ]);
+  } catch (Throwable $error) {
+    // Dedupe unique index violation: treat as skipped.
+    if ($dedupe !== null) {
+      $existing = phase1_db_fetch_one(
+        $pdo,
+        "SELECT id FROM messaging_queue WHERE dedupe_key = :dedupe_key LIMIT 1",
+        [":dedupe_key" => $dedupe]
+      );
+      if ($existing && isset($existing["id"])) {
+        return ["created" => false, "id" => (string)$existing["id"], "dedupeKey" => $dedupe];
+      }
+    }
+    json_response(500, ["error" => "InternalServerError", "message" => "Failed to enqueue message"]);
+  }
+
+  try {
+    $stmtLog = $pdo->prepare(
+      "INSERT INTO messaging_delivery_logs (id, queue_id, status, message, meta_json, created_by_user_id) " .
+      "VALUES (:id, :queue_id, :status, :message, :meta_json, :created_by_user_id)"
+    );
+    $stmtLog->execute([
+      ":id" => create_id("msgl"),
+      ":queue_id" => $id,
+      ":status" => $status,
+      ":message" => "Queued",
+      ":meta_json" => null,
+      ":created_by_user_id" => is_string($createdByUserId) && trim($createdByUserId) !== "" ? trim($createdByUserId) : null,
+    ]);
+  } catch (Throwable $error) {
+    // Best-effort: queue item exists even if log insert fails.
+  }
+
+  return ["created" => true, "id" => $id, "dedupeKey" => $dedupe];
+}
+
 function phase1_handle(string $method, string $route): void {
   $pdo = mysql_pdo();
 
@@ -6750,6 +6902,841 @@ function phase1_handle(string $method, string $route): void {
     }
 
     json_response(200, ["data" => ["items" => $items, "totals" => ["cashAtHand" => $totalCashAtHand, "bankedTotal" => $totalBanked]]]);
+  }
+
+  // Phase 9 — Messaging scaffolding (templates + queue + logs)
+  if ($method === "GET" && $route === "messaging/templates") {
+    phase1_require_role($roleName, ["ADMIN"]);
+
+    $rows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT t.id, t.template_key, t.channel, t.subject, t.body, t.is_active, t.notes, " .
+        "t.created_by_user_id, cu.full_name AS created_by_full_name, " .
+        "t.updated_by_user_id, uu.full_name AS updated_by_full_name, " .
+        "t.created_at, t.updated_at " .
+      "FROM messaging_templates t " .
+      "LEFT JOIN users cu ON cu.id = t.created_by_user_id " .
+      "LEFT JOIN users uu ON uu.id = t.updated_by_user_id " .
+      "ORDER BY t.template_key ASC, t.channel ASC",
+      []
+    );
+
+    $out = array_map(function ($row) {
+      return [
+        "id" => (string)($row["id"] ?? ""),
+        "templateKey" => (string)($row["template_key"] ?? ""),
+        "channel" => (string)($row["channel"] ?? ""),
+        "subject" => $row["subject"] ?? null,
+        "body" => (string)($row["body"] ?? ""),
+        "isActive" => (int)($row["is_active"] ?? 0) === 1,
+        "notes" => $row["notes"] ?? null,
+        "createdByUserId" => $row["created_by_user_id"] ?? null,
+        "createdByFullName" => $row["created_by_full_name"] ?? null,
+        "updatedByUserId" => $row["updated_by_user_id"] ?? null,
+        "updatedByFullName" => $row["updated_by_full_name"] ?? null,
+        "createdAt" => (string)($row["created_at"] ?? ""),
+        "updatedAt" => (string)($row["updated_at"] ?? ""),
+      ];
+    }, $rows);
+
+    json_response(200, ["data" => $out]);
+  }
+
+  if ($method === "POST" && $route === "messaging/templates") {
+    phase1_require_role($roleName, ["ADMIN"]);
+    $body = read_json_body();
+
+    $templateKey = isset($body["templateKey"]) && is_string($body["templateKey"]) ? strtoupper(trim($body["templateKey"])) : "";
+    $channel = isset($body["channel"]) && is_string($body["channel"]) ? phase9_messaging_channel_normalize($body["channel"]) : "";
+    $subject = array_key_exists("subject", $body) ? $body["subject"] : null;
+    $content = isset($body["body"]) && is_string($body["body"]) ? $body["body"] : "";
+    $isActive = array_key_exists("isActive", $body) ? (bool)$body["isActive"] : true;
+    $notes = array_key_exists("notes", $body) ? $body["notes"] : null;
+
+    if ($templateKey === "" || strlen($templateKey) > 64) {
+      json_response(400, ["error" => "ValidationError", "message" => "templateKey is required (max 64 chars)"]);
+    }
+    if ($content === "") {
+      json_response(400, ["error" => "ValidationError", "message" => "body is required"]);
+    }
+    if ($subject !== null && !is_string($subject)) {
+      json_response(400, ["error" => "ValidationError", "message" => "subject must be a string or null"]);
+    }
+    if ($notes !== null && !is_string($notes)) {
+      json_response(400, ["error" => "ValidationError", "message" => "notes must be a string or null"]);
+    }
+
+    $actorUserId = (string)($authUser["id"] ?? "");
+    $id = create_id("tpl");
+
+    try {
+      $stmt = $pdo->prepare(
+        "INSERT INTO messaging_templates (id, template_key, channel, subject, body, is_active, notes, created_by_user_id, updated_by_user_id) " .
+        "VALUES (:id, :template_key, :channel, :subject, :body, :is_active, :notes, :created_by_user_id, :updated_by_user_id)"
+      );
+      $stmt->execute([
+        ":id" => $id,
+        ":template_key" => $templateKey,
+        ":channel" => $channel,
+        ":subject" => is_string($subject) && trim($subject) !== "" ? substr(trim($subject), 0, 191) : null,
+        ":body" => $content,
+        ":is_active" => $isActive ? 1 : 0,
+        ":notes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+        ":created_by_user_id" => $actorUserId !== "" ? $actorUserId : null,
+        ":updated_by_user_id" => $actorUserId !== "" ? $actorUserId : null,
+      ]);
+    } catch (Throwable $error) {
+      json_response(400, ["error" => "BadRequest", "message" => "Template already exists for this key + channel"]);
+    }
+
+    $row = phase1_db_fetch_one(
+      $pdo,
+      "SELECT t.id, t.template_key, t.channel, t.subject, t.body, t.is_active, t.notes, " .
+        "t.created_by_user_id, cu.full_name AS created_by_full_name, " .
+        "t.updated_by_user_id, uu.full_name AS updated_by_full_name, " .
+        "t.created_at, t.updated_at " .
+      "FROM messaging_templates t " .
+      "LEFT JOIN users cu ON cu.id = t.created_by_user_id " .
+      "LEFT JOIN users uu ON uu.id = t.updated_by_user_id " .
+      "WHERE t.id = :id LIMIT 1",
+      [":id" => $id]
+    );
+
+    $public = $row ? [
+      "id" => (string)$row["id"],
+      "templateKey" => (string)$row["template_key"],
+      "channel" => (string)$row["channel"],
+      "subject" => $row["subject"] ?? null,
+      "body" => (string)$row["body"],
+      "isActive" => (int)($row["is_active"] ?? 0) === 1,
+      "notes" => $row["notes"] ?? null,
+      "createdByUserId" => $row["created_by_user_id"] ?? null,
+      "createdByFullName" => $row["created_by_full_name"] ?? null,
+      "updatedByUserId" => $row["updated_by_user_id"] ?? null,
+      "updatedByFullName" => $row["updated_by_full_name"] ?? null,
+      "createdAt" => (string)$row["created_at"],
+      "updatedAt" => (string)$row["updated_at"],
+    ] : [
+      "id" => $id,
+      "templateKey" => $templateKey,
+      "channel" => $channel,
+      "subject" => is_string($subject) ? $subject : null,
+      "body" => $content,
+      "isActive" => $isActive,
+      "notes" => is_string($notes) ? $notes : null,
+    ];
+
+    phase1_audit_log($pdo, $actorUserId !== "" ? $actorUserId : null, "CREATE", "messaging_template", $id, null, $public);
+    json_response(201, ["data" => $public]);
+  }
+
+  if ($method === "PATCH" && preg_match('/^messaging\\/templates\\/([^\\/]+)$/', $route, $matches) === 1) {
+    phase1_require_role($roleName, ["ADMIN"]);
+    $templateId = (string)$matches[1];
+    $body = read_json_body();
+
+    $subject = array_key_exists("subject", $body) ? $body["subject"] : null;
+    $content = array_key_exists("body", $body) ? $body["body"] : null;
+    $isActive = array_key_exists("isActive", $body) ? $body["isActive"] : null;
+    $notes = array_key_exists("notes", $body) ? $body["notes"] : null;
+
+    if ($subject !== null && !is_string($subject)) {
+      json_response(400, ["error" => "ValidationError", "message" => "subject must be a string or null"]);
+    }
+    if ($content !== null && !is_string($content)) {
+      json_response(400, ["error" => "ValidationError", "message" => "body must be a string"]);
+    }
+    if ($isActive !== null && !is_bool($isActive)) {
+      json_response(400, ["error" => "ValidationError", "message" => "isActive must be boolean"]);
+    }
+    if ($notes !== null && !is_string($notes)) {
+      json_response(400, ["error" => "ValidationError", "message" => "notes must be a string or null"]);
+    }
+
+    $actorUserId = (string)($authUser["id"] ?? "");
+
+    try {
+      $pdo->beginTransaction();
+
+      $existing = phase1_db_fetch_one(
+        $pdo,
+        "SELECT id, template_key, channel, subject, body, is_active, notes, created_by_user_id, updated_by_user_id, created_at, updated_at " .
+        "FROM messaging_templates WHERE id = :id FOR UPDATE",
+        [":id" => $templateId]
+      );
+      if (!$existing) {
+        $pdo->rollBack();
+        json_response(404, ["error" => "HttpError", "message" => "Template not found"]);
+      }
+
+      $nextSubject = $subject === null ? ($existing["subject"] ?? null) : (trim($subject) !== "" ? substr(trim($subject), 0, 191) : null);
+      $nextBody = $content === null ? (string)($existing["body"] ?? "") : (string)$content;
+      $nextActive = $isActive === null ? ((int)($existing["is_active"] ?? 0) === 1) : (bool)$isActive;
+      $nextNotes = $notes === null ? ($existing["notes"] ?? null) : (trim($notes) !== "" ? trim($notes) : null);
+
+      phase1_db_execute(
+        $pdo,
+        "UPDATE messaging_templates SET subject = :subject, body = :body, is_active = :is_active, notes = :notes, updated_by_user_id = :updated_by_user_id, updated_at = NOW() WHERE id = :id",
+        [
+          ":subject" => $nextSubject,
+          ":body" => $nextBody,
+          ":is_active" => $nextActive ? 1 : 0,
+          ":notes" => $nextNotes,
+          ":updated_by_user_id" => $actorUserId !== "" ? $actorUserId : null,
+          ":id" => $templateId,
+        ]
+      );
+
+      $row = phase1_db_fetch_one(
+        $pdo,
+        "SELECT t.id, t.template_key, t.channel, t.subject, t.body, t.is_active, t.notes, " .
+          "t.created_by_user_id, cu.full_name AS created_by_full_name, " .
+          "t.updated_by_user_id, uu.full_name AS updated_by_full_name, " .
+          "t.created_at, t.updated_at " .
+        "FROM messaging_templates t " .
+        "LEFT JOIN users cu ON cu.id = t.created_by_user_id " .
+        "LEFT JOIN users uu ON uu.id = t.updated_by_user_id " .
+        "WHERE t.id = :id LIMIT 1",
+        [":id" => $templateId]
+      );
+
+      $pdo->commit();
+
+      $beforePublic = [
+        "id" => (string)($existing["id"] ?? ""),
+        "templateKey" => (string)($existing["template_key"] ?? ""),
+        "channel" => (string)($existing["channel"] ?? ""),
+        "subject" => $existing["subject"] ?? null,
+        "body" => (string)($existing["body"] ?? ""),
+        "isActive" => (int)($existing["is_active"] ?? 0) === 1,
+        "notes" => $existing["notes"] ?? null,
+        "createdAt" => (string)($existing["created_at"] ?? ""),
+        "updatedAt" => (string)($existing["updated_at"] ?? ""),
+      ];
+
+      $afterPublic = $row ? [
+        "id" => (string)$row["id"],
+        "templateKey" => (string)$row["template_key"],
+        "channel" => (string)$row["channel"],
+        "subject" => $row["subject"] ?? null,
+        "body" => (string)$row["body"],
+        "isActive" => (int)($row["is_active"] ?? 0) === 1,
+        "notes" => $row["notes"] ?? null,
+        "createdByUserId" => $row["created_by_user_id"] ?? null,
+        "createdByFullName" => $row["created_by_full_name"] ?? null,
+        "updatedByUserId" => $row["updated_by_user_id"] ?? null,
+        "updatedByFullName" => $row["updated_by_full_name"] ?? null,
+        "createdAt" => (string)$row["created_at"],
+        "updatedAt" => (string)$row["updated_at"],
+      ] : array_merge($beforePublic, [
+        "subject" => $nextSubject,
+        "body" => $nextBody,
+        "isActive" => $nextActive,
+        "notes" => $nextNotes,
+      ]);
+
+      phase1_audit_log($pdo, $actorUserId !== "" ? $actorUserId : null, "UPDATE", "messaging_template", $templateId, $beforePublic, $afterPublic);
+      json_response(200, ["data" => $afterPublic]);
+    } catch (Throwable $error) {
+      if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+      }
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to update template"]);
+    }
+  }
+
+  if ($method === "GET" && $route === "messaging/queue") {
+    phase1_require_role($roleName, ["ADMIN"]);
+
+    $status = isset($_GET["status"]) && is_string($_GET["status"]) ? strtoupper(trim($_GET["status"])) : "";
+    $channel = isset($_GET["channel"]) && is_string($_GET["channel"]) ? strtoupper(trim($_GET["channel"])) : "";
+    $range = phase1_resolve_date_range(
+      isset($_GET["dateFrom"]) && is_string($_GET["dateFrom"]) ? $_GET["dateFrom"] : null,
+      isset($_GET["dateTo"]) && is_string($_GET["dateTo"]) ? $_GET["dateTo"] : null,
+      30
+    );
+    $dateFrom = (string)$range["dateFrom"];
+    $dateTo = (string)$range["dateTo"];
+
+    $where = ["DATE(q.created_at) BETWEEN :date_from AND :date_to"];
+    $params = [":date_from" => $dateFrom, ":date_to" => $dateTo];
+
+    if ($status !== "") {
+      if (!in_array($status, ["QUEUED", "SENT", "FAILED", "CANCELLED"], true)) {
+        json_response(400, ["error" => "ValidationError", "message" => "status must be QUEUED, SENT, FAILED, or CANCELLED"]);
+      }
+      $where[] = "q.status = :status";
+      $params[":status"] = $status;
+    }
+
+    if ($channel !== "") {
+      if (!in_array($channel, ["SMS", "WHATSAPP", "EMAIL"], true)) {
+        json_response(400, ["error" => "ValidationError", "message" => "channel must be SMS, WHATSAPP, or EMAIL"]);
+      }
+      $where[] = "q.channel = :channel";
+      $params[":channel"] = $channel;
+    }
+
+    $rows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT q.id, q.template_id, q.template_key, q.channel, q.recipient_type, q.recipient_customer_id, q.recipient_user_id, q.to_address, " .
+        "q.rendered_subject, q.rendered_body, q.payload_json, q.status, q.dedupe_key, q.error_message, q.notes, " .
+        "q.created_by_user_id, cu.full_name AS created_by_full_name, q.created_at, q.updated_at, " .
+        "c.mobile_number AS customer_mobile, c.first_name AS customer_first_name, c.last_name AS customer_last_name, c.email AS customer_email, " .
+        "u.full_name AS recipient_user_full_name " .
+      "FROM messaging_queue q " .
+      "LEFT JOIN users cu ON cu.id = q.created_by_user_id " .
+      "LEFT JOIN customers c ON c.id = q.recipient_customer_id " .
+      "LEFT JOIN users u ON u.id = q.recipient_user_id " .
+      "WHERE " . implode(" AND ", $where) . " " .
+      "ORDER BY q.created_at DESC LIMIT 200",
+      $params
+    );
+
+    $out = array_map(function ($row) {
+      $payloadRaw = $row["payload_json"] ?? null;
+      $payload = null;
+      if (is_string($payloadRaw) && $payloadRaw !== "") {
+        $decoded = json_decode($payloadRaw, true);
+        if (is_array($decoded)) {
+          $payload = $decoded;
+        }
+      } elseif (is_array($payloadRaw)) {
+        $payload = $payloadRaw;
+      }
+
+      return [
+        "id" => (string)($row["id"] ?? ""),
+        "templateId" => $row["template_id"] ?? null,
+        "templateKey" => (string)($row["template_key"] ?? ""),
+        "channel" => (string)($row["channel"] ?? ""),
+        "recipientType" => (string)($row["recipient_type"] ?? ""),
+        "recipientCustomerId" => $row["recipient_customer_id"] ?? null,
+        "recipientUserId" => $row["recipient_user_id"] ?? null,
+        "toAddress" => (string)($row["to_address"] ?? ""),
+        "renderedSubject" => $row["rendered_subject"] ?? null,
+        "renderedBody" => (string)($row["rendered_body"] ?? ""),
+        "payload" => $payload,
+        "status" => (string)($row["status"] ?? ""),
+        "dedupeKey" => $row["dedupe_key"] ?? null,
+        "errorMessage" => $row["error_message"] ?? null,
+        "notes" => $row["notes"] ?? null,
+        "createdByUserId" => $row["created_by_user_id"] ?? null,
+        "createdByFullName" => $row["created_by_full_name"] ?? null,
+        "customerMobileNumber" => $row["customer_mobile"] ?? null,
+        "customerFirstName" => $row["customer_first_name"] ?? null,
+        "customerLastName" => $row["customer_last_name"] ?? null,
+        "customerEmail" => $row["customer_email"] ?? null,
+        "recipientUserFullName" => $row["recipient_user_full_name"] ?? null,
+        "createdAt" => (string)($row["created_at"] ?? ""),
+        "updatedAt" => (string)($row["updated_at"] ?? ""),
+      ];
+    }, $rows);
+
+    json_response(200, ["data" => ["items" => $out, "dateFrom" => $dateFrom, "dateTo" => $dateTo]]);
+  }
+
+  if ($method === "GET" && $route === "messaging/logs") {
+    phase1_require_role($roleName, ["ADMIN"]);
+
+    $queueId = isset($_GET["queueId"]) && is_string($_GET["queueId"]) ? trim($_GET["queueId"]) : "";
+    $range = phase1_resolve_date_range(
+      isset($_GET["dateFrom"]) && is_string($_GET["dateFrom"]) ? $_GET["dateFrom"] : null,
+      isset($_GET["dateTo"]) && is_string($_GET["dateTo"]) ? $_GET["dateTo"] : null,
+      30
+    );
+    $dateFrom = (string)$range["dateFrom"];
+    $dateTo = (string)$range["dateTo"];
+
+    $where = ["DATE(l.created_at) BETWEEN :date_from AND :date_to"];
+    $params = [":date_from" => $dateFrom, ":date_to" => $dateTo];
+    if ($queueId !== "") {
+      $where[] = "l.queue_id = :queue_id";
+      $params[":queue_id"] = $queueId;
+    }
+
+    $rows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT l.id, l.queue_id, l.status, l.message, l.meta_json, l.created_by_user_id, u.full_name AS created_by_full_name, l.created_at " .
+      "FROM messaging_delivery_logs l " .
+      "LEFT JOIN users u ON u.id = l.created_by_user_id " .
+      "WHERE " . implode(" AND ", $where) . " " .
+      "ORDER BY l.created_at DESC LIMIT 200",
+      $params
+    );
+
+    $out = array_map(function ($row) {
+      $metaRaw = $row["meta_json"] ?? null;
+      $meta = null;
+      if (is_string($metaRaw) && $metaRaw !== "") {
+        $decoded = json_decode($metaRaw, true);
+        if (is_array($decoded)) {
+          $meta = $decoded;
+        }
+      } elseif (is_array($metaRaw)) {
+        $meta = $metaRaw;
+      }
+
+      return [
+        "id" => (string)($row["id"] ?? ""),
+        "queueId" => (string)($row["queue_id"] ?? ""),
+        "status" => (string)($row["status"] ?? ""),
+        "message" => $row["message"] ?? null,
+        "meta" => $meta,
+        "createdByUserId" => $row["created_by_user_id"] ?? null,
+        "createdByFullName" => $row["created_by_full_name"] ?? null,
+        "createdAt" => (string)($row["created_at"] ?? ""),
+      ];
+    }, $rows);
+
+    json_response(200, ["data" => ["items" => $out, "dateFrom" => $dateFrom, "dateTo" => $dateTo]]);
+  }
+
+  if ($method === "PATCH" && preg_match('/^messaging\\/queue\\/([^\\/]+)\\/status$/', $route, $matches) === 1) {
+    phase1_require_role($roleName, ["ADMIN"]);
+    $queueId = (string)$matches[1];
+    $body = read_json_body();
+
+    $nextStatus = isset($body["status"]) && is_string($body["status"]) ? strtoupper(trim($body["status"])) : "";
+    $message = array_key_exists("message", $body) ? $body["message"] : null;
+    $errorMessage = array_key_exists("errorMessage", $body) ? $body["errorMessage"] : null;
+
+    if (!in_array($nextStatus, ["SENT", "FAILED", "CANCELLED"], true)) {
+      json_response(400, ["error" => "ValidationError", "message" => "status must be SENT, FAILED, or CANCELLED"]);
+    }
+    if ($message !== null && !is_string($message)) {
+      json_response(400, ["error" => "ValidationError", "message" => "message must be a string or null"]);
+    }
+    if ($errorMessage !== null && !is_string($errorMessage)) {
+      json_response(400, ["error" => "ValidationError", "message" => "errorMessage must be a string or null"]);
+    }
+
+    $actorUserId = (string)($authUser["id"] ?? "");
+
+    try {
+      $pdo->beginTransaction();
+
+      $existing = phase1_db_fetch_one(
+        $pdo,
+        "SELECT id, template_key, channel, to_address, rendered_subject, rendered_body, payload_json, status, error_message, notes, created_by_user_id, created_at, updated_at " .
+        "FROM messaging_queue WHERE id = :id FOR UPDATE",
+        [":id" => $queueId]
+      );
+      if (!$existing) {
+        $pdo->rollBack();
+        json_response(404, ["error" => "HttpError", "message" => "Queue item not found"]);
+      }
+
+      $beforeStatus = (string)($existing["status"] ?? "");
+      if ($beforeStatus === "SENT" || $beforeStatus === "CANCELLED") {
+        $pdo->rollBack();
+        json_response(400, ["error" => "BadRequest", "message" => "This queue item cannot be updated"]);
+      }
+
+      $nextError = $nextStatus === "FAILED" ? (is_string($errorMessage) && trim($errorMessage) !== "" ? trim($errorMessage) : "Failed") : null;
+
+      phase1_db_execute(
+        $pdo,
+        "UPDATE messaging_queue SET status = :status, error_message = :error_message, updated_at = NOW() WHERE id = :id",
+        [":status" => $nextStatus, ":error_message" => $nextError, ":id" => $queueId]
+      );
+
+      $stmtLog = $pdo->prepare(
+        "INSERT INTO messaging_delivery_logs (id, queue_id, status, message, meta_json, created_by_user_id) " .
+        "VALUES (:id, :queue_id, :status, :message, :meta_json, :created_by_user_id)"
+      );
+      $stmtLog->execute([
+        ":id" => create_id("msgl"),
+        ":queue_id" => $queueId,
+        ":status" => $nextStatus,
+        ":message" => is_string($message) && trim($message) !== "" ? trim($message) : null,
+        ":meta_json" => null,
+        ":created_by_user_id" => $actorUserId !== "" ? $actorUserId : null,
+      ]);
+
+      $row = phase1_db_fetch_one(
+        $pdo,
+        "SELECT id, template_id, template_key, channel, recipient_type, recipient_customer_id, recipient_user_id, to_address, rendered_subject, rendered_body, payload_json, status, dedupe_key, error_message, notes, created_by_user_id, created_at, updated_at " .
+        "FROM messaging_queue WHERE id = :id LIMIT 1",
+        [":id" => $queueId]
+      );
+
+      $pdo->commit();
+
+      $beforePublic = [
+        "id" => (string)($existing["id"] ?? ""),
+        "templateKey" => (string)($existing["template_key"] ?? ""),
+        "channel" => (string)($existing["channel"] ?? ""),
+        "toAddress" => (string)($existing["to_address"] ?? ""),
+        "status" => (string)($existing["status"] ?? ""),
+        "errorMessage" => $existing["error_message"] ?? null,
+        "notes" => $existing["notes"] ?? null,
+        "createdAt" => (string)($existing["created_at"] ?? ""),
+        "updatedAt" => (string)($existing["updated_at"] ?? ""),
+      ];
+
+      $afterPublic = $row ? [
+        "id" => (string)($row["id"] ?? ""),
+        "templateId" => $row["template_id"] ?? null,
+        "templateKey" => (string)($row["template_key"] ?? ""),
+        "channel" => (string)($row["channel"] ?? ""),
+        "recipientType" => (string)($row["recipient_type"] ?? ""),
+        "recipientCustomerId" => $row["recipient_customer_id"] ?? null,
+        "recipientUserId" => $row["recipient_user_id"] ?? null,
+        "toAddress" => (string)($row["to_address"] ?? ""),
+        "renderedSubject" => $row["rendered_subject"] ?? null,
+        "renderedBody" => (string)($row["rendered_body"] ?? ""),
+        "status" => (string)($row["status"] ?? ""),
+        "dedupeKey" => $row["dedupe_key"] ?? null,
+        "errorMessage" => $row["error_message"] ?? null,
+        "notes" => $row["notes"] ?? null,
+        "createdByUserId" => $row["created_by_user_id"] ?? null,
+        "createdAt" => (string)($row["created_at"] ?? ""),
+        "updatedAt" => (string)($row["updated_at"] ?? ""),
+      ] : array_merge($beforePublic, ["status" => $nextStatus, "errorMessage" => $nextError]);
+
+      phase1_audit_log($pdo, $actorUserId !== "" ? $actorUserId : null, "UPDATE", "messaging_queue", $queueId, $beforePublic, $afterPublic);
+      json_response(200, ["data" => $afterPublic]);
+    } catch (Throwable $error) {
+      if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+      }
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to update queue status"]);
+    }
+  }
+
+  if ($method === "POST" && $route === "messaging/jobs/run-overdue-reminders") {
+    phase1_require_role($roleName, ["ADMIN"]);
+    $body = read_json_body();
+
+    $asOf = isset($body["asOfDate"]) && is_string($body["asOfDate"]) ? trim($body["asOfDate"]) : "";
+    $notes = array_key_exists("notes", $body) ? $body["notes"] : null;
+    if ($notes !== null && !is_string($notes)) {
+      json_response(400, ["error" => "ValidationError", "message" => "notes must be a string or null"]);
+    }
+
+    if ($asOf === "") {
+      $asOf = phase1_business_today_ymd();
+    }
+    if (!is_valid_ymd_date($asOf)) {
+      json_response(400, ["error" => "ValidationError", "message" => "asOfDate must be YYYY-MM-DD"]);
+    }
+
+    $actorUserId = (string)($authUser["id"] ?? "");
+
+    $channels = ["SMS", "WHATSAPP", "EMAIL"];
+    $templates = [];
+    $missing = [];
+    foreach ($channels as $ch) {
+      $tpl = phase9_get_active_template($pdo, "OVERDUE_INVOICE_REMINDER", $ch);
+      if ($tpl) {
+        $templates[$ch] = $tpl;
+      } else {
+        $missing[] = ["templateKey" => "OVERDUE_INVOICE_REMINDER", "channel" => $ch];
+      }
+    }
+
+    $rows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT i.id AS invoice_id, i.invoice_number, i.shop_id, sh.code AS shop_code, sh.name AS shop_name, " .
+        "i.customer_id, c.mobile_number AS customer_mobile, c.email AS customer_email, c.first_name, c.last_name, " .
+        "i.due_date, i.balance " .
+      "FROM invoices i " .
+      "JOIN customers c ON c.id = i.customer_id " .
+      "JOIN shops sh ON sh.id = i.shop_id " .
+      "WHERE i.status IN ('ISSUED', 'PARTIALLY_PAID') AND i.balance > 0 AND i.due_date IS NOT NULL AND i.due_date < :as_of " .
+      "ORDER BY i.due_date ASC, i.created_at ASC",
+      [":as_of" => $asOf]
+    );
+
+    $created = 0;
+    $skipped = 0;
+    $byChannel = ["SMS" => ["created" => 0, "skipped" => 0], "WHATSAPP" => ["created" => 0, "skipped" => 0], "EMAIL" => ["created" => 0, "skipped" => 0]];
+
+    foreach ($rows as $row) {
+      if (!is_array($row)) {
+        continue;
+      }
+      $invoiceId = (string)($row["invoice_id"] ?? "");
+      if ($invoiceId === "") {
+        continue;
+      }
+
+      $first = (string)($row["first_name"] ?? "");
+      $last = (string)($row["last_name"] ?? "");
+      $customerName = trim(trim($first) . " " . trim($last));
+      if ($customerName === "") {
+        $customerName = "Customer";
+      }
+
+      $balance = (int)($row["balance"] ?? 0);
+      $vars = [
+        "customerName" => $customerName,
+        "invoiceNumber" => (string)($row["invoice_number"] ?? ""),
+        "balanceUGX" => phase9_int_commas($balance),
+        "dueDate" => (string)($row["due_date"] ?? ""),
+        "shopCode" => (string)($row["shop_code"] ?? ""),
+        "shopName" => (string)($row["shop_name"] ?? ""),
+      ];
+
+      foreach ($channels as $ch) {
+        if (!isset($templates[$ch])) {
+          continue;
+        }
+
+        $to = "";
+        if ($ch === "EMAIL") {
+          $to = isset($row["customer_email"]) && is_string($row["customer_email"]) ? trim($row["customer_email"]) : "";
+          if ($to === "") {
+            continue;
+          }
+        } else {
+          $to = isset($row["customer_mobile"]) && is_string($row["customer_mobile"]) ? trim($row["customer_mobile"]) : "";
+          if ($to === "") {
+            continue;
+          }
+        }
+
+        $tpl = $templates[$ch];
+        $subjectTpl = isset($tpl["subject"]) && is_string($tpl["subject"]) ? $tpl["subject"] : "";
+        $bodyTpl = isset($tpl["body"]) && is_string($tpl["body"]) ? $tpl["body"] : "";
+        $renderedSubject = $subjectTpl !== "" ? phase9_render_template($subjectTpl, $vars) : null;
+        $renderedBody = phase9_render_template($bodyTpl, $vars);
+
+        $dedupeKey = "OVERDUE:" . $invoiceId . ":" . $ch . ":" . $asOf;
+        $res = phase9_enqueue_message($pdo, [
+          "templateId" => (string)($tpl["id"] ?? ""),
+          "templateKey" => "OVERDUE_INVOICE_REMINDER",
+          "channel" => $ch,
+          "recipientType" => "CUSTOMER",
+          "recipientCustomerId" => (string)($row["customer_id"] ?? ""),
+          "toAddress" => $to,
+          "renderedSubject" => $renderedSubject,
+          "renderedBody" => $renderedBody,
+          "payload" => array_merge($vars, ["invoiceId" => $invoiceId]),
+          "status" => "QUEUED",
+          "dedupeKey" => $dedupeKey,
+          "notes" => null,
+          "createdByUserId" => $actorUserId !== "" ? $actorUserId : null,
+        ]);
+
+        if ((bool)($res["created"] ?? false)) {
+          $created += 1;
+          $byChannel[$ch]["created"] += 1;
+        } else {
+          $skipped += 1;
+          $byChannel[$ch]["skipped"] += 1;
+        }
+      }
+    }
+
+    $public = [
+      "templateKey" => "OVERDUE_INVOICE_REMINDER",
+      "asOfDate" => $asOf,
+      "createdCount" => $created,
+      "skippedCount" => $skipped,
+      "byChannel" => $byChannel,
+      "missingTemplates" => $missing,
+    ];
+
+    phase1_audit_log($pdo, $actorUserId !== "" ? $actorUserId : null, "RUN", "messaging_job", "OVERDUE_INVOICE_REMINDER:" . $asOf, null, $public, is_string($notes) && trim($notes) !== "" ? trim($notes) : null);
+    json_response(200, ["data" => $public]);
+  }
+
+  if ($method === "POST" && $route === "messaging/jobs/run-admin-daily-summary") {
+    phase1_require_role($roleName, ["ADMIN"]);
+    $body = read_json_body();
+
+    $date = isset($body["date"]) && is_string($body["date"]) ? trim($body["date"]) : "";
+    $notes = array_key_exists("notes", $body) ? $body["notes"] : null;
+    if ($notes !== null && !is_string($notes)) {
+      json_response(400, ["error" => "ValidationError", "message" => "notes must be a string or null"]);
+    }
+
+    if ($date === "") {
+      $date = phase1_business_today_ymd();
+    }
+    if (!is_valid_ymd_date($date)) {
+      json_response(400, ["error" => "ValidationError", "message" => "date must be YYYY-MM-DD"]);
+    }
+
+    $actorUserId = (string)($authUser["id"] ?? "");
+
+    $salesRow = phase1_db_fetch_one(
+      $pdo,
+      "SELECT COALESCE(SUM(total_amount), 0) AS total_amount, COUNT(*) AS sale_count " .
+      "FROM sales WHERE is_void = 0 AND sale_date = :sale_date",
+      [":sale_date" => $date]
+    );
+    $salesTotal = $salesRow ? (int)($salesRow["total_amount"] ?? 0) : 0;
+    $salesCount = $salesRow ? (int)($salesRow["sale_count"] ?? 0) : 0;
+
+    $bankRow = phase1_db_fetch_one(
+      $pdo,
+      "SELECT COALESCE(SUM(amount_ugx), 0) AS total_amount " .
+      "FROM banking_requests WHERE status = 'APPROVED' AND decided_at IS NOT NULL AND DATE(decided_at) = :day",
+      [":day" => $date]
+    );
+    $banked = $bankRow ? (int)($bankRow["total_amount"] ?? 0) : 0;
+
+    $creditRow = phase1_db_fetch_one(
+      $pdo,
+      "SELECT COALESCE(SUM(balance), 0) AS total_amount " .
+      "FROM invoices WHERE status <> 'VOID' AND balance > 0",
+      []
+    );
+    $creditOutstanding = $creditRow ? (int)($creditRow["total_amount"] ?? 0) : 0;
+
+    $overdueRow = phase1_db_fetch_one(
+      $pdo,
+      "SELECT COUNT(*) AS overdue_count FROM invoices " .
+      "WHERE status IN ('ISSUED', 'PARTIALLY_PAID') AND balance > 0 AND due_date IS NOT NULL AND due_date < :as_of",
+      [":as_of" => $date]
+    );
+    $overdueCount = $overdueRow ? (int)($overdueRow["overdue_count"] ?? 0) : 0;
+
+    $salesUsers = phase1_db_fetch_all(
+      $pdo,
+      "SELECT u.id FROM users u JOIN roles r ON r.id = u.role_id WHERE u.is_active = 1 AND r.name = 'SALES'",
+      []
+    );
+    $cashAtHandTotal = 0;
+    foreach ($salesUsers as $urow) {
+      if (!is_array($urow)) {
+        continue;
+      }
+      $uid = (string)($urow["id"] ?? "");
+      if ($uid === "") {
+        continue;
+      }
+      $summary = phase1_cash_summary($pdo, $uid);
+      $cashAtHandTotal += (int)($summary["cashAtHand"] ?? 0);
+    }
+
+    $vars = [
+      "date" => $date,
+      "salesTotalUGX" => phase9_int_commas($salesTotal),
+      "salesCount" => (string)$salesCount,
+      "cashAtHandUGX" => phase9_int_commas($cashAtHandTotal),
+      "bankedUGX" => phase9_int_commas($banked),
+      "creditOutstandingUGX" => phase9_int_commas($creditOutstanding),
+      "overdueCount" => (string)$overdueCount,
+    ];
+
+    $channels = ["WHATSAPP", "EMAIL"];
+    $templates = [];
+    $missing = [];
+    foreach ($channels as $ch) {
+      $tpl = phase9_get_active_template($pdo, "ADMIN_DAILY_SUMMARY", $ch);
+      if ($tpl) {
+        $templates[$ch] = $tpl;
+      } else {
+        $missing[] = ["templateKey" => "ADMIN_DAILY_SUMMARY", "channel" => $ch];
+      }
+    }
+
+    $created = 0;
+    $skipped = 0;
+    $byChannel = ["WHATSAPP" => ["created" => 0, "skipped" => 0], "EMAIL" => ["created" => 0, "skipped" => 0]];
+
+    // WhatsApp recipients: all active admins (by phone).
+    if (isset($templates["WHATSAPP"])) {
+      $adminUsers = phase1_db_fetch_all(
+        $pdo,
+        "SELECT u.id, u.phone, u.full_name FROM users u JOIN roles r ON r.id = u.role_id WHERE u.is_active = 1 AND r.name = 'ADMIN'",
+        []
+      );
+
+      foreach ($adminUsers as $arow) {
+        if (!is_array($arow)) {
+          continue;
+        }
+        $to = isset($arow["phone"]) && is_string($arow["phone"]) ? trim($arow["phone"]) : "";
+        if ($to === "") {
+          continue;
+        }
+
+        $tpl = $templates["WHATSAPP"];
+        $subjectTpl = isset($tpl["subject"]) && is_string($tpl["subject"]) ? $tpl["subject"] : "";
+        $bodyTpl = isset($tpl["body"]) && is_string($tpl["body"]) ? $tpl["body"] : "";
+        $renderedSubject = $subjectTpl !== "" ? phase9_render_template($subjectTpl, $vars) : null;
+        $renderedBody = phase9_render_template($bodyTpl, $vars);
+        $dedupeKey = "DAILY_SUMMARY:" . $date . ":WHATSAPP:" . $to;
+
+        $res = phase9_enqueue_message($pdo, [
+          "templateId" => (string)($tpl["id"] ?? ""),
+          "templateKey" => "ADMIN_DAILY_SUMMARY",
+          "channel" => "WHATSAPP",
+          "recipientType" => "USER",
+          "recipientUserId" => (string)($arow["id"] ?? ""),
+          "toAddress" => $to,
+          "renderedSubject" => $renderedSubject,
+          "renderedBody" => $renderedBody,
+          "payload" => $vars,
+          "status" => "QUEUED",
+          "dedupeKey" => $dedupeKey,
+          "notes" => null,
+          "createdByUserId" => $actorUserId !== "" ? $actorUserId : null,
+        ]);
+
+        if ((bool)($res["created"] ?? false)) {
+          $created += 1;
+          $byChannel["WHATSAPP"]["created"] += 1;
+        } else {
+          $skipped += 1;
+          $byChannel["WHATSAPP"]["skipped"] += 1;
+        }
+      }
+    }
+
+    // Email recipients: configured list (BDK_ADMIN_DAILY_EMAILS).
+    if (isset($templates["EMAIL"])) {
+      $emails = phase9_admin_daily_email_recipients();
+      foreach ($emails as $email) {
+        $tpl = $templates["EMAIL"];
+        $subjectTpl = isset($tpl["subject"]) && is_string($tpl["subject"]) ? $tpl["subject"] : "";
+        $bodyTpl = isset($tpl["body"]) && is_string($tpl["body"]) ? $tpl["body"] : "";
+        $renderedSubject = $subjectTpl !== "" ? phase9_render_template($subjectTpl, $vars) : null;
+        $renderedBody = phase9_render_template($bodyTpl, $vars);
+        $dedupeKey = "DAILY_SUMMARY:" . $date . ":EMAIL:" . $email;
+
+        $res = phase9_enqueue_message($pdo, [
+          "templateId" => (string)($tpl["id"] ?? ""),
+          "templateKey" => "ADMIN_DAILY_SUMMARY",
+          "channel" => "EMAIL",
+          "recipientType" => "RAW",
+          "toAddress" => $email,
+          "renderedSubject" => $renderedSubject,
+          "renderedBody" => $renderedBody,
+          "payload" => $vars,
+          "status" => "QUEUED",
+          "dedupeKey" => $dedupeKey,
+          "notes" => null,
+          "createdByUserId" => $actorUserId !== "" ? $actorUserId : null,
+        ]);
+
+        if ((bool)($res["created"] ?? false)) {
+          $created += 1;
+          $byChannel["EMAIL"]["created"] += 1;
+        } else {
+          $skipped += 1;
+          $byChannel["EMAIL"]["skipped"] += 1;
+        }
+      }
+    }
+
+    $public = [
+      "templateKey" => "ADMIN_DAILY_SUMMARY",
+      "date" => $date,
+      "createdCount" => $created,
+      "skippedCount" => $skipped,
+      "byChannel" => $byChannel,
+      "missingTemplates" => $missing,
+      "emailRecipients" => phase9_admin_daily_email_recipients(),
+    ];
+
+    phase1_audit_log($pdo, $actorUserId !== "" ? $actorUserId : null, "RUN", "messaging_job", "ADMIN_DAILY_SUMMARY:" . $date, null, $public, is_string($notes) && trim($notes) !== "" ? trim($notes) : null);
+    json_response(200, ["data" => $public]);
   }
 
   if ($method === "GET" && $route === "notifications/me") {
