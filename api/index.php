@@ -410,6 +410,34 @@ function phase1_require_shop_access(string $roleName, array $assignments, string
   json_response(403, ["error" => "HttpError", "message" => "Forbidden"]);
 }
 
+function phase1_business_tz_id(): string {
+  $raw = (string)(getenv("BDK_BUSINESS_TZ") ?: "");
+  $tz = trim($raw);
+  return $tz !== "" ? $tz : "Africa/Kampala";
+}
+
+function phase1_business_today_ymd(): string {
+  try {
+    $dt = new DateTime("now", new DateTimeZone(phase1_business_tz_id()));
+    return $dt->format("Y-m-d");
+  } catch (Throwable $error) {
+    // Fallback to UTC if timezone config is invalid.
+    return gmdate("Y-m-d");
+  }
+}
+
+function phase1_is_shop_date_locked(PDO $pdo, string $shopId, string $lockDateYmd): bool {
+  if ($shopId === "" || $lockDateYmd === "") {
+    return false;
+  }
+  $row = phase1_db_fetch_one(
+    $pdo,
+    "SELECT id FROM reconciliation_locks WHERE shop_id = :shop_id AND lock_date = :lock_date LIMIT 1",
+    [":shop_id" => $shopId, ":lock_date" => $lockDateYmd]
+  );
+  return $row !== null;
+}
+
 function phase1_handle(string $method, string $route): void {
   $pdo = mysql_pdo();
 
@@ -844,16 +872,19 @@ function phase1_handle(string $method, string $route): void {
   }
 
   if ($method === "GET" && $route === "products") {
-    phase1_require_role($roleName, ["ADMIN"]);
+    phase1_require_role($roleName, ["ADMIN", "MANAGER", "SALES"]);
+    $includeCost = $roleName === "ADMIN";
+    $where = $includeCost ? "" : "WHERE p.is_active = 1 AND c.is_active = 1 ";
     $rows = phase1_db_fetch_all(
       $pdo,
       "SELECT p.id, p.sku_code, p.name, p.category_id, c.name AS category_name, p.product_type, p.unit_of_measure, " .
         "p.cost_price, p.selling_price, p.is_active, p.board_size_code, p.yield_per_sheet, p.notes, p.created_at, p.updated_at " .
       "FROM products p JOIN product_categories c ON c.id = p.category_id " .
+      $where .
       "ORDER BY p.name ASC",
       []
     );
-    $products = array_map(function ($row) {
+    $products = array_map(function ($row) use ($includeCost) {
       return [
         "id" => (string)($row["id"] ?? ""),
         "skuCode" => (string)($row["sku_code"] ?? ""),
@@ -862,7 +893,7 @@ function phase1_handle(string $method, string $route): void {
         "categoryName" => (string)($row["category_name"] ?? ""),
         "productType" => (string)($row["product_type"] ?? ""),
         "unitOfMeasure" => (string)($row["unit_of_measure"] ?? ""),
-        "costPrice" => $row["cost_price"] === null ? null : (int)$row["cost_price"],
+        "costPrice" => $includeCost ? ($row["cost_price"] === null ? null : (int)$row["cost_price"]) : null,
         "sellingPrice" => (int)($row["selling_price"] ?? 0),
         "isActive" => (int)($row["is_active"] ?? 0) === 1,
         "boardSizeCode" => $row["board_size_code"] === null ? null : (string)$row["board_size_code"],
@@ -2348,6 +2379,1151 @@ function phase1_handle(string $method, string $route): void {
         $pdo->rollBack();
       }
       json_response(500, ["error" => "InternalServerError", "message" => "Failed to record payment"]);
+    }
+  }
+
+  if ($method === "GET" && $route === "reconciliation-locks") {
+    phase1_require_role($roleName, ["ADMIN", "MANAGER", "SALES"]);
+
+    $shopId = isset($_GET["shopId"]) && is_string($_GET["shopId"]) ? trim($_GET["shopId"]) : "";
+    $lockDate = isset($_GET["lockDate"]) && is_string($_GET["lockDate"]) ? trim($_GET["lockDate"]) : "";
+
+    if ($lockDate !== "" && !is_valid_ymd_date($lockDate)) {
+      json_response(400, ["error" => "ValidationError", "message" => "lockDate must be YYYY-MM-DD"]);
+    }
+
+    $where = [];
+    $params = [];
+
+    if ($shopId !== "") {
+      phase1_require_shop_access($roleName, $assignments, $shopId);
+      $where[] = "r.shop_id = :shop_id";
+      $params[":shop_id"] = $shopId;
+    } elseif ($roleName !== "ADMIN") {
+      $shopIds = phase1_assigned_shop_ids($assignments);
+      if (count($shopIds) < 1) {
+        json_response(200, ["data" => []]);
+      }
+      $placeholders = [];
+      foreach ($shopIds as $idx => $id) {
+        $key = ":shop_" . (string)$idx;
+        $placeholders[] = $key;
+        $params[$key] = $id;
+      }
+      $where[] = "r.shop_id IN (" . implode(", ", $placeholders) . ")";
+    }
+
+    if ($lockDate !== "") {
+      $where[] = "r.lock_date = :lock_date";
+      $params[":lock_date"] = $lockDate;
+    }
+
+    $sql =
+      "SELECT r.id, r.shop_id, s.code AS shop_code, s.name AS shop_name, r.lock_date, r.locked_by_user_id, " .
+        "u.full_name AS locked_by_full_name, r.notes, r.created_at, r.updated_at " .
+      "FROM reconciliation_locks r " .
+      "JOIN shops s ON s.id = r.shop_id " .
+      "LEFT JOIN users u ON u.id = r.locked_by_user_id ";
+    if (count($where) > 0) {
+      $sql .= "WHERE " . implode(" AND ", $where) . " ";
+    }
+    $sql .= "ORDER BY r.lock_date DESC, r.created_at DESC LIMIT 200";
+
+    $rows = phase1_db_fetch_all($pdo, $sql, $params);
+    $locks = array_map(function ($row) {
+      return [
+        "id" => (string)($row["id"] ?? ""),
+        "shopId" => (string)($row["shop_id"] ?? ""),
+        "shopCode" => (string)($row["shop_code"] ?? ""),
+        "shopName" => (string)($row["shop_name"] ?? ""),
+        "lockDate" => (string)($row["lock_date"] ?? ""),
+        "lockedByUserId" => $row["locked_by_user_id"] ?? null,
+        "lockedByFullName" => $row["locked_by_full_name"] ?? null,
+        "notes" => $row["notes"] ?? null,
+        "createdAt" => (string)($row["created_at"] ?? ""),
+        "updatedAt" => (string)($row["updated_at"] ?? ""),
+      ];
+    }, $rows);
+
+    json_response(200, ["data" => $locks]);
+  }
+
+  if ($method === "POST" && $route === "reconciliation-locks") {
+    phase1_require_role($roleName, ["ADMIN"]);
+    $body = read_json_body();
+
+    $shopId = isset($body["shopId"]) && is_string($body["shopId"]) ? trim($body["shopId"]) : "";
+    $lockDate = isset($body["lockDate"]) && is_string($body["lockDate"]) ? trim($body["lockDate"]) : "";
+    $notes = array_key_exists("notes", $body) ? $body["notes"] : null;
+
+    if ($shopId === "" || $lockDate === "") {
+      json_response(400, ["error" => "ValidationError", "message" => "shopId and lockDate are required"]);
+    }
+    if (!is_valid_ymd_date($lockDate)) {
+      json_response(400, ["error" => "ValidationError", "message" => "lockDate must be YYYY-MM-DD"]);
+    }
+    if ($notes !== null && !is_string($notes)) {
+      json_response(400, ["error" => "ValidationError", "message" => "notes must be a string or null"]);
+    }
+
+    $shopRow = phase1_db_fetch_one($pdo, "SELECT id FROM shops WHERE id = :id LIMIT 1", [":id" => $shopId]);
+    if (!$shopRow) {
+      json_response(400, ["error" => "ValidationError", "message" => "Invalid shopId"]);
+    }
+
+    $lockId = create_id("lock");
+    $actorUserId = (string)($authUser["id"] ?? "");
+
+    $created = false;
+    try {
+      $stmt = $pdo->prepare(
+        "INSERT INTO reconciliation_locks (id, shop_id, lock_date, locked_by_user_id, notes) " .
+        "VALUES (:id, :shop_id, :lock_date, :locked_by_user_id, :notes)"
+      );
+      $stmt->execute([
+        ":id" => $lockId,
+        ":shop_id" => $shopId,
+        ":lock_date" => $lockDate,
+        ":locked_by_user_id" => $actorUserId !== "" ? $actorUserId : null,
+        ":notes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+      ]);
+      $created = true;
+    } catch (PDOException $error) {
+      $info = $error->errorInfo;
+      $code = is_array($info) && isset($info[1]) ? (int)$info[1] : 0;
+      if ($code !== 1062) {
+        json_response(500, ["error" => "InternalServerError", "message" => "Failed to reconcile day"]);
+      }
+    }
+
+    $row = phase1_db_fetch_one(
+      $pdo,
+      "SELECT r.id, r.shop_id, s.code AS shop_code, s.name AS shop_name, r.lock_date, r.locked_by_user_id, " .
+        "u.full_name AS locked_by_full_name, r.notes, r.created_at, r.updated_at " .
+      "FROM reconciliation_locks r " .
+      "JOIN shops s ON s.id = r.shop_id " .
+      "LEFT JOIN users u ON u.id = r.locked_by_user_id " .
+      "WHERE r.shop_id = :shop_id AND r.lock_date = :lock_date LIMIT 1",
+      [":shop_id" => $shopId, ":lock_date" => $lockDate]
+    );
+    if (!$row) {
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to read reconciliation lock"]);
+    }
+
+    $public = [
+      "id" => (string)$row["id"],
+      "shopId" => (string)$row["shop_id"],
+      "shopCode" => (string)$row["shop_code"],
+      "shopName" => (string)$row["shop_name"],
+      "lockDate" => (string)$row["lock_date"],
+      "lockedByUserId" => $row["locked_by_user_id"] ?? null,
+      "lockedByFullName" => $row["locked_by_full_name"] ?? null,
+      "notes" => $row["notes"] ?? null,
+      "createdAt" => (string)$row["created_at"],
+      "updatedAt" => (string)$row["updated_at"],
+    ];
+
+    if ($created) {
+      phase1_audit_log($pdo, $actorUserId !== "" ? $actorUserId : null, "CREATE", "reconciliation_lock", (string)$row["id"], null, $public);
+    }
+
+    json_response($created ? 201 : 200, ["data" => $public]);
+  }
+
+  if ($method === "GET" && $route === "sales") {
+    phase1_require_role($roleName, ["ADMIN", "MANAGER", "SALES"]);
+
+    $requestedShopId = isset($_GET["shopId"]) && is_string($_GET["shopId"]) ? trim($_GET["shopId"]) : "";
+    $requestedSaleDate = isset($_GET["saleDate"]) && is_string($_GET["saleDate"]) ? trim($_GET["saleDate"]) : "";
+
+    $saleDate = $requestedSaleDate;
+    if ($saleDate === "" && $roleName !== "ADMIN") {
+      $saleDate = phase1_business_today_ymd();
+    }
+    if ($saleDate !== "" && !is_valid_ymd_date($saleDate)) {
+      json_response(400, ["error" => "ValidationError", "message" => "saleDate must be YYYY-MM-DD"]);
+    }
+
+    $where = [];
+    $params = [];
+
+    if ($roleName === "SALES") {
+      $where[] = "sa.user_id = :user_id";
+      $params[":user_id"] = (string)($authUser["id"] ?? "");
+    } elseif ($roleName === "MANAGER") {
+      $shopIds = phase1_assigned_shop_ids($assignments);
+      if (count($shopIds) < 1) {
+        json_response(200, ["data" => []]);
+      }
+      $placeholders = [];
+      foreach ($shopIds as $idx => $id) {
+        $key = ":shop_" . (string)$idx;
+        $placeholders[] = $key;
+        $params[$key] = $id;
+      }
+      $where[] = "sa.shop_id IN (" . implode(", ", $placeholders) . ")";
+    }
+
+    if ($requestedShopId !== "") {
+      phase1_require_shop_access($roleName, $assignments, $requestedShopId);
+      $where[] = "sa.shop_id = :shop_id";
+      $params[":shop_id"] = $requestedShopId;
+    }
+    if ($saleDate !== "") {
+      $where[] = "sa.sale_date = :sale_date";
+      $params[":sale_date"] = $saleDate;
+    }
+
+    if (count($where) < 1) {
+      $where[] = "1=1";
+    }
+
+    $rows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT sa.id, sa.shop_id, sh.code AS shop_code, sh.name AS shop_name, sa.user_id, u.full_name AS user_full_name, " .
+        "sa.customer_id, c.mobile AS customer_mobile, c.first_name AS customer_first_name, c.last_name AS customer_last_name, " .
+        "sa.invoice_id, i.invoice_number, sa.sale_date, sa.payment_method, sa.total_amount, sa.notes, sa.is_void, " .
+        "sa.voided_at, sa.voided_by_user_id, sa.created_at, sa.updated_at " .
+      "FROM sales sa " .
+      "JOIN shops sh ON sh.id = sa.shop_id " .
+      "JOIN users u ON u.id = sa.user_id " .
+      "LEFT JOIN customers c ON c.id = sa.customer_id " .
+      "LEFT JOIN invoices i ON i.id = sa.invoice_id " .
+      "WHERE " . implode(" AND ", $where) . " " .
+      "ORDER BY sa.sale_date DESC, sa.created_at DESC " .
+      "LIMIT 200",
+      $params
+    );
+
+    $sales = array_map(function ($row) {
+      return [
+        "id" => (string)($row["id"] ?? ""),
+        "shopId" => (string)($row["shop_id"] ?? ""),
+        "shopCode" => (string)($row["shop_code"] ?? ""),
+        "shopName" => (string)($row["shop_name"] ?? ""),
+        "userId" => (string)($row["user_id"] ?? ""),
+        "userFullName" => (string)($row["user_full_name"] ?? ""),
+        "customerId" => $row["customer_id"] === null ? null : (string)$row["customer_id"],
+        "customerMobileNumber" => $row["customer_mobile"] ?? null,
+        "customerFirstName" => $row["customer_first_name"] ?? null,
+        "customerLastName" => $row["customer_last_name"] ?? null,
+        "invoiceId" => $row["invoice_id"] === null ? null : (string)$row["invoice_id"],
+        "invoiceNumber" => $row["invoice_number"] ?? null,
+        "saleDate" => (string)($row["sale_date"] ?? ""),
+        "paymentMethod" => (string)($row["payment_method"] ?? ""),
+        "totalAmount" => (int)($row["total_amount"] ?? 0),
+        "notes" => $row["notes"] ?? null,
+        "isVoid" => (int)($row["is_void"] ?? 0) === 1,
+        "voidedAt" => $row["voided_at"] ?? null,
+        "voidedByUserId" => $row["voided_by_user_id"] ?? null,
+        "createdAt" => (string)($row["created_at"] ?? ""),
+        "updatedAt" => (string)($row["updated_at"] ?? ""),
+      ];
+    }, $rows);
+
+    json_response(200, ["data" => $sales]);
+  }
+
+  if ($method === "GET" && preg_match('/^sales\\/([^\\/]+)$/', $route, $matches) === 1) {
+    phase1_require_role($roleName, ["ADMIN", "MANAGER", "SALES"]);
+    $saleId = (string)$matches[1];
+
+    $row = phase1_db_fetch_one(
+      $pdo,
+      "SELECT sa.id, sa.shop_id, sh.code AS shop_code, sh.name AS shop_name, sa.user_id, u.full_name AS user_full_name, " .
+        "sa.customer_id, c.mobile AS customer_mobile, c.first_name AS customer_first_name, c.last_name AS customer_last_name, " .
+        "sa.invoice_id, i.invoice_number, sa.sale_date, sa.payment_method, sa.total_amount, sa.notes, sa.is_void, " .
+        "sa.voided_at, sa.voided_by_user_id, sa.created_at, sa.updated_at " .
+      "FROM sales sa " .
+      "JOIN shops sh ON sh.id = sa.shop_id " .
+      "JOIN users u ON u.id = sa.user_id " .
+      "LEFT JOIN customers c ON c.id = sa.customer_id " .
+      "LEFT JOIN invoices i ON i.id = sa.invoice_id " .
+      "WHERE sa.id = :id LIMIT 1",
+      [":id" => $saleId]
+    );
+    if (!$row) {
+      json_response(404, ["error" => "HttpError", "message" => "Sale not found"]);
+    }
+
+    phase1_require_shop_access($roleName, $assignments, (string)$row["shop_id"]);
+    if ($roleName === "SALES" && (string)($row["user_id"] ?? "") !== (string)($authUser["id"] ?? "")) {
+      json_response(403, ["error" => "HttpError", "message" => "Forbidden"]);
+    }
+
+    $sale = [
+      "id" => (string)$row["id"],
+      "shopId" => (string)$row["shop_id"],
+      "shopCode" => (string)$row["shop_code"],
+      "shopName" => (string)$row["shop_name"],
+      "userId" => (string)$row["user_id"],
+      "userFullName" => (string)$row["user_full_name"],
+      "customerId" => $row["customer_id"] === null ? null : (string)$row["customer_id"],
+      "customerMobileNumber" => $row["customer_mobile"] ?? null,
+      "customerFirstName" => $row["customer_first_name"] ?? null,
+      "customerLastName" => $row["customer_last_name"] ?? null,
+      "invoiceId" => $row["invoice_id"] === null ? null : (string)$row["invoice_id"],
+      "invoiceNumber" => $row["invoice_number"] ?? null,
+      "saleDate" => (string)$row["sale_date"],
+      "paymentMethod" => (string)$row["payment_method"],
+      "totalAmount" => (int)$row["total_amount"],
+      "notes" => $row["notes"] ?? null,
+      "isVoid" => (int)$row["is_void"] === 1,
+      "voidedAt" => $row["voided_at"] ?? null,
+      "voidedByUserId" => $row["voided_by_user_id"] ?? null,
+      "createdAt" => (string)$row["created_at"],
+      "updatedAt" => (string)$row["updated_at"],
+    ];
+
+    $linesRows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT id, sale_id, sort_order, product_id, sku_code, product_name, quantity, unit_price, line_total, notes, created_at, updated_at " .
+      "FROM sale_lines WHERE sale_id = :sale_id ORDER BY sort_order ASC, created_at ASC",
+      [":sale_id" => $saleId]
+    );
+
+    $lines = array_map(function ($line) {
+      return [
+        "id" => (string)($line["id"] ?? ""),
+        "saleId" => (string)($line["sale_id"] ?? ""),
+        "sortOrder" => (int)($line["sort_order"] ?? 0),
+        "productId" => (string)($line["product_id"] ?? ""),
+        "skuCode" => (string)($line["sku_code"] ?? ""),
+        "productName" => (string)($line["product_name"] ?? ""),
+        "quantity" => (int)($line["quantity"] ?? 0),
+        "unitPrice" => (int)($line["unit_price"] ?? 0),
+        "lineTotal" => (int)($line["line_total"] ?? 0),
+        "notes" => $line["notes"] ?? null,
+        "createdAt" => (string)($line["created_at"] ?? ""),
+        "updatedAt" => (string)($line["updated_at"] ?? ""),
+      ];
+    }, $linesRows);
+
+    json_response(200, ["data" => ["sale" => $sale, "lines" => $lines]]);
+  }
+
+  if ($method === "POST" && $route === "sales") {
+    phase1_require_role($roleName, ["ADMIN", "SALES"]);
+    $body = read_json_body();
+
+    $requestedShopId = isset($body["shopId"]) && is_string($body["shopId"]) ? trim($body["shopId"]) : "";
+    $requestedSaleDate = isset($body["saleDate"]) && is_string($body["saleDate"]) ? trim($body["saleDate"]) : "";
+    $paymentMethod = isset($body["paymentMethod"]) && is_string($body["paymentMethod"]) ? trim($body["paymentMethod"]) : "";
+    $customerId = isset($body["customerId"]) && is_string($body["customerId"]) ? trim($body["customerId"]) : "";
+    $notes = array_key_exists("notes", $body) ? $body["notes"] : null;
+    $linesPayload = array_key_exists("lines", $body) ? $body["lines"] : null;
+
+    if (!in_array($paymentMethod, ["CASH", "MOBILE_MONEY", "CARD", "CREDIT"], true)) {
+      json_response(400, ["error" => "ValidationError", "message" => "paymentMethod must be CASH, MOBILE_MONEY, CARD, or CREDIT"]);
+    }
+    if ($paymentMethod === "CREDIT" && $customerId === "") {
+      json_response(400, ["error" => "ValidationError", "message" => "customerId is required for CREDIT sales"]);
+    }
+    if ($notes !== null && !is_string($notes)) {
+      json_response(400, ["error" => "ValidationError", "message" => "notes must be a string or null"]);
+    }
+    if (!is_array($linesPayload) || count($linesPayload) < 1) {
+      json_response(400, ["error" => "ValidationError", "message" => "lines (non-empty array) is required"]);
+    }
+
+    $shopId = $requestedShopId;
+    $saleDate = $requestedSaleDate;
+    if ($roleName !== "ADMIN") {
+      $shopId = phase1_primary_shop_id($assignments);
+      if ($shopId === "") {
+        json_response(400, ["error" => "ValidationError", "message" => "Sales user is not assigned to a shop"]);
+      }
+      $saleDate = phase1_business_today_ymd();
+    } else {
+      if ($shopId === "") {
+        json_response(400, ["error" => "ValidationError", "message" => "shopId is required"]);
+      }
+      if ($saleDate === "") {
+        $saleDate = phase1_business_today_ymd();
+      }
+    }
+
+    if (!is_valid_ymd_date($saleDate)) {
+      json_response(400, ["error" => "ValidationError", "message" => "saleDate must be YYYY-MM-DD"]);
+    }
+
+    if ($roleName !== "ADMIN" && phase1_is_shop_date_locked($pdo, $shopId, $saleDate)) {
+      json_response(400, ["error" => "BadRequest", "message" => "This day is reconciled (locked)"]);
+    }
+
+    $shopRow = phase1_db_fetch_one(
+      $pdo,
+      "SELECT id, code, name FROM shops WHERE id = :id LIMIT 1",
+      [":id" => $shopId]
+    );
+    if (!$shopRow) {
+      json_response(400, ["error" => "ValidationError", "message" => "Invalid shopId"]);
+    }
+
+    $customerRow = null;
+    if ($customerId !== "") {
+      $customerRow = phase1_db_fetch_one(
+        $pdo,
+        "SELECT id, mobile, first_name, last_name, email, is_active FROM customers WHERE id = :id LIMIT 1",
+        [":id" => $customerId]
+      );
+      if (!$customerRow) {
+        json_response(400, ["error" => "ValidationError", "message" => "Invalid customerId"]);
+      }
+      if ((int)($customerRow["is_active"] ?? 0) !== 1) {
+        json_response(400, ["error" => "ValidationError", "message" => "Customer is inactive"]);
+      }
+    }
+
+    $materializedLines = [];
+    $totalAmount = 0;
+    foreach ($linesPayload as $idx => $rawLine) {
+      if (!is_array($rawLine)) {
+        json_response(400, ["error" => "ValidationError", "message" => "Each line must be an object"]);
+      }
+      $productId = isset($rawLine["productId"]) && is_string($rawLine["productId"]) ? trim($rawLine["productId"]) : "";
+      $quantity = isset($rawLine["quantity"]) ? (int)$rawLine["quantity"] : 0;
+      $unitPrice = isset($rawLine["unitPrice"]) ? (int)$rawLine["unitPrice"] : 0;
+      $lineNotes = array_key_exists("notes", $rawLine) ? $rawLine["notes"] : null;
+
+      if ($productId === "" || $quantity < 1 || $unitPrice < 0) {
+        json_response(400, ["error" => "ValidationError", "message" => "Line requires productId, quantity (>=1), unitPrice (>=0)"]);
+      }
+      if ($lineNotes !== null && !is_string($lineNotes)) {
+        json_response(400, ["error" => "ValidationError", "message" => "Line notes must be a string or null"]);
+      }
+
+      $productRow = phase1_db_fetch_one(
+        $pdo,
+        "SELECT id, sku_code, name, is_active FROM products WHERE id = :id LIMIT 1",
+        [":id" => $productId]
+      );
+      if (!$productRow) {
+        json_response(400, ["error" => "ValidationError", "message" => "Invalid productId"]);
+      }
+      if ((int)($productRow["is_active"] ?? 0) !== 1) {
+        json_response(400, ["error" => "ValidationError", "message" => "Product is inactive"]);
+      }
+
+      $lineTotal = $quantity * $unitPrice;
+      if ($lineTotal < 0 || $lineTotal > 2000000000) {
+        json_response(400, ["error" => "ValidationError", "message" => "Line total is too large"]);
+      }
+      $totalAmount += $lineTotal;
+      if ($totalAmount > 2000000000) {
+        json_response(400, ["error" => "ValidationError", "message" => "Sale total is too large"]);
+      }
+
+      $materializedLines[] = [
+        "sortOrder" => (int)$idx + 1,
+        "productId" => (string)$productRow["id"],
+        "skuCode" => (string)$productRow["sku_code"],
+        "productName" => (string)$productRow["name"],
+        "quantity" => $quantity,
+        "unitPrice" => $unitPrice,
+        "lineTotal" => $lineTotal,
+        "notes" => is_string($lineNotes) && trim($lineNotes) !== "" ? trim($lineNotes) : null,
+      ];
+    }
+
+    if ($totalAmount <= 0) {
+      json_response(400, ["error" => "ValidationError", "message" => "Sale total must be > 0"]);
+    }
+
+    $saleId = create_id("sale");
+    $actorUserId = (string)($authUser["id"] ?? "");
+    $invoiceId = null;
+    $invoiceNumber = null;
+    $invoicePublic = null;
+    $invoiceLinesPublic = [];
+
+    try {
+      $pdo->beginTransaction();
+
+      if ($paymentMethod === "CREDIT") {
+        $invoiceId = create_id("inv");
+
+        // Ensure counter row exists, then lock it.
+        $stmtCounterInit = $pdo->prepare(
+          "INSERT INTO shop_invoice_counters (shop_id, next_seq) VALUES (:shop_id, 1) " .
+          "ON DUPLICATE KEY UPDATE shop_id = shop_id"
+        );
+        $stmtCounterInit->execute([":shop_id" => $shopId]);
+
+        $counterRow = phase1_db_fetch_one(
+          $pdo,
+          "SELECT next_seq FROM shop_invoice_counters WHERE shop_id = :shop_id FOR UPDATE",
+          [":shop_id" => $shopId]
+        );
+        if (!$counterRow) {
+          throw new RuntimeException("Failed to acquire invoice counter lock");
+        }
+
+        $seq = (int)($counterRow["next_seq"] ?? 1);
+        if ($seq < 1) {
+          $seq = 1;
+        }
+        phase1_db_execute(
+          $pdo,
+          "UPDATE shop_invoice_counters SET next_seq = :next_seq, updated_at = NOW() WHERE shop_id = :shop_id",
+          [":next_seq" => $seq + 1, ":shop_id" => $shopId]
+        );
+
+        $shopCode = (string)($shopRow["code"] ?? "");
+        $invoiceNumber = $shopCode . "-" . str_pad((string)$seq, 6, "0", STR_PAD_LEFT);
+
+        $stmtInvoice = $pdo->prepare(
+          "INSERT INTO invoices (id, shop_id, sequence_number, invoice_number, customer_id, status, issued_at, due_date, total_amount, paid_amount, balance, notes, created_by_user_id) " .
+          "VALUES (:id, :shop_id, :sequence_number, :invoice_number, :customer_id, 'ISSUED', :issued_at, NULL, :total_amount, 0, :balance, :notes, :created_by_user_id)"
+        );
+        $issuedAt = gmdate("Y-m-d H:i:s");
+        $stmtInvoice->execute([
+          ":id" => $invoiceId,
+          ":shop_id" => $shopId,
+          ":sequence_number" => $seq,
+          ":invoice_number" => $invoiceNumber,
+          ":customer_id" => $customerId,
+          ":issued_at" => $issuedAt,
+          ":total_amount" => $totalAmount,
+          ":balance" => $totalAmount,
+          ":notes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+          ":created_by_user_id" => $actorUserId !== "" ? $actorUserId : null,
+        ]);
+
+        $stmtInvoiceLine = $pdo->prepare(
+          "INSERT INTO invoice_lines (id, invoice_id, sort_order, description, quantity, unit_price, line_total, notes) " .
+          "VALUES (:id, :invoice_id, :sort_order, :description, :quantity, :unit_price, :line_total, :notes)"
+        );
+        foreach ($materializedLines as $line) {
+          $lineId = create_id("line");
+          $stmtInvoiceLine->execute([
+            ":id" => $lineId,
+            ":invoice_id" => $invoiceId,
+            ":sort_order" => (int)$line["sortOrder"],
+            ":description" => (string)$line["productName"],
+            ":quantity" => (int)$line["quantity"],
+            ":unit_price" => (int)$line["unitPrice"],
+            ":line_total" => (int)$line["lineTotal"],
+            ":notes" => $line["notes"] ?? null,
+          ]);
+          $invoiceLinesPublic[] = [
+            "id" => $lineId,
+            "invoiceId" => $invoiceId,
+            "sortOrder" => (int)$line["sortOrder"],
+            "description" => (string)$line["productName"],
+            "quantity" => (int)$line["quantity"],
+            "unitPrice" => (int)$line["unitPrice"],
+            "lineTotal" => (int)$line["lineTotal"],
+            "notes" => $line["notes"] ?? null,
+          ];
+        }
+
+        $invoicePublic = [
+          "id" => $invoiceId,
+          "invoiceNumber" => $invoiceNumber,
+          "shopId" => $shopId,
+          "shopCode" => (string)($shopRow["code"] ?? ""),
+          "shopName" => (string)($shopRow["name"] ?? ""),
+          "sequenceNumber" => $seq,
+          "customerId" => $customerId,
+          "customerMobileNumber" => $customerRow ? (string)($customerRow["mobile"] ?? "") : null,
+          "customerFirstName" => $customerRow ? (string)($customerRow["first_name"] ?? "") : null,
+          "customerLastName" => $customerRow ? (string)($customerRow["last_name"] ?? "") : null,
+          "customerEmail" => $customerRow ? ($customerRow["email"] ?? null) : null,
+          "status" => "ISSUED",
+          "issuedAt" => $issuedAt,
+          "dueDate" => null,
+          "totalAmount" => $totalAmount,
+          "paidAmount" => 0,
+          "balance" => $totalAmount,
+          "notes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+        ];
+
+        phase1_audit_log($pdo, $actorUserId !== "" ? $actorUserId : null, "CREATE", "invoice", $invoiceId, null, [
+          "invoice" => $invoicePublic,
+          "lines" => $invoiceLinesPublic,
+        ]);
+      }
+
+      $stmtSale = $pdo->prepare(
+        "INSERT INTO sales (id, shop_id, user_id, customer_id, invoice_id, sale_date, payment_method, total_amount, notes) " .
+        "VALUES (:id, :shop_id, :user_id, :customer_id, :invoice_id, :sale_date, :payment_method, :total_amount, :notes)"
+      );
+      $stmtSale->execute([
+        ":id" => $saleId,
+        ":shop_id" => $shopId,
+        ":user_id" => $actorUserId,
+        ":customer_id" => $customerId !== "" ? $customerId : null,
+        ":invoice_id" => $invoiceId,
+        ":sale_date" => $saleDate,
+        ":payment_method" => $paymentMethod,
+        ":total_amount" => $totalAmount,
+        ":notes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+      ]);
+
+      $stmtSaleLine = $pdo->prepare(
+        "INSERT INTO sale_lines (id, sale_id, sort_order, product_id, sku_code, product_name, quantity, unit_price, line_total, notes) " .
+        "VALUES (:id, :sale_id, :sort_order, :product_id, :sku_code, :product_name, :quantity, :unit_price, :line_total, :notes)"
+      );
+      $saleLinesPublic = [];
+      foreach ($materializedLines as $line) {
+        $saleLineId = create_id("sline");
+        $stmtSaleLine->execute([
+          ":id" => $saleLineId,
+          ":sale_id" => $saleId,
+          ":sort_order" => (int)$line["sortOrder"],
+          ":product_id" => (string)$line["productId"],
+          ":sku_code" => (string)$line["skuCode"],
+          ":product_name" => (string)$line["productName"],
+          ":quantity" => (int)$line["quantity"],
+          ":unit_price" => (int)$line["unitPrice"],
+          ":line_total" => (int)$line["lineTotal"],
+          ":notes" => $line["notes"] ?? null,
+        ]);
+        $saleLinesPublic[] = [
+          "id" => $saleLineId,
+          "saleId" => $saleId,
+          "sortOrder" => (int)$line["sortOrder"],
+          "productId" => (string)$line["productId"],
+          "skuCode" => (string)$line["skuCode"],
+          "productName" => (string)$line["productName"],
+          "quantity" => (int)$line["quantity"],
+          "unitPrice" => (int)$line["unitPrice"],
+          "lineTotal" => (int)$line["lineTotal"],
+          "notes" => $line["notes"] ?? null,
+        ];
+      }
+
+      $saleAudit = [
+        "id" => $saleId,
+        "shopId" => $shopId,
+        "userId" => $actorUserId,
+        "customerId" => $customerId !== "" ? $customerId : null,
+        "invoiceId" => $invoiceId,
+        "invoiceNumber" => $invoiceNumber,
+        "saleDate" => $saleDate,
+        "paymentMethod" => $paymentMethod,
+        "totalAmount" => $totalAmount,
+        "notes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+      ];
+
+      phase1_audit_log($pdo, $actorUserId !== "" ? $actorUserId : null, "CREATE", "sale", $saleId, null, [
+        "sale" => $saleAudit,
+        "lines" => $saleLinesPublic,
+      ]);
+
+      $pdo->commit();
+
+      $createdSaleRow = phase1_db_fetch_one(
+        $pdo,
+        "SELECT sa.id, sa.shop_id, sh.code AS shop_code, sh.name AS shop_name, sa.user_id, u.full_name AS user_full_name, " .
+          "sa.customer_id, c.mobile AS customer_mobile, c.first_name AS customer_first_name, c.last_name AS customer_last_name, " .
+          "sa.invoice_id, i.invoice_number, sa.sale_date, sa.payment_method, sa.total_amount, sa.notes, sa.is_void, " .
+          "sa.voided_at, sa.voided_by_user_id, sa.created_at, sa.updated_at " .
+        "FROM sales sa " .
+        "JOIN shops sh ON sh.id = sa.shop_id " .
+        "JOIN users u ON u.id = sa.user_id " .
+        "LEFT JOIN customers c ON c.id = sa.customer_id " .
+        "LEFT JOIN invoices i ON i.id = sa.invoice_id " .
+        "WHERE sa.id = :id LIMIT 1",
+        [":id" => $saleId]
+      );
+      if (!$createdSaleRow) {
+        json_response(201, ["data" => ["sale" => $saleAudit, "lines" => $saleLinesPublic]]);
+      }
+
+      $outSale = [
+        "id" => (string)$createdSaleRow["id"],
+        "shopId" => (string)$createdSaleRow["shop_id"],
+        "shopCode" => (string)$createdSaleRow["shop_code"],
+        "shopName" => (string)$createdSaleRow["shop_name"],
+        "userId" => (string)$createdSaleRow["user_id"],
+        "userFullName" => (string)$createdSaleRow["user_full_name"],
+        "customerId" => $createdSaleRow["customer_id"] === null ? null : (string)$createdSaleRow["customer_id"],
+        "customerMobileNumber" => $createdSaleRow["customer_mobile"] ?? null,
+        "customerFirstName" => $createdSaleRow["customer_first_name"] ?? null,
+        "customerLastName" => $createdSaleRow["customer_last_name"] ?? null,
+        "invoiceId" => $createdSaleRow["invoice_id"] === null ? null : (string)$createdSaleRow["invoice_id"],
+        "invoiceNumber" => $createdSaleRow["invoice_number"] ?? null,
+        "saleDate" => (string)$createdSaleRow["sale_date"],
+        "paymentMethod" => (string)$createdSaleRow["payment_method"],
+        "totalAmount" => (int)$createdSaleRow["total_amount"],
+        "notes" => $createdSaleRow["notes"] ?? null,
+        "isVoid" => (int)($createdSaleRow["is_void"] ?? 0) === 1,
+        "voidedAt" => $createdSaleRow["voided_at"] ?? null,
+        "voidedByUserId" => $createdSaleRow["voided_by_user_id"] ?? null,
+        "createdAt" => (string)$createdSaleRow["created_at"],
+        "updatedAt" => (string)$createdSaleRow["updated_at"],
+      ];
+
+      $createdLines = phase1_db_fetch_all(
+        $pdo,
+        "SELECT id, sale_id, sort_order, product_id, sku_code, product_name, quantity, unit_price, line_total, notes, created_at, updated_at " .
+        "FROM sale_lines WHERE sale_id = :sale_id ORDER BY sort_order ASC, created_at ASC",
+        [":sale_id" => $saleId]
+      );
+      $outLines = array_map(function ($line) {
+        return [
+          "id" => (string)($line["id"] ?? ""),
+          "saleId" => (string)($line["sale_id"] ?? ""),
+          "sortOrder" => (int)($line["sort_order"] ?? 0),
+          "productId" => (string)($line["product_id"] ?? ""),
+          "skuCode" => (string)($line["sku_code"] ?? ""),
+          "productName" => (string)($line["product_name"] ?? ""),
+          "quantity" => (int)($line["quantity"] ?? 0),
+          "unitPrice" => (int)($line["unit_price"] ?? 0),
+          "lineTotal" => (int)($line["line_total"] ?? 0),
+          "notes" => $line["notes"] ?? null,
+          "createdAt" => (string)($line["created_at"] ?? ""),
+          "updatedAt" => (string)($line["updated_at"] ?? ""),
+        ];
+      }, $createdLines);
+
+      json_response(201, ["data" => ["sale" => $outSale, "lines" => $outLines]]);
+    } catch (Throwable $error) {
+      if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+      }
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to create sale"]);
+    }
+  }
+
+  if ($method === "PATCH" && preg_match('/^sales\\/([^\\/]+)$/', $route, $matches) === 1) {
+    phase1_require_role($roleName, ["ADMIN", "SALES"]);
+    $saleId = (string)$matches[1];
+    $body = read_json_body();
+
+    $notes = array_key_exists("notes", $body) ? $body["notes"] : null;
+    $linesPayload = array_key_exists("lines", $body) ? $body["lines"] : null;
+
+    if ($notes !== null && !is_string($notes)) {
+      json_response(400, ["error" => "ValidationError", "message" => "notes must be a string or null"]);
+    }
+    if ($linesPayload !== null && (!is_array($linesPayload) || count($linesPayload) < 1)) {
+      json_response(400, ["error" => "ValidationError", "message" => "lines must be a non-empty array when provided"]);
+    }
+    if ($notes === null && $linesPayload === null) {
+      json_response(400, ["error" => "ValidationError", "message" => "No fields to update"]);
+    }
+
+    $actorUserId = (string)($authUser["id"] ?? "");
+    $today = phase1_business_today_ymd();
+
+    try {
+      $pdo->beginTransaction();
+
+      $existing = phase1_db_fetch_one(
+        $pdo,
+        "SELECT id, shop_id, user_id, invoice_id, payment_method, sale_date, total_amount, notes, is_void, created_at, updated_at " .
+        "FROM sales WHERE id = :id FOR UPDATE",
+        [":id" => $saleId]
+      );
+      if (!$existing) {
+        $pdo->rollBack();
+        json_response(404, ["error" => "HttpError", "message" => "Sale not found"]);
+      }
+
+      $shopId = (string)($existing["shop_id"] ?? "");
+      phase1_require_shop_access($roleName, $assignments, $shopId);
+
+      if ((int)($existing["is_void"] ?? 0) === 1) {
+        $pdo->rollBack();
+        json_response(400, ["error" => "BadRequest", "message" => "Sale is void"]);
+      }
+
+      if ($roleName === "SALES") {
+        if ((string)($existing["user_id"] ?? "") !== $actorUserId) {
+          $pdo->rollBack();
+          json_response(403, ["error" => "HttpError", "message" => "Forbidden"]);
+        }
+        if ((string)($existing["sale_date"] ?? "") !== $today) {
+          $pdo->rollBack();
+          json_response(400, ["error" => "BadRequest", "message" => "Sales can only edit same-day sales"]);
+        }
+        if (phase1_is_shop_date_locked($pdo, $shopId, $today)) {
+          $pdo->rollBack();
+          json_response(400, ["error" => "BadRequest", "message" => "This day is reconciled (locked)"]);
+        }
+      }
+
+      $paymentMethod = (string)($existing["payment_method"] ?? "");
+      $invoiceId = $existing["invoice_id"] === null ? "" : (string)$existing["invoice_id"];
+      if ($linesPayload !== null && ($paymentMethod === "CREDIT" || $invoiceId !== "")) {
+        $pdo->rollBack();
+        json_response(400, ["error" => "BadRequest", "message" => "Credit sales cannot edit line items (manage via invoices)"]);
+      }
+
+      $beforeLinesRows = phase1_db_fetch_all(
+        $pdo,
+        "SELECT id, sale_id, sort_order, product_id, sku_code, product_name, quantity, unit_price, line_total, notes, created_at, updated_at " .
+        "FROM sale_lines WHERE sale_id = :sale_id ORDER BY sort_order ASC, created_at ASC",
+        [":sale_id" => $saleId]
+      );
+      $beforeLines = array_map(function ($line) {
+        return [
+          "id" => (string)($line["id"] ?? ""),
+          "saleId" => (string)($line["sale_id"] ?? ""),
+          "sortOrder" => (int)($line["sort_order"] ?? 0),
+          "productId" => (string)($line["product_id"] ?? ""),
+          "skuCode" => (string)($line["sku_code"] ?? ""),
+          "productName" => (string)($line["product_name"] ?? ""),
+          "quantity" => (int)($line["quantity"] ?? 0),
+          "unitPrice" => (int)($line["unit_price"] ?? 0),
+          "lineTotal" => (int)($line["line_total"] ?? 0),
+          "notes" => $line["notes"] ?? null,
+          "createdAt" => (string)($line["created_at"] ?? ""),
+          "updatedAt" => (string)($line["updated_at"] ?? ""),
+        ];
+      }, $beforeLinesRows);
+
+      $beforeSale = [
+        "id" => (string)$existing["id"],
+        "shopId" => (string)$existing["shop_id"],
+        "userId" => (string)$existing["user_id"],
+        "invoiceId" => $existing["invoice_id"] === null ? null : (string)$existing["invoice_id"],
+        "saleDate" => (string)$existing["sale_date"],
+        "paymentMethod" => (string)$existing["payment_method"],
+        "totalAmount" => (int)$existing["total_amount"],
+        "notes" => $existing["notes"] ?? null,
+        "isVoid" => (int)($existing["is_void"] ?? 0) === 1,
+        "createdAt" => (string)$existing["created_at"],
+        "updatedAt" => (string)$existing["updated_at"],
+      ];
+
+      $newTotalAmount = (int)$existing["total_amount"];
+      $newNotesValue = $notes !== null ? (is_string($notes) && trim($notes) !== "" ? trim($notes) : null) : ($existing["notes"] ?? null);
+
+      if ($linesPayload !== null) {
+        $materializedLines = [];
+        $newTotalAmount = 0;
+        foreach ($linesPayload as $idx => $rawLine) {
+          if (!is_array($rawLine)) {
+            $pdo->rollBack();
+            json_response(400, ["error" => "ValidationError", "message" => "Each line must be an object"]);
+          }
+          $productId = isset($rawLine["productId"]) && is_string($rawLine["productId"]) ? trim($rawLine["productId"]) : "";
+          $quantity = isset($rawLine["quantity"]) ? (int)$rawLine["quantity"] : 0;
+          $unitPrice = isset($rawLine["unitPrice"]) ? (int)$rawLine["unitPrice"] : 0;
+          $lineNotes = array_key_exists("notes", $rawLine) ? $rawLine["notes"] : null;
+
+          if ($productId === "" || $quantity < 1 || $unitPrice < 0) {
+            $pdo->rollBack();
+            json_response(400, ["error" => "ValidationError", "message" => "Line requires productId, quantity (>=1), unitPrice (>=0)"]);
+          }
+          if ($lineNotes !== null && !is_string($lineNotes)) {
+            $pdo->rollBack();
+            json_response(400, ["error" => "ValidationError", "message" => "Line notes must be a string or null"]);
+          }
+
+          $productRow = phase1_db_fetch_one(
+            $pdo,
+            "SELECT id, sku_code, name, is_active FROM products WHERE id = :id LIMIT 1",
+            [":id" => $productId]
+          );
+          if (!$productRow) {
+            $pdo->rollBack();
+            json_response(400, ["error" => "ValidationError", "message" => "Invalid productId"]);
+          }
+          if ((int)($productRow["is_active"] ?? 0) !== 1) {
+            $pdo->rollBack();
+            json_response(400, ["error" => "ValidationError", "message" => "Product is inactive"]);
+          }
+
+          $lineTotal = $quantity * $unitPrice;
+          if ($lineTotal < 0 || $lineTotal > 2000000000) {
+            $pdo->rollBack();
+            json_response(400, ["error" => "ValidationError", "message" => "Line total is too large"]);
+          }
+          $newTotalAmount += $lineTotal;
+          if ($newTotalAmount > 2000000000) {
+            $pdo->rollBack();
+            json_response(400, ["error" => "ValidationError", "message" => "Sale total is too large"]);
+          }
+
+          $materializedLines[] = [
+            "sortOrder" => (int)$idx + 1,
+            "productId" => (string)$productRow["id"],
+            "skuCode" => (string)$productRow["sku_code"],
+            "productName" => (string)$productRow["name"],
+            "quantity" => $quantity,
+            "unitPrice" => $unitPrice,
+            "lineTotal" => $lineTotal,
+            "notes" => is_string($lineNotes) && trim($lineNotes) !== "" ? trim($lineNotes) : null,
+          ];
+        }
+
+        if ($newTotalAmount <= 0) {
+          $pdo->rollBack();
+          json_response(400, ["error" => "ValidationError", "message" => "Sale total must be > 0"]);
+        }
+
+        phase1_db_execute($pdo, "DELETE FROM sale_lines WHERE sale_id = :sale_id", [":sale_id" => $saleId]);
+
+        $stmtSaleLine = $pdo->prepare(
+          "INSERT INTO sale_lines (id, sale_id, sort_order, product_id, sku_code, product_name, quantity, unit_price, line_total, notes) " .
+          "VALUES (:id, :sale_id, :sort_order, :product_id, :sku_code, :product_name, :quantity, :unit_price, :line_total, :notes)"
+        );
+        foreach ($materializedLines as $line) {
+          $saleLineId = create_id("sline");
+          $stmtSaleLine->execute([
+            ":id" => $saleLineId,
+            ":sale_id" => $saleId,
+            ":sort_order" => (int)$line["sortOrder"],
+            ":product_id" => (string)$line["productId"],
+            ":sku_code" => (string)$line["skuCode"],
+            ":product_name" => (string)$line["productName"],
+            ":quantity" => (int)$line["quantity"],
+            ":unit_price" => (int)$line["unitPrice"],
+            ":line_total" => (int)$line["lineTotal"],
+            ":notes" => $line["notes"] ?? null,
+          ]);
+        }
+      }
+
+      phase1_db_execute(
+        $pdo,
+        "UPDATE sales SET total_amount = :total_amount, notes = :notes, updated_at = NOW() WHERE id = :id",
+        [":total_amount" => $newTotalAmount, ":notes" => $newNotesValue, ":id" => $saleId]
+      );
+
+      $updatedRow = phase1_db_fetch_one(
+        $pdo,
+        "SELECT sa.id, sa.shop_id, sh.code AS shop_code, sh.name AS shop_name, sa.user_id, u.full_name AS user_full_name, " .
+          "sa.customer_id, c.mobile AS customer_mobile, c.first_name AS customer_first_name, c.last_name AS customer_last_name, " .
+          "sa.invoice_id, i.invoice_number, sa.sale_date, sa.payment_method, sa.total_amount, sa.notes, sa.is_void, " .
+          "sa.voided_at, sa.voided_by_user_id, sa.created_at, sa.updated_at " .
+        "FROM sales sa " .
+        "JOIN shops sh ON sh.id = sa.shop_id " .
+        "JOIN users u ON u.id = sa.user_id " .
+        "LEFT JOIN customers c ON c.id = sa.customer_id " .
+        "LEFT JOIN invoices i ON i.id = sa.invoice_id " .
+        "WHERE sa.id = :id LIMIT 1",
+        [":id" => $saleId]
+      );
+
+      $updatedLinesRows = phase1_db_fetch_all(
+        $pdo,
+        "SELECT id, sale_id, sort_order, product_id, sku_code, product_name, quantity, unit_price, line_total, notes, created_at, updated_at " .
+        "FROM sale_lines WHERE sale_id = :sale_id ORDER BY sort_order ASC, created_at ASC",
+        [":sale_id" => $saleId]
+      );
+
+      $afterLines = array_map(function ($line) {
+        return [
+          "id" => (string)($line["id"] ?? ""),
+          "saleId" => (string)($line["sale_id"] ?? ""),
+          "sortOrder" => (int)($line["sort_order"] ?? 0),
+          "productId" => (string)($line["product_id"] ?? ""),
+          "skuCode" => (string)($line["sku_code"] ?? ""),
+          "productName" => (string)($line["product_name"] ?? ""),
+          "quantity" => (int)($line["quantity"] ?? 0),
+          "unitPrice" => (int)($line["unit_price"] ?? 0),
+          "lineTotal" => (int)($line["line_total"] ?? 0),
+          "notes" => $line["notes"] ?? null,
+          "createdAt" => (string)($line["created_at"] ?? ""),
+          "updatedAt" => (string)($line["updated_at"] ?? ""),
+        ];
+      }, $updatedLinesRows);
+
+      $afterSale = $updatedRow ? [
+        "id" => (string)$updatedRow["id"],
+        "shopId" => (string)$updatedRow["shop_id"],
+        "shopCode" => (string)$updatedRow["shop_code"],
+        "shopName" => (string)$updatedRow["shop_name"],
+        "userId" => (string)$updatedRow["user_id"],
+        "userFullName" => (string)$updatedRow["user_full_name"],
+        "customerId" => $updatedRow["customer_id"] === null ? null : (string)$updatedRow["customer_id"],
+        "customerMobileNumber" => $updatedRow["customer_mobile"] ?? null,
+        "customerFirstName" => $updatedRow["customer_first_name"] ?? null,
+        "customerLastName" => $updatedRow["customer_last_name"] ?? null,
+        "invoiceId" => $updatedRow["invoice_id"] === null ? null : (string)$updatedRow["invoice_id"],
+        "invoiceNumber" => $updatedRow["invoice_number"] ?? null,
+        "saleDate" => (string)$updatedRow["sale_date"],
+        "paymentMethod" => (string)$updatedRow["payment_method"],
+        "totalAmount" => (int)$updatedRow["total_amount"],
+        "notes" => $updatedRow["notes"] ?? null,
+        "isVoid" => (int)($updatedRow["is_void"] ?? 0) === 1,
+        "voidedAt" => $updatedRow["voided_at"] ?? null,
+        "voidedByUserId" => $updatedRow["voided_by_user_id"] ?? null,
+        "createdAt" => (string)$updatedRow["created_at"],
+        "updatedAt" => (string)$updatedRow["updated_at"],
+      ] : $beforeSale;
+
+      phase1_audit_log($pdo, $actorUserId !== "" ? $actorUserId : null, "UPDATE", "sale", $saleId, [
+        "sale" => $beforeSale,
+        "lines" => $beforeLines,
+      ], [
+        "sale" => $afterSale,
+        "lines" => $afterLines,
+      ]);
+
+      $pdo->commit();
+
+      json_response(200, ["data" => ["sale" => $afterSale, "lines" => $afterLines]]);
+    } catch (Throwable $error) {
+      if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+      }
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to update sale"]);
+    }
+  }
+
+  if ($method === "DELETE" && preg_match('/^sales\\/([^\\/]+)$/', $route, $matches) === 1) {
+    phase1_require_role($roleName, ["ADMIN", "SALES"]);
+    $saleId = (string)$matches[1];
+
+    $actorUserId = (string)($authUser["id"] ?? "");
+    $today = phase1_business_today_ymd();
+
+    try {
+      $pdo->beginTransaction();
+
+      $existing = phase1_db_fetch_one(
+        $pdo,
+        "SELECT id, shop_id, user_id, invoice_id, payment_method, sale_date, total_amount, notes, is_void, created_at, updated_at " .
+        "FROM sales WHERE id = :id FOR UPDATE",
+        [":id" => $saleId]
+      );
+      if (!$existing) {
+        $pdo->rollBack();
+        json_response(404, ["error" => "HttpError", "message" => "Sale not found"]);
+      }
+
+      $shopId = (string)($existing["shop_id"] ?? "");
+      phase1_require_shop_access($roleName, $assignments, $shopId);
+
+      if ((int)($existing["is_void"] ?? 0) === 1) {
+        $pdo->rollBack();
+        json_response(400, ["error" => "BadRequest", "message" => "Sale is already void"]);
+      }
+
+      $paymentMethod = (string)($existing["payment_method"] ?? "");
+      $invoiceId = $existing["invoice_id"] === null ? "" : (string)$existing["invoice_id"];
+
+      if ($roleName === "SALES") {
+        if ((string)($existing["user_id"] ?? "") !== $actorUserId) {
+          $pdo->rollBack();
+          json_response(403, ["error" => "HttpError", "message" => "Forbidden"]);
+        }
+        if ((string)($existing["sale_date"] ?? "") !== $today) {
+          $pdo->rollBack();
+          json_response(400, ["error" => "BadRequest", "message" => "Sales can only void same-day sales"]);
+        }
+        if (phase1_is_shop_date_locked($pdo, $shopId, $today)) {
+          $pdo->rollBack();
+          json_response(400, ["error" => "BadRequest", "message" => "This day is reconciled (locked)"]);
+        }
+        if ($paymentMethod === "CREDIT" || $invoiceId !== "") {
+          $pdo->rollBack();
+          json_response(403, ["error" => "HttpError", "message" => "Credit sales can only be voided by admin (invoice void required)"]);
+        }
+      }
+
+      $beforeLinesRows = phase1_db_fetch_all(
+        $pdo,
+        "SELECT id, sale_id, sort_order, product_id, sku_code, product_name, quantity, unit_price, line_total, notes, created_at, updated_at " .
+        "FROM sale_lines WHERE sale_id = :sale_id ORDER BY sort_order ASC, created_at ASC",
+        [":sale_id" => $saleId]
+      );
+      $beforeLines = array_map(function ($line) {
+        return [
+          "id" => (string)($line["id"] ?? ""),
+          "saleId" => (string)($line["sale_id"] ?? ""),
+          "sortOrder" => (int)($line["sort_order"] ?? 0),
+          "productId" => (string)($line["product_id"] ?? ""),
+          "skuCode" => (string)($line["sku_code"] ?? ""),
+          "productName" => (string)($line["product_name"] ?? ""),
+          "quantity" => (int)($line["quantity"] ?? 0),
+          "unitPrice" => (int)($line["unit_price"] ?? 0),
+          "lineTotal" => (int)($line["line_total"] ?? 0),
+          "notes" => $line["notes"] ?? null,
+          "createdAt" => (string)($line["created_at"] ?? ""),
+          "updatedAt" => (string)($line["updated_at"] ?? ""),
+        ];
+      }, $beforeLinesRows);
+
+      $beforeSale = [
+        "id" => (string)$existing["id"],
+        "shopId" => (string)$existing["shop_id"],
+        "userId" => (string)$existing["user_id"],
+        "invoiceId" => $existing["invoice_id"] === null ? null : (string)$existing["invoice_id"],
+        "saleDate" => (string)$existing["sale_date"],
+        "paymentMethod" => (string)$existing["payment_method"],
+        "totalAmount" => (int)$existing["total_amount"],
+        "notes" => $existing["notes"] ?? null,
+        "isVoid" => (int)($existing["is_void"] ?? 0) === 1,
+        "createdAt" => (string)$existing["created_at"],
+        "updatedAt" => (string)$existing["updated_at"],
+      ];
+
+      phase1_db_execute(
+        $pdo,
+        "UPDATE sales SET is_void = 1, voided_at = NOW(), voided_by_user_id = :actor, updated_at = NOW() WHERE id = :id",
+        [":actor" => $actorUserId !== "" ? $actorUserId : null, ":id" => $saleId]
+      );
+
+      if ($roleName === "ADMIN" && $invoiceId !== "") {
+        phase1_db_execute(
+          $pdo,
+          "UPDATE invoices SET status = 'VOID', voided_at = NOW(), voided_by_user_id = :actor, updated_at = NOW() WHERE id = :id",
+          [":actor" => $actorUserId !== "" ? $actorUserId : null, ":id" => $invoiceId]
+        );
+
+        $invoiceRow = phase1_db_fetch_one(
+          $pdo,
+          "SELECT id, shop_id, status, issued_at, due_date, total_amount, paid_amount, balance, notes, created_at, updated_at FROM invoices WHERE id = :id LIMIT 1",
+          [":id" => $invoiceId]
+        );
+        if ($invoiceRow) {
+          phase1_audit_log($pdo, $actorUserId !== "" ? $actorUserId : null, "UPDATE", "invoice", (string)$invoiceRow["id"], null, [
+            "id" => (string)$invoiceRow["id"],
+            "status" => (string)$invoiceRow["status"],
+            "issuedAt" => $invoiceRow["issued_at"] ?? null,
+            "totalAmount" => (int)$invoiceRow["total_amount"],
+            "paidAmount" => (int)$invoiceRow["paid_amount"],
+            "balance" => (int)$invoiceRow["balance"],
+          ]);
+        }
+      }
+
+      $updatedRow = phase1_db_fetch_one(
+        $pdo,
+        "SELECT id, shop_id, user_id, invoice_id, payment_method, sale_date, total_amount, notes, is_void, voided_at, voided_by_user_id, created_at, updated_at " .
+        "FROM sales WHERE id = :id LIMIT 1",
+        [":id" => $saleId]
+      );
+
+      $afterSale = $updatedRow ? [
+        "id" => (string)$updatedRow["id"],
+        "shopId" => (string)$updatedRow["shop_id"],
+        "userId" => (string)$updatedRow["user_id"],
+        "invoiceId" => $updatedRow["invoice_id"] === null ? null : (string)$updatedRow["invoice_id"],
+        "saleDate" => (string)$updatedRow["sale_date"],
+        "paymentMethod" => (string)$updatedRow["payment_method"],
+        "totalAmount" => (int)$updatedRow["total_amount"],
+        "notes" => $updatedRow["notes"] ?? null,
+        "isVoid" => (int)($updatedRow["is_void"] ?? 0) === 1,
+        "voidedAt" => $updatedRow["voided_at"] ?? null,
+        "voidedByUserId" => $updatedRow["voided_by_user_id"] ?? null,
+        "createdAt" => (string)$updatedRow["created_at"],
+        "updatedAt" => (string)$updatedRow["updated_at"],
+      ] : $beforeSale;
+
+      phase1_audit_log($pdo, $actorUserId !== "" ? $actorUserId : null, "UPDATE", "sale", $saleId, [
+        "sale" => $beforeSale,
+        "lines" => $beforeLines,
+      ], [
+        "sale" => $afterSale,
+        "lines" => $beforeLines,
+      ]);
+
+      $pdo->commit();
+      json_response(200, ["data" => ["sale" => $afterSale]]);
+    } catch (Throwable $error) {
+      if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+      }
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to void sale"]);
     }
   }
 

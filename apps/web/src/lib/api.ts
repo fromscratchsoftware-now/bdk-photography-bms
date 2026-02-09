@@ -25,6 +25,20 @@ function addCacheBust(url: string): string {
   return `${url}${separator}_ts=${Date.now()}`;
 }
 
+function withQuery(path: string, query?: Record<string, string | null | undefined>): string {
+  if (!query) {
+    return path;
+  }
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (typeof value === "string" && value.trim() !== "") {
+      params.set(key, value);
+    }
+  }
+  const qs = params.toString();
+  return qs ? `${path}?${qs}` : path;
+}
+
 async function request<T>(path: string, init?: RequestInit, token?: string): Promise<T> {
   const method = (init?.method ?? "GET").toUpperCase();
   const url = method === "GET" ? addCacheBust(buildUrl(path)) : buildUrl(path);
@@ -184,6 +198,65 @@ export interface InvoicePayment {
   notes?: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ReconciliationLock {
+  id: string;
+  shopId: string;
+  shopCode: string;
+  shopName: string;
+  lockDate: string;
+  lockedByUserId?: string | null;
+  lockedByFullName?: string | null;
+  notes?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type SalePaymentMethod = "CASH" | "MOBILE_MONEY" | "CARD" | "CREDIT";
+
+export interface Sale {
+  id: string;
+  shopId: string;
+  shopCode: string;
+  shopName: string;
+  userId: string;
+  userFullName: string;
+  customerId?: string | null;
+  customerMobileNumber?: string | null;
+  customerFirstName?: string | null;
+  customerLastName?: string | null;
+  invoiceId?: string | null;
+  invoiceNumber?: string | null;
+  saleDate: string;
+  paymentMethod: SalePaymentMethod;
+  totalAmount: number;
+  notes?: string | null;
+  isVoid: boolean;
+  voidedAt?: string | null;
+  voidedByUserId?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SaleLine {
+  id: string;
+  saleId: string;
+  sortOrder: number;
+  productId: string;
+  skuCode: string;
+  productName: string;
+  quantity: number;
+  unitPrice: number;
+  lineTotal: number;
+  notes?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SaleDetail {
+  sale: Sale;
+  lines: SaleLine[];
 }
 
 export function login(payload: { mobileNumber: string; password: string }): Promise<AuthResponse> {
@@ -447,6 +520,121 @@ export function createInvoicePayment(
     {
       method: "POST",
       body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function listReconciliationLocks(
+  token: string,
+  params?: {
+    shopId?: string;
+    lockDate?: string;
+  }
+): Promise<ReconciliationLock[]> {
+  return request<ReconciliationLock[]>(
+    withQuery("api/reconciliation-locks", {
+      shopId: params?.shopId,
+      lockDate: params?.lockDate
+    }),
+    undefined,
+    token
+  );
+}
+
+export function createReconciliationLock(
+  token: string,
+  payload: {
+    shopId: string;
+    lockDate: string;
+    notes?: string | null;
+  }
+): Promise<ReconciliationLock> {
+  return request<ReconciliationLock>(
+    "api/reconciliation-locks",
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function listSales(
+  token: string,
+  params?: {
+    shopId?: string;
+    saleDate?: string;
+  }
+): Promise<Sale[]> {
+  return request<Sale[]>(
+    withQuery("api/sales", {
+      shopId: params?.shopId,
+      saleDate: params?.saleDate
+    }),
+    undefined,
+    token
+  );
+}
+
+export function getSale(token: string, saleId: string): Promise<SaleDetail> {
+  return request<SaleDetail>(`api/sales/${saleId}`, undefined, token);
+}
+
+export function createSale(
+  token: string,
+  payload: {
+    shopId?: string;
+    saleDate?: string;
+    paymentMethod: SalePaymentMethod;
+    customerId?: string;
+    notes?: string | null;
+    lines: Array<{
+      productId: string;
+      quantity: number;
+      unitPrice: number;
+      notes?: string | null;
+    }>;
+  }
+): Promise<SaleDetail> {
+  return request<SaleDetail>(
+    "api/sales",
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function updateSale(
+  token: string,
+  saleId: string,
+  payload: Partial<{
+    notes: string | null;
+    lines: Array<{
+      productId: string;
+      quantity: number;
+      unitPrice: number;
+      notes?: string | null;
+    }>;
+  }>
+): Promise<SaleDetail> {
+  return request<SaleDetail>(
+    `api/sales/${saleId}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function voidSale(token: string, saleId: string): Promise<{ sale: Sale }> {
+  return request<{ sale: Sale }>(
+    `api/sales/${saleId}`,
+    {
+      method: "DELETE"
     },
     token
   );

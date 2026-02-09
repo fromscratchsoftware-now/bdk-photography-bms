@@ -4,24 +4,31 @@ import {
   createExpenseCategory,
   createInvoice,
   createInvoicePayment,
+  createReconciliationLock,
+  createSale,
   createProduct,
   createProductCategory,
+  getSale,
   getInvoice,
   getMe,
   listCustomers,
   listExpenseCategories,
   listInvoicePayments,
   listInvoices,
+  listReconciliationLocks,
+  listSales,
   listProductCategories,
   listProducts,
   listShops,
   listUsers,
   login,
+  updateSale,
   updateCustomer,
   updateInvoice,
   updateExpenseCategory,
   updateProduct,
   updateProductCategory,
+  voidSale,
   type AuthUser,
   type Customer,
   type ExpenseCategory,
@@ -30,6 +37,10 @@ import {
   type InvoicePayment,
   type Product,
   type ProductCategory,
+  type ReconciliationLock,
+  type Sale,
+  type SaleDetail,
+  type SalePaymentMethod,
   type Shop
 } from "./lib/api";
 
@@ -38,7 +49,7 @@ type AuthState = {
   user: AuthUser;
 };
 
-type ActiveView = "overview" | "customers" | "invoices" | "master-data";
+type ActiveView = "overview" | "customers" | "invoices" | "sales" | "master-data";
 type MasterSection = "expense-categories" | "product-categories" | "products";
 
 const AUTH_STORAGE_KEY = "bdk.auth.phase1.v1";
@@ -83,6 +94,14 @@ function writeStoredAuth(auth: AuthState | null): void {
     return;
   }
   window.localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(auth));
+}
+
+function todayLocalYmd(): string {
+  const date = new Date();
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
 }
 
 export default function App(): JSX.Element {
@@ -141,6 +160,39 @@ export default function App(): JSX.Element {
     method: "CASH",
     notes: ""
   });
+
+  const [sales, setSales] = useState<Sale[]>([]);
+  const [salesBusy, setSalesBusy] = useState(false);
+  const [selectedSale, setSelectedSale] = useState<SaleDetail | null>(null);
+  const [salesFilters, setSalesFilters] = useState<{ shopId: string; saleDate: string }>({
+    shopId: "",
+    saleDate: todayLocalYmd()
+  });
+  const [salesDayLock, setSalesDayLock] = useState<ReconciliationLock | null>(null);
+  const [salesLockBusy, setSalesLockBusy] = useState(false);
+  const [saleDraftId, setSaleDraftId] = useState<string | null>(null);
+  const [saleDraftForm, setSaleDraftForm] = useState<{
+    shopId: string;
+    saleDate: string;
+    paymentMethod: SalePaymentMethod;
+    customerId: string;
+    notes: string;
+    lines: Array<{ productId: string; quantity: string; unitPrice: string; notes: string }>;
+  }>({
+    shopId: "",
+    saleDate: todayLocalYmd(),
+    paymentMethod: "CASH",
+    customerId: "",
+    notes: "",
+    lines: [{ productId: "", quantity: "1", unitPrice: "", notes: "" }]
+  });
+  const [reconcileForm, setReconcileForm] = useState<{ shopId: string; lockDate: string; notes: string }>({
+    shopId: "",
+    lockDate: todayLocalYmd(),
+    notes: ""
+  });
+  const [reconcileBusy, setReconcileBusy] = useState(false);
+  const [reconciliationLocks, setReconciliationLocks] = useState<ReconciliationLock[]>([]);
 
   const [masterBusy, setMasterBusy] = useState(false);
   const [editingExpenseCategoryId, setEditingExpenseCategoryId] = useState<string | null>(null);
@@ -210,6 +262,9 @@ export default function App(): JSX.Element {
   const canManageCustomers = authUser?.role === "ADMIN" || authUser?.role === "SALES";
   const canManageInvoices = authUser?.role === "ADMIN" || authUser?.role === "SALES";
   const canVoidInvoices = authUser?.role === "ADMIN";
+  const canViewSales = authUser?.role === "ADMIN" || authUser?.role === "MANAGER" || authUser?.role === "SALES";
+  const canCreateSales = authUser?.role === "ADMIN" || authUser?.role === "SALES";
+  const canReconcile = authUser?.role === "ADMIN";
 
   const shopCodesForUser = useMemo(() => {
     const map = new Map<string, string>();
@@ -235,6 +290,11 @@ export default function App(): JSX.Element {
     setInvoices([]);
     setSelectedInvoice(null);
     setSelectedInvoicePayments([]);
+    setSales([]);
+    setSelectedSale(null);
+    setSalesDayLock(null);
+    setReconciliationLocks([]);
+    setSaleDraftId(null);
     setSuccess(null);
     setError(message ?? null);
   }
@@ -303,6 +363,9 @@ export default function App(): JSX.Element {
         setUsers(userData);
 
         setNewInvoiceForm((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
+        setSalesFilters((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
+        setSaleDraftForm((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
+        setReconcileForm((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
       } catch (caught: unknown) {
         if (!cancelled) {
           setError(caught instanceof Error ? caught.message : "Failed to load data");
@@ -436,6 +499,243 @@ export default function App(): JSX.Element {
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeView, auth?.token]);
+
+  async function refreshSalesData(): Promise<void> {
+    if (!auth) {
+      return;
+    }
+    setSalesBusy(true);
+    setSalesLockBusy(true);
+    setError(null);
+    try {
+      const [productData, customerData, saleData, lockData] = await Promise.all([
+        listProducts(auth.token),
+        listCustomers(auth.token),
+        listSales(auth.token, { shopId: salesFilters.shopId, saleDate: salesFilters.saleDate }),
+        salesFilters.shopId && salesFilters.saleDate
+          ? listReconciliationLocks(auth.token, { shopId: salesFilters.shopId, lockDate: salesFilters.saleDate })
+          : Promise.resolve([])
+      ]);
+      setProducts(productData);
+      setCustomers(customerData);
+      setSales(saleData);
+      setSalesDayLock(lockData[0] ?? null);
+
+      const firstActiveCustomer = customerData.find((c) => c.isActive) ?? customerData[0];
+      if (firstActiveCustomer) {
+        setSaleDraftForm((prev) => (prev.customerId ? prev : { ...prev, customerId: firstActiveCustomer.id }));
+      }
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to load sales");
+    } finally {
+      setSalesBusy(false);
+      setSalesLockBusy(false);
+    }
+  }
+
+  async function refreshReconciliationLocks(): Promise<void> {
+    if (!auth || !canReconcile) {
+      return;
+    }
+    setReconcileBusy(true);
+    setError(null);
+    try {
+      const locks = await listReconciliationLocks(auth.token, { shopId: reconcileForm.shopId });
+      setReconciliationLocks(locks);
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to load reconciliation locks");
+    } finally {
+      setReconcileBusy(false);
+    }
+  }
+
+  async function loadSaleDetail(saleId: string): Promise<void> {
+    if (!auth) {
+      return;
+    }
+    setSalesBusy(true);
+    setError(null);
+    try {
+      const detail = await getSale(auth.token, saleId);
+      setSelectedSale(detail);
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to load sale");
+    } finally {
+      setSalesBusy(false);
+    }
+  }
+
+  function resetSaleDraft(): void {
+    setSaleDraftId(null);
+    setSaleDraftForm((prev) => ({
+      ...prev,
+      paymentMethod: "CASH",
+      customerId: prev.customerId,
+      notes: "",
+      lines: [{ productId: "", quantity: "1", unitPrice: "", notes: "" }]
+    }));
+  }
+
+  async function submitSale(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (!auth) {
+      return;
+    }
+    setError(null);
+    setSuccess(null);
+    setSalesBusy(true);
+
+    const trimmedNotes = saleDraftForm.notes.trim();
+    const payloadLines = saleDraftForm.lines.map((line) => ({
+      productId: line.productId,
+      quantity: Number.parseInt(line.quantity, 10),
+      unitPrice: Number.parseInt(line.unitPrice, 10),
+      notes: line.notes.trim() ? line.notes.trim() : null
+    }));
+
+    try {
+      if (!payloadLines.length) {
+        throw new Error("Add at least one line item.");
+      }
+      for (const line of payloadLines) {
+        if (!line.productId) {
+          throw new Error("Each line must have a product.");
+        }
+        if (!Number.isFinite(line.quantity) || line.quantity < 1) {
+          throw new Error("Each line quantity must be at least 1.");
+        }
+        if (!Number.isFinite(line.unitPrice) || line.unitPrice < 0) {
+          throw new Error("Each line unit price must be 0 or higher.");
+        }
+      }
+      if (saleDraftForm.paymentMethod === "CREDIT" && !saleDraftForm.customerId) {
+        throw new Error("Customer is required for CREDIT sales.");
+      }
+
+      if (saleDraftId) {
+        await updateSale(auth.token, saleDraftId, {
+          notes: trimmedNotes ? trimmedNotes : null,
+          lines: payloadLines.map((l) => ({ ...l, notes: l.notes ?? null }))
+        });
+        setSuccess("Sale updated.");
+      } else {
+        await createSale(auth.token, {
+          ...(authUser?.role === "ADMIN"
+            ? { shopId: saleDraftForm.shopId, saleDate: saleDraftForm.saleDate }
+            : {}),
+          paymentMethod: saleDraftForm.paymentMethod,
+          customerId: saleDraftForm.paymentMethod === "CREDIT" ? saleDraftForm.customerId : undefined,
+          notes: trimmedNotes ? trimmedNotes : null,
+          lines: payloadLines.map((l) => ({ ...l, notes: l.notes ?? null }))
+        });
+        setSuccess("Sale recorded.");
+      }
+
+      resetSaleDraft();
+      setSelectedSale(null);
+      await Promise.all([refreshSalesData(), refreshReconciliationLocks()]);
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to save sale");
+    } finally {
+      setSalesBusy(false);
+    }
+  }
+
+  async function startEditSale(detail: SaleDetail): Promise<void> {
+    const sale = detail.sale;
+    if (sale.paymentMethod === "CREDIT") {
+      setError("Credit sales line items cannot be edited (manage via invoices).");
+      return;
+    }
+    setSaleDraftId(sale.id);
+    setSaleDraftForm((prev) => ({
+      ...prev,
+      shopId: sale.shopId,
+      saleDate: sale.saleDate,
+      paymentMethod: sale.paymentMethod,
+      customerId: sale.customerId ?? prev.customerId,
+      notes: sale.notes ?? "",
+      lines: detail.lines.map((l) => ({
+        productId: l.productId,
+        quantity: String(l.quantity),
+        unitPrice: String(l.unitPrice),
+        notes: l.notes ?? ""
+      }))
+    }));
+  }
+
+  async function handleVoidSale(saleId: string): Promise<void> {
+    if (!auth) {
+      return;
+    }
+    setError(null);
+    setSuccess(null);
+    setSalesBusy(true);
+    try {
+      await voidSale(auth.token, saleId);
+      setSuccess("Sale voided.");
+      setSelectedSale(null);
+      await refreshSalesData();
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to void sale");
+    } finally {
+      setSalesBusy(false);
+    }
+  }
+
+  async function submitReconcile(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (!auth || !canReconcile) {
+      return;
+    }
+    setError(null);
+    setSuccess(null);
+    setReconcileBusy(true);
+
+    try {
+      const trimmedNotes = reconcileForm.notes.trim();
+      await createReconciliationLock(auth.token, {
+        shopId: reconcileForm.shopId,
+        lockDate: reconcileForm.lockDate,
+        notes: trimmedNotes ? trimmedNotes : null
+      });
+      setSuccess("Day reconciled (locked).");
+      setReconcileForm((prev) => ({ ...prev, notes: "" }));
+      await Promise.all([refreshSalesData(), refreshReconciliationLocks()]);
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to reconcile day");
+    } finally {
+      setReconcileBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!auth || !canViewSales) {
+      return;
+    }
+    if (activeView !== "sales") {
+      return;
+    }
+    void (async () => {
+      await refreshSalesData();
+      await refreshReconciliationLocks();
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeView, auth?.token, canViewSales, salesFilters.shopId, salesFilters.saleDate, reconcileForm.shopId]);
+
+  useEffect(() => {
+    if (activeView !== "sales") {
+      return;
+    }
+    if (saleDraftId) {
+      return;
+    }
+    setSaleDraftForm((prev) => ({
+      ...prev,
+      shopId: salesFilters.shopId || prev.shopId,
+      saleDate: salesFilters.saleDate || prev.saleDate
+    }));
+  }, [activeView, salesFilters.shopId, salesFilters.saleDate, saleDraftId]);
 
   async function submitLogin(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -616,6 +916,14 @@ export default function App(): JSX.Element {
     win.focus();
   }
 
+  const saleDraftTotal = saleDraftForm.lines.reduce((sum, line) => {
+    const qty = Number.parseInt(line.quantity, 10);
+    const unitPrice = Number.parseInt(line.unitPrice, 10);
+    const safeQty = Number.isFinite(qty) ? qty : 0;
+    const safePrice = Number.isFinite(unitPrice) ? unitPrice : 0;
+    return sum + safeQty * safePrice;
+  }, 0);
+
   const yieldPerSheet =
     newProductForm.productType === "BOARD"
       ? newProductForm.boardSizeCode === "A4C"
@@ -631,7 +939,7 @@ export default function App(): JSX.Element {
         <p className="eyebrow">BDK Photography</p>
         <h1>Business Management System</h1>
         <p className="subtitle">
-          Phases 1-3: authentication (JWT), master data, customers, invoices, and installment payments.
+          Phases 1-4: authentication (JWT), master data, customers, invoices/payments, sales POS, and reconciliation locks.
         </p>
 
         <div className="divider" style={{ background: "rgba(255,255,255,0.22)" }} />
@@ -681,6 +989,15 @@ export default function App(): JSX.Element {
           >
             Invoices
           </button>
+          {canViewSales ? (
+            <button
+              className={`tab ${activeView === "sales" ? "isActive" : ""}`}
+              type="button"
+              onClick={() => setActiveView("sales")}
+            >
+              Sales (POS)
+            </button>
+          ) : null}
           {canManageMasterData ? (
             <button
               className={`tab ${activeView === "master-data" ? "isActive" : ""}`}
@@ -735,11 +1052,13 @@ export default function App(): JSX.Element {
               <h2>What’s Ready</h2>
               <ul className="stack">
                 <li>MySQL foundation tables (users, shops, roles, audit logs, reconciliation locks)</li>
-                <li>JWT login and `/me`</li>
-                <li>RBAC for shops and users listing</li>
+                <li>JWT login and RBAC (admins, managers, sales)</li>
+                <li>Phase 2: Master data (expense categories, product categories, products)</li>
+                <li>Phase 3: Customers, invoices, and installment payments</li>
+                <li>Phase 4: Sales (POS) + daily reconciliation locks</li>
               </ul>
               <div className="note">
-                Next phases will add inventory, sales, invoicing, credit/installments, cash workflows, expenses, and reporting.
+                Next phases will add workshop production, inventory/transfers, cash workflows, expenses, messaging, and reporting.
               </div>
             </section>
           </>
@@ -833,10 +1152,11 @@ export default function App(): JSX.Element {
               <ul className="stack">
                 <li>Workshop (full sheets, cutting, yield, waste)</li>
                 <li>Inventory and transfers (workshop → shops)</li>
-                <li>Sales, invoices, credit & installments</li>
                 <li>Cash tracking with approvals, banking</li>
                 <li>Expenses with payment-source logic</li>
+                <li>Messaging (SMS / WhatsApp / Email)</li>
                 <li>Capital dashboard + exports</li>
+                <li>Reports (sales, inventory, cash movement, credit aging)</li>
               </ul>
             </section>
           </>
@@ -1677,6 +1997,521 @@ export default function App(): JSX.Element {
                     </form>
                   </div>
                 ) : null}
+              </section>
+            ) : null}
+          </>
+        ) : activeView === "sales" ? (
+          <>
+            <section className="card" style={{ gridColumn: "1 / -1" }}>
+              <h2>Sales (POS)</h2>
+              <p className="hint">
+                Record sales (cash/mobile money/card/credit). Credit sales auto-create an ISSUED invoice.
+              </p>
+
+              <form
+                className="form form--three"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void refreshSalesData();
+                }}
+              >
+                <label>
+                  Shop
+                  <select
+                    value={salesFilters.shopId}
+                    onChange={(event) => setSalesFilters((prev) => ({ ...prev, shopId: event.target.value }))}
+                    disabled={authUser?.role === "SALES"}
+                  >
+                    {shops.map((shop) => (
+                      <option key={shop.id} value={shop.id}>
+                        {shop.code} — {shop.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Date
+                  <input
+                    type="date"
+                    value={salesFilters.saleDate}
+                    onChange={(event) => setSalesFilters((prev) => ({ ...prev, saleDate: event.target.value }))}
+                  />
+                </label>
+                <button type="submit" disabled={salesBusy}>
+                  {salesBusy ? "Loading..." : "Refresh"}
+                </button>
+              </form>
+
+              {salesLockBusy ? (
+                <div className="note" style={{ marginTop: "0.85rem" }}>
+                  Checking reconciliation lock...
+                </div>
+              ) : salesDayLock ? (
+                <div className="note" style={{ marginTop: "0.85rem" }}>
+                  <strong>Locked:</strong> {salesDayLock.lockDate} • {salesDayLock.shopCode} •{" "}
+                  {salesDayLock.lockedByFullName ?? salesDayLock.lockedByUserId ?? "Unknown"}
+                </div>
+              ) : (
+                <div className="note" style={{ marginTop: "0.85rem" }}>
+                  <strong>Not locked:</strong> {salesFilters.saleDate}
+                </div>
+              )}
+            </section>
+
+            {canCreateSales ? (
+              <section className="card">
+                <h2>{saleDraftId ? "Edit Sale" : "Record Sale"}</h2>
+
+                {salesDayLock && authUser?.role !== "ADMIN" ? (
+                  <div className="note">This day is reconciled (locked). Sales cannot create or edit sales.</div>
+                ) : null}
+
+                <form className="form" onSubmit={submitSale}>
+                  {authUser?.role === "ADMIN" ? (
+                    <>
+                      <label>
+                        Shop
+                        <select
+                          value={saleDraftForm.shopId}
+                          onChange={(event) => setSaleDraftForm((prev) => ({ ...prev, shopId: event.target.value }))}
+                          required
+                        >
+                          {shops.map((shop) => (
+                            <option key={shop.id} value={shop.id}>
+                              {shop.code} — {shop.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label>
+                        Sale date
+                        <input
+                          type="date"
+                          value={saleDraftForm.saleDate}
+                          onChange={(event) => setSaleDraftForm((prev) => ({ ...prev, saleDate: event.target.value }))}
+                          required
+                        />
+                      </label>
+                    </>
+                  ) : (
+                    <p className="lineHint">
+                      Shop: {shops.find((s) => s.id === salesFilters.shopId)?.name ?? "-"} • Date: {salesFilters.saleDate}
+                    </p>
+                  )}
+
+                  <label>
+                    Payment method
+                    <select
+                      value={saleDraftForm.paymentMethod}
+                      onChange={(event) =>
+                        setSaleDraftForm((prev) => ({
+                          ...prev,
+                          paymentMethod:
+                            event.target.value === "MOBILE_MONEY"
+                              ? "MOBILE_MONEY"
+                              : event.target.value === "CARD"
+                                ? "CARD"
+                                : event.target.value === "CREDIT"
+                                  ? "CREDIT"
+                                  : "CASH"
+                        }))
+                      }
+                    >
+                      <option value="CASH">Cash</option>
+                      <option value="MOBILE_MONEY">Mobile Money</option>
+                      <option value="CARD">Card</option>
+                      <option value="CREDIT">Credit</option>
+                    </select>
+                  </label>
+
+                  {saleDraftForm.paymentMethod === "CREDIT" ? (
+                    <label>
+                      Customer
+                      <select
+                        value={saleDraftForm.customerId}
+                        onChange={(event) => setSaleDraftForm((prev) => ({ ...prev, customerId: event.target.value }))}
+                        required
+                      >
+                        <option value="">Select customer...</option>
+                        {customers
+                          .filter((c) => c.isActive)
+                          .map((customer) => (
+                            <option key={customer.id} value={customer.id}>
+                              {customer.mobileNumber} — {customer.firstName} {customer.lastName}
+                            </option>
+                          ))}
+                      </select>
+                    </label>
+                  ) : null}
+
+                  <label>
+                    Notes (optional)
+                    <input
+                      value={saleDraftForm.notes}
+                      onChange={(event) => setSaleDraftForm((prev) => ({ ...prev, notes: event.target.value }))}
+                      placeholder="Optional notes"
+                    />
+                  </label>
+
+                  <div className="lineHint">Total (UGX): {saleDraftTotal}</div>
+
+                  <div className="lines" style={{ gridColumn: "1 / -1" }}>
+                    <div className="linesHead">Line items</div>
+                    {saleDraftForm.lines.map((line, idx) => {
+                      const qty = Number.parseInt(line.quantity, 10);
+                      const unitPrice = Number.parseInt(line.unitPrice, 10);
+                      const safeQty = Number.isFinite(qty) ? qty : 0;
+                      const safeUnit = Number.isFinite(unitPrice) ? unitPrice : 0;
+                      const lineTotal = safeQty * safeUnit;
+
+                      return (
+                        <div className="lineRow" key={`${idx}-${line.productId}`}>
+                          <label>
+                            Product
+                            <select
+                              value={line.productId}
+                              onChange={(event) => {
+                                const nextProductId = event.target.value;
+                                const picked = products.find((p) => p.id === nextProductId);
+                                setSaleDraftForm((prev) => ({
+                                  ...prev,
+                                  lines: prev.lines.map((prevLine, i) =>
+                                    i !== idx
+                                      ? prevLine
+                                      : {
+                                          ...prevLine,
+                                          productId: nextProductId,
+                                          unitPrice:
+                                            prevLine.unitPrice || !picked ? prevLine.unitPrice : String(picked.sellingPrice)
+                                        }
+                                  )
+                                }));
+                              }}
+                              required
+                            >
+                              <option value="">Select product...</option>
+                              {products.map((product) => (
+                                <option key={product.id} value={product.id}>
+                                  {product.skuCode} — {product.name} {product.isActive ? "" : "(inactive)"}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label>
+                            Quantity
+                            <input
+                              type="number"
+                              min={1}
+                              value={line.quantity}
+                              onChange={(event) =>
+                                setSaleDraftForm((prev) => ({
+                                  ...prev,
+                                  lines: prev.lines.map((prevLine, i) =>
+                                    i !== idx ? prevLine : { ...prevLine, quantity: event.target.value }
+                                  )
+                                }))
+                              }
+                              required
+                            />
+                          </label>
+                          <label>
+                            Unit price (UGX)
+                            <input
+                              type="number"
+                              min={0}
+                              value={line.unitPrice}
+                              onChange={(event) =>
+                                setSaleDraftForm((prev) => ({
+                                  ...prev,
+                                  lines: prev.lines.map((prevLine, i) =>
+                                    i !== idx ? prevLine : { ...prevLine, unitPrice: event.target.value }
+                                  )
+                                }))
+                              }
+                              required
+                            />
+                          </label>
+                          <label>
+                            Notes
+                            <input
+                              value={line.notes}
+                              onChange={(event) =>
+                                setSaleDraftForm((prev) => ({
+                                  ...prev,
+                                  lines: prev.lines.map((prevLine, i) =>
+                                    i !== idx ? prevLine : { ...prevLine, notes: event.target.value }
+                                  )
+                                }))
+                              }
+                              placeholder="Optional"
+                            />
+                          </label>
+                          <div className="lineTotal">Line total: {lineTotal}</div>
+                          <div className="approvalActions">
+                            <button
+                              data-variant="ghost"
+                              type="button"
+                              onClick={() =>
+                                setSaleDraftForm((prev) => ({
+                                  ...prev,
+                                  lines: prev.lines.length > 1 ? prev.lines.filter((_, i) => i !== idx) : prev.lines
+                                }))
+                              }
+                              disabled={saleDraftForm.lines.length < 2}
+                            >
+                              Remove line
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+
+                    <button
+                      data-variant="ghost"
+                      type="button"
+                      onClick={() =>
+                        setSaleDraftForm((prev) => ({
+                          ...prev,
+                          lines: [...prev.lines, { productId: "", quantity: "1", unitPrice: "", notes: "" }]
+                        }))
+                      }
+                    >
+                      Add line
+                    </button>
+                  </div>
+
+                  <button type="submit" disabled={salesBusy || (!!salesDayLock && authUser?.role !== "ADMIN")}>
+                    {salesBusy ? "Saving..." : saleDraftId ? "Save changes" : "Record sale"}
+                  </button>
+
+                  {saleDraftId ? (
+                    <button data-variant="ghost" type="button" onClick={resetSaleDraft}>
+                      Cancel edit
+                    </button>
+                  ) : null}
+                </form>
+
+                {saleDraftForm.paymentMethod === "CREDIT" ? (
+                  <p className="hint" style={{ marginTop: "0.75rem" }}>
+                    CREDIT auto-creates an invoice. Voiding credit sales requires admin (invoice void).
+                  </p>
+                ) : null}
+              </section>
+            ) : (
+              <section className="card">
+                <h2>Record Sale</h2>
+                <div className="note">You don’t have permission to record sales.</div>
+              </section>
+            )}
+
+            <section className="card">
+              <h2>Sales List</h2>
+              <div className="tableWrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      {authUser?.role === "SALES" ? null : <th>User</th>}
+                      <th>Method</th>
+                      <th className="right">Total (UGX)</th>
+                      <th>Invoice</th>
+                      <th>Status</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sales.length ? (
+                      sales.map((sale) => {
+                        const isSalesUser = authUser?.role === "SALES";
+                        const canEdit =
+                          !sale.isVoid &&
+                          sale.paymentMethod !== "CREDIT" &&
+                          (authUser?.role === "ADMIN" ||
+                            (isSalesUser && sale.userId === authUser?.id && sale.saleDate === todayLocalYmd() && !salesDayLock));
+                        const canVoid =
+                          !sale.isVoid &&
+                          (authUser?.role === "ADMIN" ||
+                            (isSalesUser &&
+                              sale.userId === authUser?.id &&
+                              sale.saleDate === todayLocalYmd() &&
+                              sale.paymentMethod !== "CREDIT" &&
+                              !salesDayLock));
+
+                        return (
+                          <tr key={sale.id} style={{ opacity: sale.isVoid ? 0.6 : 1 }}>
+                            <td>{sale.saleDate}</td>
+                            {isSalesUser ? null : <td>{sale.userFullName}</td>}
+                            <td>{sale.paymentMethod}</td>
+                            <td className="right">{sale.totalAmount}</td>
+                            <td>{sale.invoiceNumber ?? "-"}</td>
+                            <td>{sale.isVoid ? "VOID" : "ACTIVE"}</td>
+                            <td>
+                              <div className="approvalActions">
+                                <button data-variant="ghost" type="button" onClick={() => void loadSaleDetail(sale.id)}>
+                                  View
+                                </button>
+                                {canEdit ? (
+                                  <button
+                                    data-variant="ghost"
+                                    type="button"
+                                    onClick={() => {
+                                      if (!auth) {
+                                        return;
+                                      }
+                                      void (async () => {
+                                        const detail = await getSale(auth.token, sale.id);
+                                        setSelectedSale(detail);
+                                        await startEditSale(detail);
+                                      })();
+                                    }}
+                                  >
+                                    Edit
+                                  </button>
+                                ) : null}
+                                {canVoid ? (
+                                  <button
+                                    data-variant="ghost"
+                                    type="button"
+                                    onClick={() => {
+                                      if (!window.confirm("Void this sale? This cannot be undone.")) {
+                                        return;
+                                      }
+                                      void handleVoidSale(sale.id);
+                                    }}
+                                  >
+                                    Void
+                                  </button>
+                                ) : null}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    ) : (
+                      <tr>
+                        <td colSpan={authUser?.role === "SALES" ? 6 : 7}>No sales found.</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            {selectedSale ? (
+              <section className="card" style={{ gridColumn: "1 / -1" }}>
+                <h2>Sale Detail</h2>
+                <div className="meta">
+                  <div>
+                    <strong>{selectedSale.sale.shopCode}</strong>
+                    <div className="hint">
+                      {selectedSale.sale.shopName} • {selectedSale.sale.saleDate}
+                    </div>
+                  </div>
+                  <div className="hint">
+                    {selectedSale.sale.paymentMethod} • UGX {selectedSale.sale.totalAmount} •{" "}
+                    {selectedSale.sale.isVoid ? "VOID" : "ACTIVE"}
+                  </div>
+                </div>
+
+                <div className="divider" />
+
+                <div className="tableWrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>SKU</th>
+                        <th>Product</th>
+                        <th className="right">Qty</th>
+                        <th className="right">Unit</th>
+                        <th className="right">Total</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {selectedSale.lines.map((line) => (
+                        <tr key={line.id}>
+                          <td>{line.skuCode}</td>
+                          <td>{line.productName}</td>
+                          <td className="right">{line.quantity}</td>
+                          <td className="right">{line.unitPrice}</td>
+                          <td className="right">{line.lineTotal}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            ) : null}
+
+            {canReconcile ? (
+              <section className="card">
+                <h2>Daily Reconciliation</h2>
+                <p className="hint">Lock a shop’s date to prevent sales edits for that day.</p>
+                <form className="form form--three" onSubmit={submitReconcile}>
+                  <label>
+                    Shop
+                    <select
+                      value={reconcileForm.shopId}
+                      onChange={(event) => setReconcileForm((prev) => ({ ...prev, shopId: event.target.value }))}
+                      required
+                    >
+                      {shops.map((shop) => (
+                        <option key={shop.id} value={shop.id}>
+                          {shop.code} — {shop.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Date
+                    <input
+                      type="date"
+                      value={reconcileForm.lockDate}
+                      onChange={(event) => setReconcileForm((prev) => ({ ...prev, lockDate: event.target.value }))}
+                      required
+                    />
+                  </label>
+                  <label>
+                    Notes
+                    <input
+                      value={reconcileForm.notes}
+                      onChange={(event) => setReconcileForm((prev) => ({ ...prev, notes: event.target.value }))}
+                      placeholder="Optional"
+                    />
+                  </label>
+                  <button type="submit" disabled={reconcileBusy}>
+                    {reconcileBusy ? "Locking..." : "Reconcile (Lock)"}
+                  </button>
+                </form>
+
+                <div style={{ marginTop: "1rem" }}>
+                  <p className="subhead">Recent Locks</p>
+                  <div className="tableWrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Shop</th>
+                          <th>Date</th>
+                          <th>Locked by</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {reconciliationLocks.length ? (
+                          reconciliationLocks.slice(0, 15).map((lock) => (
+                            <tr key={lock.id}>
+                              <td>{lock.shopCode}</td>
+                              <td>{lock.lockDate}</td>
+                              <td>{lock.lockedByFullName ?? lock.lockedByUserId ?? "-"}</td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan={3}>No reconciliation locks.</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
               </section>
             ) : null}
           </>
