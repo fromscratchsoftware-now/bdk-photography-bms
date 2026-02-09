@@ -180,9 +180,9 @@ type ActiveView =
   | "master-data"
   | "users"
   | "help";
-type MasterSection = "expense-categories" | "product-categories" | "products";
+type MasterSection = "expense-categories" | "product-categories";
 type ReportSection = "sales" | "commissions" | "invoices" | "payments" | "cash" | "expenses" | "pl" | "capital";
-type InventorySection = "stock" | "transfers" | "workshop";
+type InventorySection = "stock" | "transfers" | "workshop" | "products";
 type MessagingSection = "templates" | "queue" | "logs" | "jobs";
 
 const AUTH_STORAGE_KEY = "bdk.auth.phase1.v1";
@@ -1101,7 +1101,7 @@ export default function App(): JSX.Element {
         setNewProductForm((prev) => ({ ...prev, categoryId: categoryData[0].id }));
       }
     } catch (caught: unknown) {
-      setError(caught instanceof Error ? caught.message : "Failed to load master data");
+      setError(caught instanceof Error ? caught.message : "Failed to load configurations");
     } finally {
       setMasterBusy(false);
     }
@@ -1117,6 +1117,17 @@ export default function App(): JSX.Element {
     void refreshMasterData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeView, auth?.token, canManageMasterData]);
+
+  useEffect(() => {
+    if (!auth || !canManageMasterData) {
+      return;
+    }
+    if (activeView !== "inventory" || inventorySection !== "products") {
+      return;
+    }
+    void refreshMasterData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeView, inventorySection, auth?.token, canManageMasterData]);
 
   async function refreshCustomers(): Promise<void> {
     if (!auth) {
@@ -2472,7 +2483,7 @@ export default function App(): JSX.Element {
     : activeView === "overview"
       ? "Dashboard"
       : activeView === "inventory"
-        ? "Projects"
+        ? "Production"
         : activeView === "sales"
           ? "Sales (POS)"
           : activeView === "invoices"
@@ -2491,7 +2502,7 @@ export default function App(): JSX.Element {
                         ? "Help"
                         : activeView === "messaging"
                           ? "Messaging"
-                          : "Master Data";
+                          : "Configurations";
 
 	  return (
 	    <div className={cx("appShell", !authUser && "appShell--loggedOut")}>
@@ -2532,7 +2543,7 @@ export default function App(): JSX.Element {
                   }}
                 >
                   <IconProjects />
-                  Projects
+                  Production
                 </button>
                 {canViewSales ? (
                   <button
@@ -2667,7 +2678,7 @@ export default function App(): JSX.Element {
                       }}
                     >
                       <IconMasterData />
-                      Master Data
+                      Configurations
                     </button>
                   ) : null}
                   {canManageMessaging ? (
@@ -4114,7 +4125,7 @@ Payments update invoice status:
         ) : activeView === "inventory" ? (
           <>
             <section className="card" style={{ gridColumn: "1 / -1" }}>
-              <h2>Projects</h2>
+              <h2>Production</h2>
               <p className="hint">Boards lifecycle: workshop output, transfers (Draft → Shipped → Received), and shop stock.</p>
 
               <div className="tabs" style={{ marginTop: "0.85rem" }}>
@@ -4139,6 +4150,15 @@ Payments update invoice status:
                     onClick={() => setInventorySection("workshop")}
                   >
                     Workshop
+                  </button>
+                ) : null}
+                {canManageMasterData ? (
+                  <button
+                    className={`tab ${inventorySection === "products" ? "isActive" : ""}`}
+                    type="button"
+                    onClick={() => setInventorySection("products")}
+                  >
+                    Products
                   </button>
                 ) : null}
               </div>
@@ -4338,7 +4358,7 @@ Payments update invoice status:
                         </button>
                       </form>
                     ) : (
-                      <div className="note">No active non-board products found. Create products in Master Data first.</div>
+                      <div className="note">No active non-board products found. Create products in Production → Products first.</div>
                     )}
                   </section>
                 ) : (
@@ -4711,7 +4731,7 @@ Payments update invoice status:
                         </div>
                       </form>
                     ) : (
-                      <div className="note">No active board products found. Create board products in Master Data first.</div>
+                      <div className="note">No active board products found. Create board products in Production → Products first.</div>
                     )}
                   </section>
                 ) : (
@@ -5261,7 +5281,7 @@ Payments update invoice status:
                         </div>
                       </form>
                     ) : (
-                      <div className="note">No active board products found. Create board products in Master Data first.</div>
+                      <div className="note">No active board products found. Create board products in Production → Products first.</div>
                     )}
                   </section>
                 ) : (
@@ -5393,9 +5413,470 @@ Payments update invoice status:
                   )}
                 </section>
               </>
+            ) : inventorySection === "products" ? (
+              <>
+                <section className="card" style={{ gridColumn: "1 / -1" }}>
+                  <h2>Create Product</h2>
+                  {productCategories.length ? (
+                    <form
+                      className="form form--three"
+                      onSubmit={async (event) => {
+                        event.preventDefault();
+                        if (!auth) {
+                          return;
+                        }
+                        setError(null);
+                        setSuccess(null);
+                        setMasterBusy(true);
+                        try {
+                          await createProduct(auth.token, {
+                            skuCode: newProductForm.skuCode,
+                            name: newProductForm.name,
+                            categoryId: newProductForm.categoryId,
+                            productType: newProductForm.productType,
+                            unitOfMeasure: newProductForm.unitOfMeasure,
+                            costPrice: newProductForm.costPrice ? Number(newProductForm.costPrice) : null,
+                            sellingPrice: Number(newProductForm.sellingPrice),
+                            isActive: newProductForm.isActive,
+                            boardSizeCode: newProductForm.productType === "BOARD" ? newProductForm.boardSizeCode : null,
+                            notes: newProductForm.notes || null
+                          });
+                          setNewProductForm((prev) => ({
+                            ...prev,
+                            skuCode: "",
+                            name: "",
+                            costPrice: "",
+                            sellingPrice: "",
+                            notes: ""
+                          }));
+                          setSuccess("Product created.");
+                          await refreshMasterData();
+                        } catch (caught: unknown) {
+                          setError(caught instanceof Error ? caught.message : "Failed to create product");
+                        } finally {
+                          setMasterBusy(false);
+                        }
+                      }}
+                    >
+                      <label>
+                        Category
+                        <select
+                          value={newProductForm.categoryId}
+                          onChange={(event) =>
+                            setNewProductForm((prev) => ({ ...prev, categoryId: event.target.value }))
+                          }
+                          required
+                        >
+                          {productCategories
+                            .filter((c) => c.isActive)
+                            .map((cat) => (
+                              <option key={cat.id} value={cat.id}>
+                                {cat.name}
+                              </option>
+                            ))}
+                        </select>
+                      </label>
+                      <label>
+                        Type
+                        <select
+                          value={newProductForm.productType}
+                          onChange={(event) =>
+                            setNewProductForm((prev) => ({
+                              ...prev,
+                              productType: event.target.value === "NON_BOARD" ? "NON_BOARD" : "BOARD"
+                            }))
+                          }
+                        >
+                          <option value="BOARD">BOARD</option>
+                          <option value="NON_BOARD">NON_BOARD</option>
+                        </select>
+                      </label>
+                      {newProductForm.productType === "BOARD" ? (
+                        <label>
+                          Board Size Code
+                          <select
+                            value={newProductForm.boardSizeCode}
+                            onChange={(event) =>
+                              setNewProductForm((prev) => ({
+                                ...prev,
+                                boardSizeCode: (event.target.value as "A4C" | "A3C" | "A2C") || "A4C"
+                              }))
+                            }
+                          >
+                            <option value="A4C">A4C (48/sheet)</option>
+                            <option value="A3C">A3C (24/sheet)</option>
+                            <option value="A2C">A2C (12/sheet)</option>
+                          </select>
+                        </label>
+                      ) : null}
+                      <label>
+                        SKU Code
+                        <input
+                          value={newProductForm.skuCode}
+                          onChange={(event) => setNewProductForm((prev) => ({ ...prev, skuCode: event.target.value }))}
+                          required
+                        />
+                      </label>
+                      <label>
+                        Name
+                        <input
+                          value={newProductForm.name}
+                          onChange={(event) => setNewProductForm((prev) => ({ ...prev, name: event.target.value }))}
+                          required
+                        />
+                      </label>
+                      <label>
+                        Unit of Measure
+                        <input
+                          value={newProductForm.unitOfMeasure}
+                          onChange={(event) =>
+                            setNewProductForm((prev) => ({ ...prev, unitOfMeasure: event.target.value }))
+                          }
+                          required
+                        />
+                      </label>
+                      <label>
+                        Cost Price (optional)
+                        <input
+                          type="number"
+                          min={0}
+                          value={newProductForm.costPrice}
+                          onChange={(event) =>
+                            setNewProductForm((prev) => ({ ...prev, costPrice: event.target.value }))
+                          }
+                        />
+                      </label>
+                      <label>
+                        Selling Price
+                        <input
+                          type="number"
+                          min={1}
+                          value={newProductForm.sellingPrice}
+                          onChange={(event) =>
+                            setNewProductForm((prev) => ({ ...prev, sellingPrice: event.target.value }))
+                          }
+                          required
+                        />
+                      </label>
+                      <label>
+                        Notes (optional)
+                        <input
+                          value={newProductForm.notes}
+                          onChange={(event) => setNewProductForm((prev) => ({ ...prev, notes: event.target.value }))}
+                        />
+                      </label>
+                      <label className="checkbox">
+                        <input
+                          type="checkbox"
+                          checked={newProductForm.isActive}
+                          onChange={(event) =>
+                            setNewProductForm((prev) => ({ ...prev, isActive: event.target.checked }))
+                          }
+                        />
+                        Active
+                      </label>
+                      <button type="submit" disabled={masterBusy}>
+                        {masterBusy ? "Saving..." : "Create Product"}
+                      </button>
+                    </form>
+                  ) : (
+                    <div className="note">Create a product category first.</div>
+                  )}
+
+                  {newProductForm.productType === "BOARD" ? (
+                    <p className="hint">Yield per full sheet: {yieldPerSheet} pcs</p>
+                  ) : null}
+                </section>
+
+                <section className="card" style={{ gridColumn: "1 / -1" }}>
+                  <h2>Products</h2>
+                  <div className="tableWrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>SKU</th>
+                          <th>Name</th>
+                          <th>Type</th>
+                          <th>Category</th>
+                          <th>Sell</th>
+                          <th>Active</th>
+                          <th>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {products.length ? (
+                          products.map((p) => (
+                            <tr key={p.id} className={editingProductId === p.id ? "isSelected" : ""}>
+                              <td>{p.skuCode}</td>
+                              <td>{p.name}</td>
+                              <td>
+                                {p.productType}
+                                {p.productType === "BOARD" && p.boardSizeCode ? (
+                                  <span className="hint"> ({p.boardSizeCode}, {p.yieldPerSheet}/sheet)</span>
+                                ) : null}
+                              </td>
+                              <td>{p.categoryName}</td>
+                              <td>{formatUGX(p.sellingPrice)}</td>
+                              <td>{p.isActive ? "Yes" : "No"}</td>
+                              <td>
+                                <div className="approvalActions">
+                                  <button
+                                    data-variant="ghost"
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingProductId(p.id);
+                                      setEditingProductForm({
+                                        skuCode: p.skuCode,
+                                        name: p.name,
+                                        categoryId: p.categoryId,
+                                        productType: p.productType,
+                                        unitOfMeasure: p.unitOfMeasure,
+                                        costPrice: p.costPrice != null ? String(p.costPrice) : "",
+                                        sellingPrice: String(p.sellingPrice),
+                                        isActive: p.isActive,
+                                        boardSizeCode: p.boardSizeCode ?? "A4C",
+                                        notes: p.notes ?? ""
+                                      });
+                                    }}
+                                  >
+                                    Edit
+                                  </button>
+                                  <button
+                                    data-variant="ghost"
+                                    type="button"
+                                    onClick={async () => {
+                                      if (!auth) {
+                                        return;
+                                      }
+                                      setError(null);
+                                      setSuccess(null);
+                                      setMasterBusy(true);
+                                      try {
+                                        await updateProduct(auth.token, p.id, { isActive: !p.isActive });
+                                        setSuccess("Product updated.");
+                                        await refreshMasterData();
+                                      } catch (caught: unknown) {
+                                        setError(caught instanceof Error ? caught.message : "Failed to update product");
+                                      } finally {
+                                        setMasterBusy(false);
+                                      }
+                                    }}
+                                  >
+                                    {p.isActive ? "Deactivate" : "Activate"}
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan={7}>No products yet.</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {editingProductId && editingProductForm ? (
+                    <div className="approvalRow">
+                      <div>
+                        <p className="subhead">Edit Product</p>
+                        <form
+                          className="form form--three"
+                          onSubmit={async (event) => {
+                            event.preventDefault();
+                            if (!auth) {
+                              return;
+                            }
+                            setError(null);
+                            setSuccess(null);
+                            setMasterBusy(true);
+                            try {
+                              await updateProduct(auth.token, editingProductId, {
+                                skuCode: editingProductForm.skuCode,
+                                name: editingProductForm.name,
+                                categoryId: editingProductForm.categoryId,
+                                productType: editingProductForm.productType,
+                                unitOfMeasure: editingProductForm.unitOfMeasure,
+                                costPrice: editingProductForm.costPrice ? Number(editingProductForm.costPrice) : null,
+                                sellingPrice: Number(editingProductForm.sellingPrice),
+                                isActive: editingProductForm.isActive,
+                                boardSizeCode:
+                                  editingProductForm.productType === "BOARD"
+                                    ? editingProductForm.boardSizeCode
+                                    : null,
+                                notes: editingProductForm.notes || null
+                              });
+                              setEditingProductId(null);
+                              setEditingProductForm(null);
+                              setSuccess("Product saved.");
+                              await refreshMasterData();
+                            } catch (caught: unknown) {
+                              setError(caught instanceof Error ? caught.message : "Failed to save product");
+                            } finally {
+                              setMasterBusy(false);
+                            }
+                          }}
+                        >
+                          <label>
+                            Category
+                            <select
+                              value={editingProductForm.categoryId}
+                              onChange={(event) =>
+                                setEditingProductForm((prev) => (prev ? { ...prev, categoryId: event.target.value } : prev))
+                              }
+                              required
+                            >
+                              {productCategories.map((cat) => (
+                                <option key={cat.id} value={cat.id}>
+                                  {cat.name}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label>
+                            Type
+                            <select
+                              value={editingProductForm.productType}
+                              onChange={(event) =>
+                                setEditingProductForm((prev) =>
+                                  prev
+                                    ? {
+                                        ...prev,
+                                        productType: event.target.value === "NON_BOARD" ? "NON_BOARD" : "BOARD"
+                                      }
+                                    : prev
+                                )
+                              }
+                            >
+                              <option value="BOARD">BOARD</option>
+                              <option value="NON_BOARD">NON_BOARD</option>
+                            </select>
+                          </label>
+                          {editingProductForm.productType === "BOARD" ? (
+                            <label>
+                              Board Size Code
+                              <select
+                                value={editingProductForm.boardSizeCode}
+                                onChange={(event) =>
+                                  setEditingProductForm((prev) =>
+                                    prev
+                                      ? {
+                                          ...prev,
+                                          boardSizeCode: (event.target.value as "A4C" | "A3C" | "A2C") || "A4C"
+                                        }
+                                      : prev
+                                  )
+                                }
+                              >
+                                <option value="A4C">A4C (48/sheet)</option>
+                                <option value="A3C">A3C (24/sheet)</option>
+                                <option value="A2C">A2C (12/sheet)</option>
+                              </select>
+                            </label>
+                          ) : null}
+                          <label>
+                            SKU Code
+                            <input
+                              value={editingProductForm.skuCode}
+                              onChange={(event) =>
+                                setEditingProductForm((prev) => (prev ? { ...prev, skuCode: event.target.value } : prev))
+                              }
+                              required
+                            />
+                          </label>
+                          <label>
+                            Name
+                            <input
+                              value={editingProductForm.name}
+                              onChange={(event) =>
+                                setEditingProductForm((prev) => (prev ? { ...prev, name: event.target.value } : prev))
+                              }
+                              required
+                            />
+                          </label>
+                          <label>
+                            Unit of Measure
+                            <input
+                              value={editingProductForm.unitOfMeasure}
+                              onChange={(event) =>
+                                setEditingProductForm((prev) =>
+                                  prev ? { ...prev, unitOfMeasure: event.target.value } : prev
+                                )
+                              }
+                              required
+                            />
+                          </label>
+                          <label>
+                            Cost Price (optional)
+                            <input
+                              type="number"
+                              min={0}
+                              value={editingProductForm.costPrice}
+                              onChange={(event) =>
+                                setEditingProductForm((prev) =>
+                                  prev ? { ...prev, costPrice: event.target.value } : prev
+                                )
+                              }
+                            />
+                          </label>
+                          <label>
+                            Selling Price
+                            <input
+                              type="number"
+                              min={1}
+                              value={editingProductForm.sellingPrice}
+                              onChange={(event) =>
+                                setEditingProductForm((prev) =>
+                                  prev ? { ...prev, sellingPrice: event.target.value } : prev
+                                )
+                              }
+                              required
+                            />
+                          </label>
+                          <label className="checkbox">
+                            <input
+                              type="checkbox"
+                              checked={editingProductForm.isActive}
+                              onChange={(event) =>
+                                setEditingProductForm((prev) =>
+                                  prev ? { ...prev, isActive: event.target.checked } : prev
+                                )
+                              }
+                            />
+                            Active
+                          </label>
+                          <label>
+                            Notes
+                            <input
+                              value={editingProductForm.notes}
+                              onChange={(event) =>
+                                setEditingProductForm((prev) => (prev ? { ...prev, notes: event.target.value } : prev))
+                              }
+                            />
+                          </label>
+                          <button type="submit" disabled={masterBusy}>
+                            {masterBusy ? "Saving..." : "Save"}
+                          </button>
+                          <button
+                            data-variant="ghost"
+                            type="button"
+                            onClick={() => {
+                              setEditingProductId(null);
+                              setEditingProductForm(null);
+                            }}
+                          >
+                            Cancel
+                          </button>
+                        </form>
+                      </div>
+                    </div>
+                  ) : null}
+                </section>
+              </>
             ) : (
               <section className="card" style={{ gridColumn: "1 / -1" }}>
-                <h2>Projects</h2>
+                <h2>Production</h2>
                 <div className="note">Select a section above.</div>
               </section>
             )}
@@ -8282,9 +8763,9 @@ Payments update invoice status:
         ) : (
           <>
             <section className="card" style={{ gridColumn: "1 / -1" }}>
-              <h2>Phase 2: Master Data</h2>
+              <h2>Phase 2: Configurations</h2>
               <p className="hint">
-                Admin-only setup for dynamic expense categories, product categories, and products (boards and non-boards).
+                Admin-only setup for dynamic expense categories and product categories. Products are managed in Production → Products.
               </p>
 
               <div className="tabs" style={{ marginTop: "0.9rem" }}>
@@ -8301,13 +8782,6 @@ Payments update invoice status:
                   onClick={() => setMasterSection("product-categories")}
                 >
                   Product Categories
-                </button>
-                <button
-                  className={`tab ${masterSection === "products" ? "isActive" : ""}`}
-                  type="button"
-                  onClick={() => setMasterSection("products")}
-                >
-                  Products
                 </button>
               </div>
             </section>
@@ -8724,469 +9198,6 @@ Payments update invoice status:
                             onClick={() => {
                               setEditingProductCategoryId(null);
                               setEditingProductCategoryForm(null);
-                            }}
-                          >
-                            Cancel
-                          </button>
-                        </form>
-                      </div>
-                    </div>
-                  ) : null}
-                </section>
-              </>
-            ) : null}
-
-            {masterSection === "products" ? (
-              <>
-                <section className="card" style={{ gridColumn: "1 / -1" }}>
-                  <h2>Create Product</h2>
-                  {productCategories.length ? (
-                    <form
-                      className="form form--three"
-                      onSubmit={async (event) => {
-                        event.preventDefault();
-                        if (!auth) {
-                          return;
-                        }
-                        setError(null);
-                        setSuccess(null);
-                        setMasterBusy(true);
-                        try {
-                          await createProduct(auth.token, {
-                            skuCode: newProductForm.skuCode,
-                            name: newProductForm.name,
-                            categoryId: newProductForm.categoryId,
-                            productType: newProductForm.productType,
-                            unitOfMeasure: newProductForm.unitOfMeasure,
-                            costPrice: newProductForm.costPrice ? Number(newProductForm.costPrice) : null,
-                            sellingPrice: Number(newProductForm.sellingPrice),
-                            isActive: newProductForm.isActive,
-                            boardSizeCode: newProductForm.productType === "BOARD" ? newProductForm.boardSizeCode : null,
-                            notes: newProductForm.notes || null
-                          });
-                          setNewProductForm((prev) => ({
-                            ...prev,
-                            skuCode: "",
-                            name: "",
-                            costPrice: "",
-                            sellingPrice: "",
-                            notes: ""
-                          }));
-                          setSuccess("Product created.");
-                          await refreshMasterData();
-                        } catch (caught: unknown) {
-                          setError(caught instanceof Error ? caught.message : "Failed to create product");
-                        } finally {
-                          setMasterBusy(false);
-                        }
-                      }}
-                    >
-                      <label>
-                        Category
-                        <select
-                          value={newProductForm.categoryId}
-                          onChange={(event) =>
-                            setNewProductForm((prev) => ({ ...prev, categoryId: event.target.value }))
-                          }
-                          required
-                        >
-                          {productCategories
-                            .filter((c) => c.isActive)
-                            .map((cat) => (
-                              <option key={cat.id} value={cat.id}>
-                                {cat.name}
-                              </option>
-                            ))}
-                        </select>
-                      </label>
-                      <label>
-                        Type
-                        <select
-                          value={newProductForm.productType}
-                          onChange={(event) =>
-                            setNewProductForm((prev) => ({
-                              ...prev,
-                              productType: event.target.value === "NON_BOARD" ? "NON_BOARD" : "BOARD"
-                            }))
-                          }
-                        >
-                          <option value="BOARD">BOARD</option>
-                          <option value="NON_BOARD">NON_BOARD</option>
-                        </select>
-                      </label>
-                      {newProductForm.productType === "BOARD" ? (
-                        <label>
-                          Board Size Code
-                          <select
-                            value={newProductForm.boardSizeCode}
-                            onChange={(event) =>
-                              setNewProductForm((prev) => ({
-                                ...prev,
-                                boardSizeCode: (event.target.value as "A4C" | "A3C" | "A2C") || "A4C"
-                              }))
-                            }
-                          >
-                            <option value="A4C">A4C (48/sheet)</option>
-                            <option value="A3C">A3C (24/sheet)</option>
-                            <option value="A2C">A2C (12/sheet)</option>
-                          </select>
-                        </label>
-                      ) : null}
-                      <label>
-                        SKU Code
-                        <input
-                          value={newProductForm.skuCode}
-                          onChange={(event) => setNewProductForm((prev) => ({ ...prev, skuCode: event.target.value }))}
-                          required
-                        />
-                      </label>
-                      <label>
-                        Name
-                        <input
-                          value={newProductForm.name}
-                          onChange={(event) => setNewProductForm((prev) => ({ ...prev, name: event.target.value }))}
-                          required
-                        />
-                      </label>
-                      <label>
-                        Unit of Measure
-                        <input
-                          value={newProductForm.unitOfMeasure}
-                          onChange={(event) =>
-                            setNewProductForm((prev) => ({ ...prev, unitOfMeasure: event.target.value }))
-                          }
-                          required
-                        />
-                      </label>
-                      <label>
-                        Cost Price (optional)
-                        <input
-                          type="number"
-                          min={0}
-                          value={newProductForm.costPrice}
-                          onChange={(event) =>
-                            setNewProductForm((prev) => ({ ...prev, costPrice: event.target.value }))
-                          }
-                        />
-                      </label>
-                      <label>
-                        Selling Price
-                        <input
-                          type="number"
-                          min={1}
-                          value={newProductForm.sellingPrice}
-                          onChange={(event) =>
-                            setNewProductForm((prev) => ({ ...prev, sellingPrice: event.target.value }))
-                          }
-                          required
-                        />
-                      </label>
-                      <label>
-                        Notes (optional)
-                        <input
-                          value={newProductForm.notes}
-                          onChange={(event) => setNewProductForm((prev) => ({ ...prev, notes: event.target.value }))}
-                        />
-                      </label>
-                      <label className="checkbox">
-                        <input
-                          type="checkbox"
-                          checked={newProductForm.isActive}
-                          onChange={(event) =>
-                            setNewProductForm((prev) => ({ ...prev, isActive: event.target.checked }))
-                          }
-                        />
-                        Active
-                      </label>
-                      <button type="submit" disabled={masterBusy}>
-                        {masterBusy ? "Saving..." : "Create Product"}
-                      </button>
-                    </form>
-                  ) : (
-                    <div className="note">Create a product category first.</div>
-                  )}
-
-                  {newProductForm.productType === "BOARD" ? (
-                    <p className="hint">Yield per full sheet: {yieldPerSheet} pcs</p>
-                  ) : null}
-                </section>
-
-                <section className="card" style={{ gridColumn: "1 / -1" }}>
-                  <h2>Products</h2>
-                  <div className="tableWrap">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>SKU</th>
-                          <th>Name</th>
-                          <th>Type</th>
-                          <th>Category</th>
-                          <th>Sell</th>
-                          <th>Active</th>
-                          <th>Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {products.length ? (
-                          products.map((p) => (
-                            <tr key={p.id} className={editingProductId === p.id ? "isSelected" : ""}>
-                              <td>{p.skuCode}</td>
-                              <td>{p.name}</td>
-                              <td>
-                                {p.productType}
-                                {p.productType === "BOARD" && p.boardSizeCode ? (
-                                  <span className="hint"> ({p.boardSizeCode}, {p.yieldPerSheet}/sheet)</span>
-                                ) : null}
-                              </td>
-                              <td>{p.categoryName}</td>
-                              <td>{formatUGX(p.sellingPrice)}</td>
-                              <td>{p.isActive ? "Yes" : "No"}</td>
-                              <td>
-                                <div className="approvalActions">
-                                  <button
-                                    data-variant="ghost"
-                                    type="button"
-                                    onClick={() => {
-                                      setEditingProductId(p.id);
-                                      setEditingProductForm({
-                                        skuCode: p.skuCode,
-                                        name: p.name,
-                                        categoryId: p.categoryId,
-                                        productType: p.productType,
-                                        unitOfMeasure: p.unitOfMeasure,
-                                        costPrice: p.costPrice != null ? String(p.costPrice) : "",
-                                        sellingPrice: String(p.sellingPrice),
-                                        isActive: p.isActive,
-                                        boardSizeCode: p.boardSizeCode ?? "A4C",
-                                        notes: p.notes ?? ""
-                                      });
-                                    }}
-                                  >
-                                    Edit
-                                  </button>
-                                  <button
-                                    data-variant="ghost"
-                                    type="button"
-                                    onClick={async () => {
-                                      if (!auth) {
-                                        return;
-                                      }
-                                      setError(null);
-                                      setSuccess(null);
-                                      setMasterBusy(true);
-                                      try {
-                                        await updateProduct(auth.token, p.id, { isActive: !p.isActive });
-                                        setSuccess("Product updated.");
-                                        await refreshMasterData();
-                                      } catch (caught: unknown) {
-                                        setError(caught instanceof Error ? caught.message : "Failed to update product");
-                                      } finally {
-                                        setMasterBusy(false);
-                                      }
-                                    }}
-                                  >
-                                    {p.isActive ? "Deactivate" : "Activate"}
-                                  </button>
-                                </div>
-                              </td>
-                            </tr>
-                          ))
-                        ) : (
-                          <tr>
-                            <td colSpan={7}>No products yet.</td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-
-                  {editingProductId && editingProductForm ? (
-                    <div className="approvalRow">
-                      <div>
-                        <p className="subhead">Edit Product</p>
-                        <form
-                          className="form form--three"
-                          onSubmit={async (event) => {
-                            event.preventDefault();
-                            if (!auth) {
-                              return;
-                            }
-                            setError(null);
-                            setSuccess(null);
-                            setMasterBusy(true);
-                            try {
-                              await updateProduct(auth.token, editingProductId, {
-                                skuCode: editingProductForm.skuCode,
-                                name: editingProductForm.name,
-                                categoryId: editingProductForm.categoryId,
-                                productType: editingProductForm.productType,
-                                unitOfMeasure: editingProductForm.unitOfMeasure,
-                                costPrice: editingProductForm.costPrice ? Number(editingProductForm.costPrice) : null,
-                                sellingPrice: Number(editingProductForm.sellingPrice),
-                                isActive: editingProductForm.isActive,
-                                boardSizeCode:
-                                  editingProductForm.productType === "BOARD"
-                                    ? editingProductForm.boardSizeCode
-                                    : null,
-                                notes: editingProductForm.notes || null
-                              });
-                              setEditingProductId(null);
-                              setEditingProductForm(null);
-                              setSuccess("Product saved.");
-                              await refreshMasterData();
-                            } catch (caught: unknown) {
-                              setError(caught instanceof Error ? caught.message : "Failed to save product");
-                            } finally {
-                              setMasterBusy(false);
-                            }
-                          }}
-                        >
-                          <label>
-                            Category
-                            <select
-                              value={editingProductForm.categoryId}
-                              onChange={(event) =>
-                                setEditingProductForm((prev) => (prev ? { ...prev, categoryId: event.target.value } : prev))
-                              }
-                              required
-                            >
-                              {productCategories.map((cat) => (
-                                <option key={cat.id} value={cat.id}>
-                                  {cat.name}
-                                </option>
-                              ))}
-                            </select>
-                          </label>
-                          <label>
-                            Type
-                            <select
-                              value={editingProductForm.productType}
-                              onChange={(event) =>
-                                setEditingProductForm((prev) =>
-                                  prev
-                                    ? {
-                                        ...prev,
-                                        productType: event.target.value === "NON_BOARD" ? "NON_BOARD" : "BOARD"
-                                      }
-                                    : prev
-                                )
-                              }
-                            >
-                              <option value="BOARD">BOARD</option>
-                              <option value="NON_BOARD">NON_BOARD</option>
-                            </select>
-                          </label>
-                          {editingProductForm.productType === "BOARD" ? (
-                            <label>
-                              Board Size Code
-                              <select
-                                value={editingProductForm.boardSizeCode}
-                                onChange={(event) =>
-                                  setEditingProductForm((prev) =>
-                                    prev
-                                      ? {
-                                          ...prev,
-                                          boardSizeCode: (event.target.value as "A4C" | "A3C" | "A2C") || "A4C"
-                                        }
-                                      : prev
-                                  )
-                                }
-                              >
-                                <option value="A4C">A4C (48/sheet)</option>
-                                <option value="A3C">A3C (24/sheet)</option>
-                                <option value="A2C">A2C (12/sheet)</option>
-                              </select>
-                            </label>
-                          ) : null}
-                          <label>
-                            SKU Code
-                            <input
-                              value={editingProductForm.skuCode}
-                              onChange={(event) =>
-                                setEditingProductForm((prev) => (prev ? { ...prev, skuCode: event.target.value } : prev))
-                              }
-                              required
-                            />
-                          </label>
-                          <label>
-                            Name
-                            <input
-                              value={editingProductForm.name}
-                              onChange={(event) =>
-                                setEditingProductForm((prev) => (prev ? { ...prev, name: event.target.value } : prev))
-                              }
-                              required
-                            />
-                          </label>
-                          <label>
-                            Unit of Measure
-                            <input
-                              value={editingProductForm.unitOfMeasure}
-                              onChange={(event) =>
-                                setEditingProductForm((prev) =>
-                                  prev ? { ...prev, unitOfMeasure: event.target.value } : prev
-                                )
-                              }
-                              required
-                            />
-                          </label>
-                          <label>
-                            Cost Price (optional)
-                            <input
-                              type="number"
-                              min={0}
-                              value={editingProductForm.costPrice}
-                              onChange={(event) =>
-                                setEditingProductForm((prev) =>
-                                  prev ? { ...prev, costPrice: event.target.value } : prev
-                                )
-                              }
-                            />
-                          </label>
-                          <label>
-                            Selling Price
-                            <input
-                              type="number"
-                              min={1}
-                              value={editingProductForm.sellingPrice}
-                              onChange={(event) =>
-                                setEditingProductForm((prev) =>
-                                  prev ? { ...prev, sellingPrice: event.target.value } : prev
-                                )
-                              }
-                              required
-                            />
-                          </label>
-                          <label className="checkbox">
-                            <input
-                              type="checkbox"
-                              checked={editingProductForm.isActive}
-                              onChange={(event) =>
-                                setEditingProductForm((prev) =>
-                                  prev ? { ...prev, isActive: event.target.checked } : prev
-                                )
-                              }
-                            />
-                            Active
-                          </label>
-                          <label>
-                            Notes
-                            <input
-                              value={editingProductForm.notes}
-                              onChange={(event) =>
-                                setEditingProductForm((prev) => (prev ? { ...prev, notes: event.target.value } : prev))
-                              }
-                            />
-                          </label>
-                          <button type="submit" disabled={masterBusy}>
-                            {masterBusy ? "Saving..." : "Save"}
-                          </button>
-                          <button
-                            data-variant="ghost"
-                            type="button"
-                            onClick={() => {
-                              setEditingProductId(null);
-                              setEditingProductForm(null);
                             }}
                           >
                             Cancel

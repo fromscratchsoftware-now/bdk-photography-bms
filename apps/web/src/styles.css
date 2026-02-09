@@ -543,11 +543,6 @@ button[data-variant="ghost"]:hover {
 }
 
 @media (min-width: 900px) {
-  .form {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    align-items: end;
-  }
-
   .form button {
     grid-column: 1 / -1;
     justify-self: end;
@@ -560,11 +555,7 @@ button[data-variant="ghost"]:hover {
   grid-template-columns: 1fr;
 }
 
-@media (min-width: 900px) {
-  .form.form--three {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-}
+/* Forms stay stacked vertically on all breakpoints for better scanning and fewer layout surprises. */
 
 /* UI field components */
 
