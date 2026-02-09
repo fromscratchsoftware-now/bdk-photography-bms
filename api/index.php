@@ -8625,8 +8625,7 @@ function phase1_handle(string $method, string $route): void {
       "SELECT l.product_id, COALESCE(SUM(l.quantity), 0) AS qty " .
       "FROM sales s " .
       "JOIN sale_lines l ON l.sale_id = s.id " .
-      "WHERE s.inventory_posted = 1 " .
-        "AND s.sale_date <= :as_of " .
+      "WHERE s.sale_date <= :as_of " .
         "AND (s.is_void = 0 OR (s.is_void = 1 AND s.voided_at IS NOT NULL AND DATE(s.voided_at) > :as_of))" .
         ($requestedShopId !== "" ? " AND s.shop_id = :shop_id" : "") . " " .
       "GROUP BY l.product_id",
