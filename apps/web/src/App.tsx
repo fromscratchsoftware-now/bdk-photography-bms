@@ -20,17 +20,21 @@ import {
   decideBankingRequest,
   decideCashTransfer,
   exportCapitalReport,
+  exportCommissionsReport,
   exportCashReport,
   exportExpenseReport,
   exportInvoiceReport,
+  exportPaymentsReport,
   exportPlReport,
   exportSalesReport,
   getAdminCashOverview,
   getCapitalReport,
   getCashMe,
   getCashReport,
+  getCommissionsReport,
   getExpenseReport,
   getInvoiceReport,
+  getPaymentsReport,
   getSale,
   getInvoice,
   getMe,
@@ -85,6 +89,7 @@ import {
   type CashSummary,
   type CashTransfer,
   type CashReport,
+  type CommissionsReport,
   type Customer,
   type Expense,
   type ExpenseCategory,
@@ -105,6 +110,8 @@ import {
   type NotificationItem,
   type OverdueRemindersRunResult,
   type AdminDailySummaryRunResult,
+  type PaymentMethod,
+  type PaymentsReport,
   type PlReport,
   type Product,
   type ProductCategory,
@@ -123,6 +130,29 @@ import {
   type WorkshopSheetSummary,
   type WorkshopStockRow
 } from "./lib/api";
+import { cx } from "./ui/cx";
+import { Button, IconButton } from "./ui/Button";
+import { Modal } from "./ui/Modal";
+import { ToastStack, type Toast, type ToastTone } from "./ui/ToastStack";
+import { ComboboxField, SelectField, TextAreaField, TextField } from "./ui/Field";
+import { Table } from "./ui/Table";
+import {
+  IconCash,
+  IconClose,
+  IconCommissions,
+  IconCustomers,
+  IconDashboard,
+  IconExpenses,
+  IconInvoices,
+  IconLogout,
+  IconMasterData,
+  IconMenu,
+  IconMessaging,
+  IconPayments,
+  IconProjects,
+  IconReports,
+  IconSales
+} from "./ui/icons";
 
 type AuthState = {
   token: string;
@@ -131,7 +161,7 @@ type AuthState = {
 
 type ActiveView = "overview" | "customers" | "invoices" | "inventory" | "sales" | "expenses" | "cash" | "reports" | "messaging" | "master-data";
 type MasterSection = "expense-categories" | "product-categories" | "products";
-type ReportSection = "sales" | "invoices" | "cash" | "expenses" | "pl" | "capital";
+type ReportSection = "sales" | "commissions" | "invoices" | "payments" | "cash" | "expenses" | "pl" | "capital";
 type InventorySection = "stock" | "transfers" | "workshop";
 type MessagingSection = "templates" | "queue" | "logs" | "jobs";
 
@@ -202,8 +232,11 @@ export default function App(): JSX.Element {
   const [users, setUsers] = useState<AuthUser[]>([]);
 
   const [activeView, setActiveView] = useState<ActiveView>("overview");
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [masterSection, setMasterSection] = useState<MasterSection>("expense-categories");
   const [reportSection, setReportSection] = useState<ReportSection>("sales");
+
+  const [toasts, setToasts] = useState<Toast[]>([]);
 
   const [expenseCategories, setExpenseCategories] = useState<ExpenseCategory[]>([]);
   const [productCategories, setProductCategories] = useState<ProductCategory[]>([]);
@@ -233,6 +266,9 @@ export default function App(): JSX.Element {
   const [invoicesBusy, setInvoicesBusy] = useState(false);
   const [selectedInvoice, setSelectedInvoice] = useState<InvoiceDetail | null>(null);
   const [selectedInvoicePayments, setSelectedInvoicePayments] = useState<InvoicePayment[]>([]);
+  const [invoiceCreateOpen, setInvoiceCreateOpen] = useState(false);
+  const [invoicePaymentOpen, setInvoicePaymentOpen] = useState(false);
+  const [invoiceSearch, setInvoiceSearch] = useState("");
   const [newInvoiceForm, setNewInvoiceForm] = useState<{
     shopId: string;
     customerId: string;
@@ -339,7 +375,9 @@ export default function App(): JSX.Element {
 
   const [reportsBusy, setReportsBusy] = useState(false);
   const [salesReport, setSalesReport] = useState<SalesReport | null>(null);
+  const [commissionsReport, setCommissionsReport] = useState<CommissionsReport | null>(null);
   const [invoiceReport, setInvoiceReport] = useState<InvoiceReport | null>(null);
+  const [paymentsReport, setPaymentsReport] = useState<PaymentsReport | null>(null);
   const [cashReport, setCashReport] = useState<CashReport | null>(null);
   const [expenseReport, setExpenseReport] = useState<ExpenseReport | null>(null);
   const [plReport, setPlReport] = useState<PlReport | null>(null);
@@ -357,6 +395,16 @@ export default function App(): JSX.Element {
     dateTo: todayLocalYmd()
   });
 
+  const [commissionsReportFilters, setCommissionsReportFilters] = useState<{
+    shopId: string;
+    dateFrom: string;
+    dateTo: string;
+  }>({
+    shopId: "",
+    dateFrom: daysAgoLocalYmd(29),
+    dateTo: todayLocalYmd()
+  });
+
   const [invoiceReportFilters, setInvoiceReportFilters] = useState<{
     shopId: string;
     status: InvoiceReportStatus;
@@ -365,6 +413,18 @@ export default function App(): JSX.Element {
   }>({
     shopId: "",
     status: "ALL",
+    dateFrom: daysAgoLocalYmd(29),
+    dateTo: todayLocalYmd()
+  });
+
+  const [paymentsReportFilters, setPaymentsReportFilters] = useState<{
+    shopId: string;
+    method: PaymentMethod | "";
+    dateFrom: string;
+    dateTo: string;
+  }>({
+    shopId: "",
+    method: "",
     dateFrom: daysAgoLocalYmd(29),
     dateTo: todayLocalYmd()
   });
@@ -619,6 +679,35 @@ export default function App(): JSX.Element {
 
   const authUser = auth?.user ?? null;
 
+  function dismissToast(id: string): void {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }
+
+  function pushToast(tone: ToastTone, message: string, title?: string): void {
+    const id = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const toast: Toast = { id, tone, message, title };
+    setToasts((prev) => [...prev, toast].slice(-4));
+    window.setTimeout(() => dismissToast(id), 5200);
+  }
+
+  useEffect(() => {
+    if (!error) {
+      return;
+    }
+    pushToast("error", error);
+    setError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [error]);
+
+  useEffect(() => {
+    if (!success) {
+      return;
+    }
+    pushToast("success", success);
+    setSuccess(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [success]);
+
   const canViewUsers = authUser?.role === "ADMIN" || authUser?.role === "MANAGER";
   const canManageMasterData = authUser?.role === "ADMIN";
   const canManageCustomers = authUser?.role === "ADMIN" || authUser?.role === "SALES";
@@ -660,6 +749,10 @@ export default function App(): JSX.Element {
   function clearSession(message?: string): void {
     setAuth(null);
     writeStoredAuth(null);
+    setSidebarOpen(false);
+    setInvoiceCreateOpen(false);
+    setInvoicePaymentOpen(false);
+    setInvoiceSearch("");
     setActiveView("overview");
     setReportSection("sales");
     setShops([]);
@@ -681,7 +774,9 @@ export default function App(): JSX.Element {
     setNotifications([]);
     setAdminCashOverview(null);
     setSalesReport(null);
+    setCommissionsReport(null);
     setInvoiceReport(null);
+    setPaymentsReport(null);
     setCashReport(null);
     setExpenseReport(null);
     setPlReport(null);
@@ -802,7 +897,9 @@ export default function App(): JSX.Element {
         setAdminCashFilters((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
         setNewTransferForm((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
         setSalesReportFilters((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
+        setCommissionsReportFilters((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
         setInvoiceReportFilters((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
+        setPaymentsReportFilters((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
         setCashReportFilters((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
         setExpenseReportFilters((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
         setPlReportFilters((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
@@ -1509,6 +1606,13 @@ export default function App(): JSX.Element {
           dateTo: salesReportFilters.dateTo || undefined
         });
         setSalesReport(report);
+      } else if (reportSection === "commissions") {
+        const report = await getCommissionsReport(auth.token, {
+          shopId: commissionsReportFilters.shopId || undefined,
+          dateFrom: commissionsReportFilters.dateFrom || undefined,
+          dateTo: commissionsReportFilters.dateTo || undefined
+        });
+        setCommissionsReport(report);
       } else if (reportSection === "invoices") {
         const report = await getInvoiceReport(auth.token, {
           status: invoiceReportFilters.status,
@@ -1517,6 +1621,14 @@ export default function App(): JSX.Element {
           dateTo: invoiceReportFilters.dateTo || undefined
         });
         setInvoiceReport(report);
+      } else if (reportSection === "payments") {
+        const report = await getPaymentsReport(auth.token, {
+          shopId: paymentsReportFilters.shopId || undefined,
+          method: paymentsReportFilters.method || undefined,
+          dateFrom: paymentsReportFilters.dateFrom || undefined,
+          dateTo: paymentsReportFilters.dateTo || undefined
+        });
+        setPaymentsReport(report);
       } else if (reportSection === "cash") {
         const report = await getCashReport(auth.token, {
           shopId: cashReportFilters.shopId || undefined,
@@ -1572,6 +1684,17 @@ export default function App(): JSX.Element {
           format
         );
         triggerBrowserDownload(file.blob, file.filename);
+      } else if (reportSection === "commissions") {
+        const file = await exportCommissionsReport(
+          auth.token,
+          {
+            shopId: commissionsReportFilters.shopId || undefined,
+            dateFrom: commissionsReportFilters.dateFrom || undefined,
+            dateTo: commissionsReportFilters.dateTo || undefined
+          },
+          format
+        );
+        triggerBrowserDownload(file.blob, file.filename);
       } else if (reportSection === "invoices") {
         const file = await exportInvoiceReport(
           auth.token,
@@ -1580,6 +1703,18 @@ export default function App(): JSX.Element {
             shopId: invoiceReportFilters.shopId || undefined,
             dateFrom: invoiceReportFilters.dateFrom || undefined,
             dateTo: invoiceReportFilters.dateTo || undefined
+          },
+          format
+        );
+        triggerBrowserDownload(file.blob, file.filename);
+      } else if (reportSection === "payments") {
+        const file = await exportPaymentsReport(
+          auth.token,
+          {
+            shopId: paymentsReportFilters.shopId || undefined,
+            method: paymentsReportFilters.method || undefined,
+            dateFrom: paymentsReportFilters.dateFrom || undefined,
+            dateTo: paymentsReportFilters.dateTo || undefined
           },
           format
         );
@@ -1654,10 +1789,17 @@ export default function App(): JSX.Element {
     salesReportFilters.period,
     salesReportFilters.dateFrom,
     salesReportFilters.dateTo,
+    commissionsReportFilters.shopId,
+    commissionsReportFilters.dateFrom,
+    commissionsReportFilters.dateTo,
     invoiceReportFilters.shopId,
     invoiceReportFilters.status,
     invoiceReportFilters.dateFrom,
     invoiceReportFilters.dateTo,
+    paymentsReportFilters.shopId,
+    paymentsReportFilters.method,
+    paymentsReportFilters.dateFrom,
+    paymentsReportFilters.dateTo,
     cashReportFilters.shopId,
     cashReportFilters.asOf,
     cashReportFilters.dateFrom,
@@ -2123,132 +2265,296 @@ export default function App(): JSX.Element {
           : 12
       : null;
 
+  const reportTitle =
+    reportSection === "sales"
+      ? "Sales"
+      : reportSection === "commissions"
+        ? "Commissions"
+        : reportSection === "invoices"
+          ? "Invoices"
+          : reportSection === "payments"
+            ? "Payments"
+            : reportSection === "cash"
+              ? "Cash"
+              : reportSection === "expenses"
+                ? "Expenses"
+                : reportSection === "capital"
+                  ? "Capital"
+                  : "P&L";
+
+  const topbarTitle = !authUser
+    ? "BDK Photography BMS"
+    : activeView === "overview"
+      ? "Dashboard"
+      : activeView === "inventory"
+        ? "Projects"
+        : activeView === "sales"
+          ? "Sales (POS)"
+          : activeView === "invoices"
+            ? "Invoices"
+            : activeView === "customers"
+              ? "Customers"
+              : activeView === "expenses"
+                ? "Expenses"
+                : activeView === "cash"
+                  ? "Cash"
+                  : activeView === "reports"
+                    ? `Reports · ${reportTitle}`
+                    : activeView === "messaging"
+                      ? "Messaging"
+                      : "Master Data";
+
+  const filteredInvoices = useMemo(() => {
+    const q = invoiceSearch.trim().toLowerCase();
+    if (!q) {
+      return invoices;
+    }
+    return invoices.filter((inv) => {
+      const haystack = [
+        inv.invoiceNumber,
+        inv.shopCode,
+        inv.customerFirstName,
+        inv.customerLastName,
+        inv.customerMobileNumber ?? "",
+        inv.status
+      ]
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [invoices, invoiceSearch]);
+
+  const activeCustomerOptions = useMemo(
+    () =>
+      customers
+        .filter((c) => c.isActive)
+        .map((c) => ({
+          value: c.id,
+          label: `${c.firstName} ${c.lastName} • ${c.mobileNumber}`,
+          keywords: `${c.mobileNumber} ${c.firstName} ${c.lastName} ${c.email ?? ""}`
+        })),
+    [customers]
+  );
+
   return (
-    <div className="page">
-      <header className="hero">
-        <p className="eyebrow">BDK Photography</p>
-        <h1>Business Management System</h1>
-        <p className="subtitle">
-          Phases 1-8: authentication (JWT), master data, customers, invoices/payments, sales POS, reconciliation locks, expenses, cash tracking, reports/exports, plus workshop and inventory transfers.
-        </p>
-
-        <div className="divider" style={{ background: "rgba(255,255,255,0.22)" }} />
-
-        {authUser ? (
-          <div className="meta" style={{ color: "rgba(248,250,252,0.95)" }}>
-            <div>
-              <strong>{authUser.fullName}</strong>
-              <div className="hint" style={{ color: "rgba(248,250,252,0.8)" }}>
-                {authUser.role} • {authUser.mobileNumber}
-              </div>
-            </div>
-            <div className="hint" style={{ color: "rgba(248,250,252,0.8)" }}>
-              Signed in
-            </div>
-            <button data-variant="ghost" onClick={() => clearSession("Logged out.")}>
-              Logout
-            </button>
-          </div>
-        ) : (
-          <div className="note" style={{ background: "rgba(255,255,255,0.16)", borderColor: "rgba(255,255,255,0.25)", color: "rgba(248,250,252,0.9)" }}>
-            Login is required before accessing the portal.
-          </div>
-        )}
-      </header>
-
+    <div className={cx("appShell", !authUser && "appShell--loggedOut")}>
       {authUser ? (
-        <div className="tabs">
-          <button
-            className={`tab ${activeView === "overview" ? "isActive" : ""}`}
-            type="button"
-            onClick={() => setActiveView("overview")}
-          >
-            Overview
-          </button>
-          <button
-            className={`tab ${activeView === "customers" ? "isActive" : ""}`}
-            type="button"
-            onClick={() => setActiveView("customers")}
-          >
-            Customers
-          </button>
-          <button
-            className={`tab ${activeView === "invoices" ? "isActive" : ""}`}
-            type="button"
-            onClick={() => setActiveView("invoices")}
-          >
-            Invoices
-          </button>
-          {canViewInventory ? (
-            <button
-              className={`tab ${activeView === "inventory" ? "isActive" : ""}`}
-              type="button"
-              onClick={() => setActiveView("inventory")}
-            >
-              Inventory
-            </button>
-          ) : null}
-          {canViewSales ? (
-            <button
-              className={`tab ${activeView === "sales" ? "isActive" : ""}`}
-              type="button"
-              onClick={() => setActiveView("sales")}
-            >
-              Sales (POS)
-            </button>
-          ) : null}
-          {canViewExpenses ? (
-            <button
-              className={`tab ${activeView === "expenses" ? "isActive" : ""}`}
-              type="button"
-              onClick={() => setActiveView("expenses")}
-            >
-              Expenses
-            </button>
-          ) : null}
-          {canViewCash ? (
-            <button
-              className={`tab ${activeView === "cash" ? "isActive" : ""}`}
-              type="button"
-              onClick={() => setActiveView("cash")}
-            >
-              Cash
-            </button>
-          ) : null}
-          {canViewReports ? (
-            <button
-              className={`tab ${activeView === "reports" ? "isActive" : ""}`}
-              type="button"
-              onClick={() => setActiveView("reports")}
-            >
-              Reports
-            </button>
-          ) : null}
-          {canManageMessaging ? (
-            <button
-              className={`tab ${activeView === "messaging" ? "isActive" : ""}`}
-              type="button"
-              onClick={() => setActiveView("messaging")}
-            >
-              Messaging
-            </button>
-          ) : null}
-          {canManageMasterData ? (
-            <button
-              className={`tab ${activeView === "master-data" ? "isActive" : ""}`}
-              type="button"
-              onClick={() => setActiveView("master-data")}
-            >
-              Master Data
-            </button>
-          ) : null}
-        </div>
+        <>
+          {sidebarOpen ? <div className="sidebarOverlay" onClick={() => setSidebarOpen(false)} /> : null}
+          <aside className={cx("sidebar", sidebarOpen && "isOpen")}>
+            <div className="sidebarBrand" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem" }}>
+              <div className="sidebarBrand">
+                <p className="sidebarBrand__title">BDK Photography</p>
+                <p className="sidebarBrand__sub">Business Management</p>
+              </div>
+              <IconButton className="topbar__menu" onClick={() => setSidebarOpen(false)} aria-label="Close menu">
+                <IconClose width={18} height={18} />
+              </IconButton>
+            </div>
+
+            <nav aria-label="Primary">
+              <div className="navGroup">
+                <div className="navGroup__title">Core</div>
+                <button
+                  className={cx("navItem", activeView === "overview" && "isActive")}
+                  type="button"
+                  onClick={() => {
+                    setActiveView("overview");
+                    setSidebarOpen(false);
+                  }}
+                >
+                  <IconDashboard />
+                  Dashboard
+                </button>
+                <button
+                  className={cx("navItem", activeView === "inventory" && "isActive")}
+                  type="button"
+                  onClick={() => {
+                    setActiveView("inventory");
+                    setSidebarOpen(false);
+                  }}
+                >
+                  <IconProjects />
+                  Projects
+                </button>
+                {canViewSales ? (
+                  <button
+                    className={cx("navItem", activeView === "sales" && "isActive")}
+                    type="button"
+                    onClick={() => {
+                      setActiveView("sales");
+                      setSidebarOpen(false);
+                    }}
+                  >
+                    <IconSales />
+                    Sales (POS)
+                  </button>
+                ) : null}
+                <button
+                  className={cx("navItem", activeView === "invoices" && "isActive")}
+                  type="button"
+                  onClick={() => {
+                    setActiveView("invoices");
+                    setSidebarOpen(false);
+                  }}
+                >
+                  <IconInvoices />
+                  Invoices
+                </button>
+                <button
+                  className={cx("navItem", activeView === "customers" && "isActive")}
+                  type="button"
+                  onClick={() => {
+                    setActiveView("customers");
+                    setSidebarOpen(false);
+                  }}
+                >
+                  <IconCustomers />
+                  Customers
+                </button>
+              </div>
+
+              <div className="navGroup">
+                <div className="navGroup__title">Finance</div>
+                {canViewCash ? (
+                  <button
+                    className={cx("navItem", activeView === "cash" && "isActive")}
+                    type="button"
+                    onClick={() => {
+                      setActiveView("cash");
+                      setSidebarOpen(false);
+                    }}
+                  >
+                    <IconCash />
+                    Cash
+                  </button>
+                ) : null}
+                {canViewExpenses ? (
+                  <button
+                    className={cx("navItem", activeView === "expenses" && "isActive")}
+                    type="button"
+                    onClick={() => {
+                      setActiveView("expenses");
+                      setSidebarOpen(false);
+                    }}
+                  >
+                    <IconExpenses />
+                    Expenses
+                  </button>
+                ) : null}
+                {canViewReports ? (
+                  <>
+                    <button
+                      className={cx("navItem", activeView === "reports" && reportSection === "sales" && "isActive")}
+                      type="button"
+                      onClick={() => {
+                        setActiveView("reports");
+                        setReportSection("sales");
+                        setSidebarOpen(false);
+                      }}
+                    >
+                      <IconReports />
+                      Reports
+                    </button>
+                    <button
+                      className={cx("navItem", activeView === "reports" && reportSection === "payments" && "isActive")}
+                      type="button"
+                      onClick={() => {
+                        setActiveView("reports");
+                        setReportSection("payments");
+                        setSidebarOpen(false);
+                      }}
+                    >
+                      <IconPayments />
+                      Payments
+                    </button>
+                    <button
+                      className={cx("navItem", activeView === "reports" && reportSection === "commissions" && "isActive")}
+                      type="button"
+                      onClick={() => {
+                        setActiveView("reports");
+                        setReportSection("commissions");
+                        setSidebarOpen(false);
+                      }}
+                    >
+                      <IconCommissions />
+                      Commissions
+                    </button>
+                  </>
+                ) : null}
+              </div>
+
+              {canManageMasterData || canManageMessaging ? (
+                <div className="navGroup">
+                  <div className="navGroup__title">Admin</div>
+                  {canManageMasterData ? (
+                    <button
+                      className={cx("navItem", activeView === "master-data" && "isActive")}
+                      type="button"
+                      onClick={() => {
+                        setActiveView("master-data");
+                        setSidebarOpen(false);
+                      }}
+                    >
+                      <IconMasterData />
+                      Master Data
+                    </button>
+                  ) : null}
+                  {canManageMessaging ? (
+                    <button
+                      className={cx("navItem", activeView === "messaging" && "isActive")}
+                      type="button"
+                      onClick={() => {
+                        setActiveView("messaging");
+                        setSidebarOpen(false);
+                      }}
+                    >
+                      <IconMessaging />
+                      Messaging
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+            </nav>
+
+            <div className="sidebarFooter">
+              <div className="sidebarUser">
+                <div className="sidebarUser__name">{authUser.fullName}</div>
+                <div className="sidebarUser__meta">
+                  {authUser.role} • {authUser.mobileNumber}
+                </div>
+              </div>
+              <Button
+                variant="ghost"
+                icon={<IconLogout width={18} height={18} />}
+                onClick={() => clearSession("Logged out.")}
+              >
+                Logout
+              </Button>
+            </div>
+          </aside>
+        </>
       ) : null}
 
-      {error ? <div className="banner error">{error}</div> : null}
-      {success ? <div className="banner success">{success}</div> : null}
+      <div className="appMain">
+        <header className="topbar">
+          {authUser ? (
+            <IconButton className="topbar__menu" onClick={() => setSidebarOpen(true)} aria-label="Open menu">
+              <IconMenu width={20} height={20} />
+            </IconButton>
+          ) : null}
+          <h1 className="topbar__title">{topbarTitle}</h1>
+          <div className="topbar__spacer" />
+          {!authUser ? null : (
+            <Button variant="secondary" size="sm" icon={<IconLogout width={18} height={18} />} onClick={() => clearSession("Logged out.")}>
+              Logout
+            </Button>
+          )}
+        </header>
 
-      <div className="grid">
+        <main className="content">
+          <div className="container">
+            <div className="grid">
         {!authUser ? (
           <>
             <section className="card">
@@ -2708,325 +3014,121 @@ export default function App(): JSX.Element {
         ) : activeView === "invoices" ? (
           <>
             <section className="card" style={{ gridColumn: "1 / -1" }}>
-              <h2>Invoices</h2>
-              <p className="hint">Create invoices, print them, and record installment payments (cash/mobile money/card).</p>
+              <div className="meta" style={{ gridTemplateColumns: "1fr auto", alignItems: "start" }}>
+                <div>
+                  <h2 style={{ marginBottom: 0 }}>Invoices</h2>
+                  <p className="hint">Create invoices, print them, and record installment payments (cash/mobile money/card).</p>
+                </div>
+                <div className="approvalActions">
+                  {canManageInvoices ? (
+                    <Button
+                      icon={<IconInvoices width={18} height={18} />}
+                      onClick={() => {
+                        const firstCustomerId = activeCustomerOptions[0]?.value ?? "";
+                        if (firstCustomerId) {
+                          setNewInvoiceForm((prev) => (prev.customerId ? prev : { ...prev, customerId: firstCustomerId }));
+                        }
+                        setInvoiceCreateOpen(true);
+                      }}
+                    >
+                      New invoice
+                    </Button>
+                  ) : null}
+                </div>
+              </div>
             </section>
 
-            {canManageInvoices ? (
+            {!canManageInvoices ? (
               <section className="card" style={{ gridColumn: "1 / -1" }}>
-                <h2>Create Invoice</h2>
-                {customers.length ? (
-                  <form
-                    className="form form--three"
-                    onSubmit={async (event) => {
-                      event.preventDefault();
-                      if (!auth) {
-                        return;
-                      }
-                      setError(null);
-                      setSuccess(null);
-                      setInvoicesBusy(true);
-                      try {
-                        const lines = newInvoiceForm.lines.map((l) => ({
-                          description: l.description,
-                          quantity: Number(l.quantity),
-                          unitPrice: Number(l.unitPrice),
-                          notes: l.notes ? l.notes : null
-                        }));
-
-                        const created = await createInvoice(auth.token, {
-                          shopId: newInvoiceForm.shopId || undefined,
-                          customerId: newInvoiceForm.customerId,
-                          status: newInvoiceForm.status,
-                          dueDate: newInvoiceForm.dueDate ? newInvoiceForm.dueDate : null,
-                          notes: newInvoiceForm.notes ? newInvoiceForm.notes : null,
-                          lines
-                        });
-
-                        setSelectedInvoice(created);
-                        setSelectedInvoicePayments([]);
-                        setSuccess("Invoice created.");
-
-                        await refreshInvoices();
-
-                        setNewInvoiceForm((prev) => ({
-                          ...prev,
-                          status: "DRAFT",
-                          dueDate: "",
-                          notes: "",
-                          lines: [{ description: "", quantity: "1", unitPrice: "", notes: "" }]
-                        }));
-                        setNewPaymentForm({ amount: "", method: "CASH", notes: "" });
-                      } catch (caught: unknown) {
-                        setError(caught instanceof Error ? caught.message : "Failed to create invoice");
-                      } finally {
-                        setInvoicesBusy(false);
-                      }
-                    }}
-                  >
-                    <label>
-                      Shop
-                      <select
-                        value={newInvoiceForm.shopId}
-                        onChange={(event) => setNewInvoiceForm((prev) => ({ ...prev, shopId: event.target.value }))}
-                        disabled={authUser?.role !== "ADMIN"}
-                        required={authUser?.role === "ADMIN"}
-                      >
-                        {shops.map((s) => (
-                          <option key={s.id} value={s.id}>
-                            {s.code} • {s.name}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label>
-                      Customer
-                      <select
-                        value={newInvoiceForm.customerId}
-                        onChange={(event) =>
-                          setNewInvoiceForm((prev) => ({ ...prev, customerId: event.target.value }))
-                        }
-                        required
-                      >
-                        {customers
-                          .filter((c) => c.isActive)
-                          .map((c) => (
-                            <option key={c.id} value={c.id}>
-                              {c.firstName} {c.lastName} • {c.mobileNumber}
-                            </option>
-                          ))}
-                      </select>
-                    </label>
-                    <label>
-                      Status
-                      <select
-                        value={newInvoiceForm.status}
-                        onChange={(event) =>
-                          setNewInvoiceForm((prev) => ({
-                            ...prev,
-                            status: event.target.value === "ISSUED" ? "ISSUED" : "DRAFT"
-                          }))
-                        }
-                      >
-                        <option value="DRAFT">Draft</option>
-                        <option value="ISSUED">Issued</option>
-                      </select>
-                    </label>
-                    <label>
-                      Due date (optional)
-                      <input
-                        type="date"
-                        value={newInvoiceForm.dueDate}
-                        onChange={(event) => setNewInvoiceForm((prev) => ({ ...prev, dueDate: event.target.value }))}
-                      />
-                    </label>
-                    <label>
-                      Notes (optional)
-                      <input
-                        value={newInvoiceForm.notes}
-                        onChange={(event) => setNewInvoiceForm((prev) => ({ ...prev, notes: event.target.value }))}
-                      />
-                    </label>
-
-                    <div style={{ gridColumn: "1 / -1" }}>
-                      <p className="subhead">Line Items</p>
-                      <div className="stack">
-                        {newInvoiceForm.lines.map((line, idx) => (
-                          <div key={idx} className="note" style={{ borderStyle: "dashed" }}>
-                            <div className="form form--three" style={{ marginTop: 0 }}>
-                              <label>
-                                Description
-                                <input
-                                  value={line.description}
-                                  onChange={(event) =>
-                                    setNewInvoiceForm((prev) => {
-                                      const nextLines = [...prev.lines];
-                                      nextLines[idx] = { ...nextLines[idx], description: event.target.value };
-                                      return { ...prev, lines: nextLines };
-                                    })
-                                  }
-                                  required
-                                />
-                              </label>
-                              <label>
-                                Qty
-                                <input
-                                  type="number"
-                                  min={1}
-                                  value={line.quantity}
-                                  onChange={(event) =>
-                                    setNewInvoiceForm((prev) => {
-                                      const nextLines = [...prev.lines];
-                                      nextLines[idx] = { ...nextLines[idx], quantity: event.target.value };
-                                      return { ...prev, lines: nextLines };
-                                    })
-                                  }
-                                  required
-                                />
-                              </label>
-                              <label>
-                                Unit Price (UGX)
-                                <input
-                                  type="number"
-                                  min={0}
-                                  value={line.unitPrice}
-                                  onChange={(event) =>
-                                    setNewInvoiceForm((prev) => {
-                                      const nextLines = [...prev.lines];
-                                      nextLines[idx] = { ...nextLines[idx], unitPrice: event.target.value };
-                                      return { ...prev, lines: nextLines };
-                                    })
-                                  }
-                                  required
-                                />
-                              </label>
-                              <label style={{ gridColumn: "1 / -1" }}>
-                                Notes (optional)
-                                <input
-                                  value={line.notes}
-                                  onChange={(event) =>
-                                    setNewInvoiceForm((prev) => {
-                                      const nextLines = [...prev.lines];
-                                      nextLines[idx] = { ...nextLines[idx], notes: event.target.value };
-                                      return { ...prev, lines: nextLines };
-                                    })
-                                  }
-                                />
-                              </label>
-                              <div className="approvalActions" style={{ gridColumn: "1 / -1" }}>
-                                <button
-                                  data-variant="ghost"
-                                  type="button"
-                                  onClick={() =>
-                                    setNewInvoiceForm((prev) => ({
-                                      ...prev,
-                                      lines:
-                                        prev.lines.length <= 1
-                                          ? prev.lines
-                                          : prev.lines.filter((_, lineIdx) => lineIdx !== idx)
-                                    }))
-                                  }
-                                  disabled={newInvoiceForm.lines.length <= 1}
-                                >
-                                  Remove Line
-                                </button>
-                              </div>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                      <div className="approvalActions" style={{ marginTop: "0.8rem" }}>
-                        <button
-                          data-variant="ghost"
-                          type="button"
-                          onClick={() =>
-                            setNewInvoiceForm((prev) => ({
-                              ...prev,
-                              lines: [...prev.lines, { description: "", quantity: "1", unitPrice: "", notes: "" }]
-                            }))
-                          }
-                        >
-                          Add Line
-                        </button>
-                      </div>
-                    </div>
-
-                    <button type="submit" disabled={invoicesBusy}>
-                      {invoicesBusy ? "Saving..." : "Create Invoice"}
-                    </button>
-                  </form>
-                ) : (
-                  <div className="note">Create a customer first.</div>
-                )}
-              </section>
-            ) : (
-              <section className="card" style={{ gridColumn: "1 / -1" }}>
-                <h2>Create Invoice</h2>
                 <div className="note">You don’t have permission to create invoices.</div>
               </section>
-            )}
+            ) : null}
 
             <section className="card" style={{ gridColumn: "1 / -1" }}>
               <h2>Invoice List</h2>
               {invoicesBusy ? <p className="hint">Loading...</p> : null}
-              <div className="tableWrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Invoice #</th>
-                      <th>Shop</th>
-                      <th>Customer</th>
-                      <th>Status</th>
-                      <th>Total</th>
-                      <th>Balance</th>
-                      <th>Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {invoices.length ? (
-                      invoices.map((inv) => (
-                        <tr key={inv.id} className={selectedInvoice?.invoice.id === inv.id ? "isSelected" : ""}>
-                          <td>{inv.invoiceNumber}</td>
-                          <td>{inv.shopCode}</td>
-                          <td>
-                            {inv.customerFirstName} {inv.customerLastName}
-                          </td>
-                          <td>{inv.status}</td>
-                          <td>{formatUGX(inv.totalAmount)}</td>
-                          <td>{formatUGX(inv.balance)}</td>
-                          <td>
-                            <div className="approvalActions">
-                              <button
-                                data-variant="ghost"
-                                type="button"
-                                onClick={async () => {
-                                  await loadInvoiceDetail(inv.id);
-                                }}
-                              >
-                                View
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      ))
-                    ) : (
-                      <tr>
-                        <td colSpan={7}>No invoices yet.</td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
+              <div style={{ maxWidth: 520, marginTop: "0.75rem" }}>
+                <TextField
+                  label="Search"
+                  value={invoiceSearch}
+                  onChange={(event) => setInvoiceSearch(event.target.value)}
+                  placeholder="Invoice #, customer, phone, status..."
+                />
               </div>
+
+              <div className="divider" />
+
+              <Table>
+                <thead>
+                  <tr>
+                    <th>Invoice #</th>
+                    <th>Shop</th>
+                    <th>Customer</th>
+                    <th>Status</th>
+                    <th>Total</th>
+                    <th>Balance</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredInvoices.length ? (
+                    filteredInvoices.map((inv) => (
+                      <tr key={inv.id} className={selectedInvoice?.invoice.id === inv.id ? "isSelected" : ""}>
+                        <td>{inv.invoiceNumber}</td>
+                        <td>{inv.shopCode}</td>
+                        <td>
+                          {inv.customerFirstName} {inv.customerLastName}
+                        </td>
+                        <td>{inv.status}</td>
+                        <td>{formatUGX(inv.totalAmount)}</td>
+                        <td>{formatUGX(inv.balance)}</td>
+                        <td>
+                          <div className="approvalActions">
+                            <button
+                              data-variant="ghost"
+                              type="button"
+                              onClick={async () => {
+                                await loadInvoiceDetail(inv.id);
+                              }}
+                            >
+                              View
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={7}>{invoiceSearch.trim() ? "No invoices match your search." : "No invoices yet."}</td>
+                    </tr>
+                  )}
+                </tbody>
+              </Table>
             </section>
 
             {selectedInvoice ? (
               <section className="card" style={{ gridColumn: "1 / -1" }}>
                 <div className="meta" style={{ alignItems: "flex-start" }}>
                   <div>
-                    <p className="eyebrow" style={{ marginBottom: 0 }}>
-                      BDK Photography
+                    <p className="hint" style={{ marginBottom: 0 }}>
+                      {selectedInvoice.invoice.shopCode} • {selectedInvoice.invoice.shopName}
                     </p>
                     <h2 style={{ marginTop: "0.2rem" }}>{selectedInvoice.invoice.invoiceNumber}</h2>
-                    <div className="hint">
-                      {selectedInvoice.invoice.shopCode} • {selectedInvoice.invoice.shopName}
-                    </div>
                     <div className="hint">
                       Customer: {selectedInvoice.invoice.customerFirstName} {selectedInvoice.invoice.customerLastName} •{" "}
                       {selectedInvoice.invoice.customerMobileNumber}
                     </div>
                   </div>
                   <div className="approvalActions">
-                    <button
-                      data-variant="ghost"
-                      type="button"
+                    <Button
+                      variant="ghost"
                       onClick={() => openInvoicePrint(selectedInvoice, selectedInvoicePayments)}
                     >
                       Print
-                    </button>
+                    </Button>
                     {canManageInvoices && selectedInvoice.invoice.status === "DRAFT" ? (
-                      <button
-                        data-variant="ghost"
-                        type="button"
+                      <Button
+                        variant="secondary"
                         onClick={async () => {
                           if (!auth) {
                             return;
@@ -3047,12 +3149,11 @@ export default function App(): JSX.Element {
                         }}
                       >
                         Issue
-                      </button>
+                      </Button>
                     ) : null}
                     {canVoidInvoices && selectedInvoice.invoice.status !== "VOID" ? (
-                      <button
-                        data-variant="ghost"
-                        type="button"
+                      <Button
+                        variant="danger"
                         onClick={async () => {
                           if (!auth) {
                             return;
@@ -3077,173 +3178,104 @@ export default function App(): JSX.Element {
                         }}
                       >
                         Void
-                      </button>
+                      </Button>
+                    ) : null}
+                    {canManageInvoices && selectedInvoice.invoice.status !== "VOID" && selectedInvoice.invoice.balance > 0 ? (
+                      <Button
+                        onClick={() => {
+                          setInvoicePaymentOpen(true);
+                        }}
+                      >
+                        Record payment
+                      </Button>
                     ) : null}
                   </div>
                 </div>
 
                 <div className="divider" />
 
-                <div className="tableWrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Description</th>
-                        <th>Qty</th>
-                        <th>Unit</th>
-                        <th>Total</th>
+                <Table>
+                  <thead>
+                    <tr>
+                      <th>Description</th>
+                      <th>Qty</th>
+                      <th>Unit</th>
+                      <th>Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {selectedInvoice.lines.map((l) => (
+                      <tr key={l.id}>
+                        <td>{l.description}</td>
+                        <td>{l.quantity}</td>
+                        <td>{formatUGX(l.unitPrice)}</td>
+                        <td>{formatUGX(l.lineTotal)}</td>
                       </tr>
-                    </thead>
-                    <tbody>
-                      {selectedInvoice.lines.map((l) => (
-                        <tr key={l.id}>
-                          <td>{l.description}</td>
-                          <td>{l.quantity}</td>
-                          <td>{formatUGX(l.unitPrice)}</td>
-                          <td>{formatUGX(l.lineTotal)}</td>
-                        </tr>
-                      ))}
-                      <tr>
-                        <td colSpan={3}>
-                          <strong>Total</strong>
-                        </td>
-                        <td>
-                          <strong>{formatUGX(selectedInvoice.invoice.totalAmount)}</strong>
-                        </td>
-                      </tr>
-                      <tr>
-                        <td colSpan={3}>
-                          <strong>Paid</strong>
-                        </td>
-                        <td>
-                          <strong>{formatUGX(selectedInvoice.invoice.paidAmount)}</strong>
-                        </td>
-                      </tr>
-                      <tr>
-                        <td colSpan={3}>
-                          <strong>Balance</strong>
-                        </td>
-                        <td>
-                          <strong>{formatUGX(selectedInvoice.invoice.balance)}</strong>
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
+                    ))}
+                    <tr>
+                      <td colSpan={3}>
+                        <strong>Total</strong>
+                      </td>
+                      <td>
+                        <strong>{formatUGX(selectedInvoice.invoice.totalAmount)}</strong>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td colSpan={3}>
+                        <strong>Paid</strong>
+                      </td>
+                      <td>
+                        <strong>{formatUGX(selectedInvoice.invoice.paidAmount)}</strong>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td colSpan={3}>
+                        <strong>Balance</strong>
+                      </td>
+                      <td>
+                        <strong>{formatUGX(selectedInvoice.invoice.balance)}</strong>
+                      </td>
+                    </tr>
+                  </tbody>
+                </Table>
 
                 <div className="divider" />
 
-                <h3>Payments</h3>
-                <div className="tableWrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Date</th>
-                        <th>Method</th>
-                        <th>Amount</th>
-                        <th>Notes</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {selectedInvoicePayments.length ? (
-                        selectedInvoicePayments.map((p) => (
-                          <tr key={p.id}>
-                            <td>{p.createdAt}</td>
-                            <td>{p.method}</td>
-                            <td>{formatUGX(p.amount)}</td>
-                            <td>{p.notes ?? "-"}</td>
-                          </tr>
-                        ))
-                      ) : (
-                        <tr>
-                          <td colSpan={4}>No payments yet.</td>
+                <h3 style={{ marginTop: 0 }}>Payments</h3>
+                <Table>
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      <th>Method</th>
+                      <th>Amount</th>
+                      <th>Notes</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {selectedInvoicePayments.length ? (
+                      selectedInvoicePayments.map((p) => (
+                        <tr key={p.id}>
+                          <td>{p.createdAt}</td>
+                          <td>{p.method}</td>
+                          <td>{formatUGX(p.amount)}</td>
+                          <td>{p.notes ?? "-"}</td>
                         </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-
-                {canManageInvoices && selectedInvoice.invoice.status !== "VOID" && selectedInvoice.invoice.balance > 0 ? (
-                  <div style={{ marginTop: "1rem" }}>
-                    <p className="subhead">Record Payment</p>
-                    <form
-                      className="form form--three"
-                      onSubmit={async (event) => {
-                        event.preventDefault();
-                        if (!auth) {
-                          return;
-                        }
-                        setError(null);
-                        setSuccess(null);
-                        setInvoicesBusy(true);
-                        try {
-                          await createInvoicePayment(auth.token, selectedInvoice.invoice.id, {
-                            amount: Number(newPaymentForm.amount),
-                            method: newPaymentForm.method,
-                            notes: newPaymentForm.notes ? newPaymentForm.notes : null
-                          });
-                          setNewPaymentForm({ amount: "", method: "CASH", notes: "" });
-                          setSuccess("Payment recorded.");
-                          await Promise.all([refreshInvoices(), loadInvoiceDetail(selectedInvoice.invoice.id)]);
-                        } catch (caught: unknown) {
-                          setError(caught instanceof Error ? caught.message : "Failed to record payment");
-                        } finally {
-                          setInvoicesBusy(false);
-                        }
-                      }}
-                    >
-                      <label>
-                        Amount (UGX)
-                        <input
-                          type="number"
-                          min={1}
-                          value={newPaymentForm.amount}
-                          onChange={(event) => setNewPaymentForm((prev) => ({ ...prev, amount: event.target.value }))}
-                          required
-                        />
-                      </label>
-                      <label>
-                        Method
-                        <select
-                          value={newPaymentForm.method}
-                          onChange={(event) =>
-                            setNewPaymentForm((prev) => ({
-                              ...prev,
-                              method:
-                                event.target.value === "MOBILE_MONEY"
-                                  ? "MOBILE_MONEY"
-                                  : event.target.value === "CARD"
-                                    ? "CARD"
-                                    : "CASH"
-                            }))
-                          }
-                        >
-                          <option value="CASH">Cash</option>
-                          <option value="MOBILE_MONEY">Mobile Money</option>
-                          <option value="CARD">Card</option>
-                        </select>
-                      </label>
-                      <label>
-                        Notes (optional)
-                        <input
-                          value={newPaymentForm.notes}
-                          onChange={(event) => setNewPaymentForm((prev) => ({ ...prev, notes: event.target.value }))}
-                        />
-                      </label>
-                      <button type="submit" disabled={invoicesBusy}>
-                        {invoicesBusy ? "Saving..." : "Record Payment"}
-                      </button>
-                    </form>
-                  </div>
-                ) : null}
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan={4}>No payments yet.</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </Table>
               </section>
             ) : null}
           </>
         ) : activeView === "inventory" ? (
           <>
             <section className="card" style={{ gridColumn: "1 / -1" }}>
-              <h2>Inventory</h2>
-              <p className="hint">Shop stock, workshop output, and transfers (Draft → Shipped → Received).</p>
+              <h2>Projects</h2>
+              <p className="hint">Boards lifecycle: workshop output, transfers (Draft → Shipped → Received), and shop stock.</p>
 
               <div className="tabs" style={{ marginTop: "0.85rem" }}>
                 <button
@@ -4523,7 +4555,7 @@ export default function App(): JSX.Element {
               </>
             ) : (
               <section className="card" style={{ gridColumn: "1 / -1" }}>
-                <h2>Inventory</h2>
+                <h2>Projects</h2>
                 <div className="note">Select a section above.</div>
               </section>
             )}
@@ -5671,15 +5703,41 @@ export default function App(): JSX.Element {
         ) : activeView === "reports" ? (
           <>
             <section className="card" style={{ gridColumn: "1 / -1" }}>
-              <h2>Phase 7: Reports + Exports</h2>
-              <p className="hint">Core reports with filters (shop/date range) and exports to CSV, Excel (XLSX), and PDF.</p>
+              <div className="meta" style={{ gridTemplateColumns: "1fr auto", alignItems: "start" }}>
+                <div>
+                  <h2 style={{ marginBottom: 0 }}>Reports</h2>
+                  <p className="hint">Finance and operations reporting with exports to CSV, Excel (XLSX), and PDF.</p>
+                </div>
+                <div className="approvalActions">
+                  <Button variant="ghost" onClick={() => void refreshReportsData()} disabled={reportsBusy}>
+                    {reportsBusy ? "Refreshing..." : "Refresh"}
+                  </Button>
+                  <Button variant="secondary" onClick={() => void exportCurrentReport("csv")} disabled={reportsBusy}>
+                    CSV
+                  </Button>
+                  <Button variant="secondary" onClick={() => void exportCurrentReport("xlsx")} disabled={reportsBusy}>
+                    Excel
+                  </Button>
+                  <Button variant="secondary" onClick={() => void exportCurrentReport("pdf")} disabled={reportsBusy}>
+                    PDF
+                  </Button>
+                </div>
+              </div>
+
+              <div className="divider" />
 
               <div className="tabs" style={{ marginTop: "0.9rem" }}>
                 <button className={`tab ${reportSection === "sales" ? "isActive" : ""}`} type="button" onClick={() => setReportSection("sales")}>
                   Sales
                 </button>
+                <button className={`tab ${reportSection === "commissions" ? "isActive" : ""}`} type="button" onClick={() => setReportSection("commissions")}>
+                  Commissions
+                </button>
                 <button className={`tab ${reportSection === "invoices" ? "isActive" : ""}`} type="button" onClick={() => setReportSection("invoices")}>
                   Invoices
+                </button>
+                <button className={`tab ${reportSection === "payments" ? "isActive" : ""}`} type="button" onClick={() => setReportSection("payments")}>
+                  Payments
                 </button>
                 <button className={`tab ${reportSection === "cash" ? "isActive" : ""}`} type="button" onClick={() => setReportSection("cash")}>
                   Cash
@@ -5695,21 +5753,6 @@ export default function App(): JSX.Element {
                     Capital
                   </button>
                 ) : null}
-              </div>
-
-              <div style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap", marginTop: "1rem" }}>
-                <button type="button" data-variant="ghost" onClick={() => void refreshReportsData()} disabled={reportsBusy}>
-                  {reportsBusy ? "Refreshing..." : "Refresh"}
-                </button>
-                <button type="button" data-variant="ghost" onClick={() => void exportCurrentReport("csv")} disabled={reportsBusy}>
-                  Export CSV
-                </button>
-                <button type="button" data-variant="ghost" onClick={() => void exportCurrentReport("xlsx")} disabled={reportsBusy}>
-                  Export Excel
-                </button>
-                <button type="button" data-variant="ghost" onClick={() => void exportCurrentReport("pdf")} disabled={reportsBusy}>
-                  Export PDF
-                </button>
               </div>
             </section>
 
@@ -5829,6 +5872,114 @@ export default function App(): JSX.Element {
                   </div>
                 </section>
               </>
+            ) : reportSection === "commissions" ? (
+              <>
+                <section className="card">
+                  <h2>Commissions (Sales Totals)</h2>
+                  <p className="hint">Sales grouped by salesperson for the selected date range. Commission rates are not configured in v1.</p>
+                  <form
+                    className="form"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void refreshReportsData();
+                    }}
+                  >
+                    <SelectField
+                      label="Shop"
+                      value={commissionsReportFilters.shopId}
+                      onChange={(event) => setCommissionsReportFilters((prev) => ({ ...prev, shopId: event.target.value }))}
+                    >
+                      <option value="">All shops</option>
+                      {shops.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.code} - {s.name}
+                        </option>
+                      ))}
+                    </SelectField>
+                    <TextField
+                      label="Date from"
+                      type="date"
+                      value={commissionsReportFilters.dateFrom}
+                      onChange={(event) => setCommissionsReportFilters((prev) => ({ ...prev, dateFrom: event.target.value }))}
+                    />
+                    <TextField
+                      label="Date to"
+                      type="date"
+                      value={commissionsReportFilters.dateTo}
+                      onChange={(event) => setCommissionsReportFilters((prev) => ({ ...prev, dateTo: event.target.value }))}
+                    />
+                    <Button type="submit" disabled={reportsBusy}>
+                      {reportsBusy ? "Loading..." : "Run"}
+                    </Button>
+                  </form>
+                </section>
+
+                <section className="card">
+                  <h2>Totals</h2>
+                  {commissionsReport ? (
+                    <ul className="stack">
+                      <li>
+                        <strong>Sales:</strong> {commissionsReport.totals.saleCount}
+                      </li>
+                      <li>
+                        <strong>Total revenue:</strong> {formatUGX(commissionsReport.totals.totalAmount)}
+                      </li>
+                      <li>
+                        <strong>Cash:</strong> {formatUGX(commissionsReport.totals.cashAmount)}
+                      </li>
+                      <li>
+                        <strong>Mobile Money:</strong> {formatUGX(commissionsReport.totals.mobileMoneyAmount)}
+                      </li>
+                      <li>
+                        <strong>Card:</strong> {formatUGX(commissionsReport.totals.cardAmount)}
+                      </li>
+                      <li>
+                        <strong>Credit:</strong> {formatUGX(commissionsReport.totals.creditAmount)}
+                      </li>
+                    </ul>
+                  ) : (
+                    <p className="hint">Run the report to see totals.</p>
+                  )}
+                </section>
+
+                <section className="card" style={{ gridColumn: "1 / -1" }}>
+                  <h2>Results</h2>
+                  <Table>
+                    <thead>
+                      <tr>
+                        <th>User</th>
+                        <th>Shop</th>
+                        <th className="right">Sales</th>
+                        <th className="right">Total</th>
+                        <th className="right">Cash</th>
+                        <th className="right">MM</th>
+                        <th className="right">Card</th>
+                        <th className="right">Credit</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {commissionsReport?.items?.length ? (
+                        commissionsReport.items.map((row) => (
+                          <tr key={`${row.userId}-${row.shopId}`}>
+                            <td>{row.fullName}</td>
+                            <td>{row.shopCode}</td>
+                            <td className="right">{row.saleCount}</td>
+                            <td className="right">{formatUGX(row.totalAmount)}</td>
+                            <td className="right">{formatUGX(row.cashAmount)}</td>
+                            <td className="right">{formatUGX(row.mobileMoneyAmount)}</td>
+                            <td className="right">{formatUGX(row.cardAmount)}</td>
+                            <td className="right">{formatUGX(row.creditAmount)}</td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td colSpan={8}>No results.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </Table>
+                </section>
+              </>
             ) : reportSection === "invoices" ? (
               <>
                 <section className="card">
@@ -5944,6 +6095,133 @@ export default function App(): JSX.Element {
                       </tbody>
                     </table>
                   </div>
+                </section>
+              </>
+            ) : reportSection === "payments" ? (
+              <>
+                <section className="card">
+                  <h2>Payments Report</h2>
+                  <p className="hint">Installment payments recorded against invoices.</p>
+                  <form
+                    className="form"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void refreshReportsData();
+                    }}
+                  >
+                    <SelectField
+                      label="Shop"
+                      value={paymentsReportFilters.shopId}
+                      onChange={(event) => setPaymentsReportFilters((prev) => ({ ...prev, shopId: event.target.value }))}
+                    >
+                      <option value="">All shops</option>
+                      {shops.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.code} - {s.name}
+                        </option>
+                      ))}
+                    </SelectField>
+                    <SelectField
+                      label="Method"
+                      value={paymentsReportFilters.method}
+                      onChange={(event) =>
+                        setPaymentsReportFilters((prev) => ({
+                          ...prev,
+                          method:
+                            event.target.value === "CASH"
+                              ? "CASH"
+                              : event.target.value === "MOBILE_MONEY"
+                                ? "MOBILE_MONEY"
+                                : event.target.value === "CARD"
+                                  ? "CARD"
+                                  : ""
+                        }))
+                      }
+                    >
+                      <option value="">All methods</option>
+                      <option value="CASH">Cash</option>
+                      <option value="MOBILE_MONEY">Mobile Money</option>
+                      <option value="CARD">Card</option>
+                    </SelectField>
+                    <TextField
+                      label="Date from"
+                      type="date"
+                      value={paymentsReportFilters.dateFrom}
+                      onChange={(event) => setPaymentsReportFilters((prev) => ({ ...prev, dateFrom: event.target.value }))}
+                    />
+                    <TextField
+                      label="Date to"
+                      type="date"
+                      value={paymentsReportFilters.dateTo}
+                      onChange={(event) => setPaymentsReportFilters((prev) => ({ ...prev, dateTo: event.target.value }))}
+                    />
+                    <Button type="submit" disabled={reportsBusy}>
+                      {reportsBusy ? "Loading..." : "Run"}
+                    </Button>
+                  </form>
+                </section>
+
+                <section className="card">
+                  <h2>Totals</h2>
+                  {paymentsReport ? (
+                    <ul className="stack">
+                      <li>
+                        <strong>Payments:</strong> {paymentsReport.summary.count}
+                      </li>
+                      <li>
+                        <strong>Total:</strong> {formatUGX(paymentsReport.summary.totalAmount)}
+                      </li>
+                      <li>
+                        <strong>Cash:</strong> {formatUGX(paymentsReport.summary.cashAmount)}
+                      </li>
+                      <li>
+                        <strong>Mobile Money:</strong> {formatUGX(paymentsReport.summary.mobileMoneyAmount)}
+                      </li>
+                      <li>
+                        <strong>Card:</strong> {formatUGX(paymentsReport.summary.cardAmount)}
+                      </li>
+                    </ul>
+                  ) : (
+                    <p className="hint">Run the report to see totals.</p>
+                  )}
+                </section>
+
+                <section className="card" style={{ gridColumn: "1 / -1" }}>
+                  <h2>Results</h2>
+                  <Table>
+                    <thead>
+                      <tr>
+                        <th>Date</th>
+                        <th>Invoice</th>
+                        <th>Shop</th>
+                        <th>Customer</th>
+                        <th>Method</th>
+                        <th className="right">Amount</th>
+                        <th>Recorded by</th>
+                        <th>Notes</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {paymentsReport?.items?.length ? (
+                        paymentsReport.items.map((p) => (
+                          <tr key={p.id}>
+                            <td>{p.createdAt}</td>
+                            <td>{p.invoiceNumber}</td>
+                            <td>{p.shopCode}</td>
+                            <td>{p.customerName}</td>
+                            <td>{p.method}</td>
+                            <td className="right">{formatUGX(p.amount)}</td>
+                            <td>{p.createdByFullName ?? "-"}</td>
+                            <td>{p.notes ?? "-"}</td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td colSpan={8}>No results.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </Table>
                 </section>
               </>
             ) : reportSection === "cash" ? (
@@ -8069,7 +8347,353 @@ export default function App(): JSX.Element {
             ) : null}
           </>
         )}
+            </div>
+          </div>
+        </main>
       </div>
+
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
+
+      {/* Phase 3: invoice creation and payments are the most common actions; keep them in fast modals. */}
+      {authUser ? (
+        <>
+          <Modal
+            open={invoiceCreateOpen}
+            title="New Invoice"
+            onClose={() => setInvoiceCreateOpen(false)}
+            size="lg"
+            footer={
+              <div className="approvalActions" style={{ justifyContent: "flex-end" }}>
+                <Button variant="ghost" onClick={() => setInvoiceCreateOpen(false)}>
+                  Cancel
+                </Button>
+                <Button form="create-invoice-form" type="submit" disabled={invoicesBusy || !activeCustomerOptions.length}>
+                  {invoicesBusy ? "Saving..." : "Create invoice"}
+                </Button>
+              </div>
+            }
+          >
+            {activeCustomerOptions.length ? (
+              <form
+                id="create-invoice-form"
+                className="form form--three"
+                onSubmit={async (event) => {
+                  event.preventDefault();
+                  if (!auth) {
+                    return;
+                  }
+                  setError(null);
+                  setSuccess(null);
+                  setInvoicesBusy(true);
+                  try {
+                    if (!newInvoiceForm.customerId) {
+                      throw new Error("Select a customer");
+                    }
+                    const lines = newInvoiceForm.lines.map((l) => ({
+                      description: l.description,
+                      quantity: Number(l.quantity),
+                      unitPrice: Number(l.unitPrice),
+                      notes: l.notes ? l.notes : null
+                    }));
+
+                    const created = await createInvoice(auth.token, {
+                      shopId: newInvoiceForm.shopId || undefined,
+                      customerId: newInvoiceForm.customerId,
+                      status: newInvoiceForm.status,
+                      dueDate: newInvoiceForm.dueDate ? newInvoiceForm.dueDate : null,
+                      notes: newInvoiceForm.notes ? newInvoiceForm.notes : null,
+                      lines
+                    });
+
+                    setSelectedInvoice(created);
+                    setSelectedInvoicePayments([]);
+                    setSuccess("Invoice created.");
+                    setInvoiceCreateOpen(false);
+
+                    await refreshInvoices();
+
+                    setNewInvoiceForm((prev) => ({
+                      ...prev,
+                      status: "DRAFT",
+                      dueDate: "",
+                      notes: "",
+                      lines: [{ description: "", quantity: "1", unitPrice: "", notes: "" }]
+                    }));
+                    setNewPaymentForm({ amount: "", method: "CASH", notes: "" });
+                  } catch (caught: unknown) {
+                    setError(caught instanceof Error ? caught.message : "Failed to create invoice");
+                  } finally {
+                    setInvoicesBusy(false);
+                  }
+                }}
+              >
+                <SelectField
+                  label="Shop"
+                  value={newInvoiceForm.shopId}
+                  onChange={(event) => setNewInvoiceForm((prev) => ({ ...prev, shopId: event.target.value }))}
+                  disabled={authUser?.role !== "ADMIN"}
+                  required={authUser?.role === "ADMIN"}
+                >
+                  {shops.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.code} • {s.name}
+                    </option>
+                  ))}
+                </SelectField>
+
+                <ComboboxField
+                  label="Customer"
+                  value={newInvoiceForm.customerId}
+                  options={activeCustomerOptions}
+                  onChange={(next) => setNewInvoiceForm((prev) => ({ ...prev, customerId: next }))}
+                  placeholder="Search customer..."
+                  required
+                />
+
+                <SelectField
+                  label="Status"
+                  value={newInvoiceForm.status}
+                  onChange={(event) =>
+                    setNewInvoiceForm((prev) => ({
+                      ...prev,
+                      status: event.target.value === "ISSUED" ? "ISSUED" : "DRAFT"
+                    }))
+                  }
+                >
+                  <option value="DRAFT">Draft</option>
+                  <option value="ISSUED">Issued</option>
+                </SelectField>
+
+                <TextField
+                  label="Due date (optional)"
+                  type="date"
+                  value={newInvoiceForm.dueDate}
+                  onChange={(event) => setNewInvoiceForm((prev) => ({ ...prev, dueDate: event.target.value }))}
+                />
+
+                <TextAreaField
+                  label="Notes (optional)"
+                  value={newInvoiceForm.notes}
+                  onChange={(event) => setNewInvoiceForm((prev) => ({ ...prev, notes: event.target.value }))}
+                />
+
+                <div style={{ gridColumn: "1 / -1" }}>
+                  <p className="subhead">Line Items</p>
+                  <div className="stack">
+                    {newInvoiceForm.lines.map((line, idx) => (
+                      <div key={idx} className="note" style={{ borderStyle: "dashed" }}>
+                        <div className="form form--three" style={{ marginTop: 0 }}>
+                          <label>
+                            Description
+                            <input
+                              value={line.description}
+                              onChange={(event) =>
+                                setNewInvoiceForm((prev) => {
+                                  const nextLines = [...prev.lines];
+                                  nextLines[idx] = { ...nextLines[idx], description: event.target.value };
+                                  return { ...prev, lines: nextLines };
+                                })
+                              }
+                              required
+                            />
+                          </label>
+                          <label>
+                            Qty
+                            <input
+                              type="number"
+                              min={1}
+                              value={line.quantity}
+                              onChange={(event) =>
+                                setNewInvoiceForm((prev) => {
+                                  const nextLines = [...prev.lines];
+                                  nextLines[idx] = { ...nextLines[idx], quantity: event.target.value };
+                                  return { ...prev, lines: nextLines };
+                                })
+                              }
+                              required
+                            />
+                          </label>
+                          <label>
+                            Unit Price (UGX)
+                            <input
+                              type="number"
+                              min={0}
+                              value={line.unitPrice}
+                              onChange={(event) =>
+                                setNewInvoiceForm((prev) => {
+                                  const nextLines = [...prev.lines];
+                                  nextLines[idx] = { ...nextLines[idx], unitPrice: event.target.value };
+                                  return { ...prev, lines: nextLines };
+                                })
+                              }
+                              required
+                            />
+                          </label>
+                          <label style={{ gridColumn: "1 / -1" }}>
+                            Notes (optional)
+                            <input
+                              value={line.notes}
+                              onChange={(event) =>
+                                setNewInvoiceForm((prev) => {
+                                  const nextLines = [...prev.lines];
+                                  nextLines[idx] = { ...nextLines[idx], notes: event.target.value };
+                                  return { ...prev, lines: nextLines };
+                                })
+                              }
+                            />
+                          </label>
+                          <div className="approvalActions" style={{ gridColumn: "1 / -1" }}>
+                            <button
+                              data-variant="ghost"
+                              type="button"
+                              onClick={() =>
+                                setNewInvoiceForm((prev) => ({
+                                  ...prev,
+                                  lines:
+                                    prev.lines.length <= 1 ? prev.lines : prev.lines.filter((_, lineIdx) => lineIdx !== idx)
+                                }))
+                              }
+                              disabled={newInvoiceForm.lines.length <= 1}
+                            >
+                              Remove Line
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="approvalActions" style={{ marginTop: "0.8rem" }}>
+                    <button
+                      data-variant="ghost"
+                      type="button"
+                      onClick={() =>
+                        setNewInvoiceForm((prev) => ({
+                          ...prev,
+                          lines: [...prev.lines, { description: "", quantity: "1", unitPrice: "", notes: "" }]
+                        }))
+                      }
+                    >
+                      Add Line
+                    </button>
+                  </div>
+                </div>
+              </form>
+            ) : (
+              <div className="note">
+                Create a customer first.
+                <div className="approvalActions" style={{ marginTop: "0.75rem" }}>
+                  <Button
+                    variant="secondary"
+                    onClick={() => {
+                      setInvoiceCreateOpen(false);
+                      setActiveView("customers");
+                    }}
+                  >
+                    Go to customers
+                  </Button>
+                </div>
+              </div>
+            )}
+          </Modal>
+
+          <Modal
+            open={invoicePaymentOpen}
+            title="Record Payment"
+            onClose={() => setInvoicePaymentOpen(false)}
+            size="sm"
+            footer={
+              <div className="approvalActions" style={{ justifyContent: "flex-end" }}>
+                <Button variant="ghost" onClick={() => setInvoicePaymentOpen(false)}>
+                  Cancel
+                </Button>
+                <Button form="record-payment-form" type="submit" disabled={invoicesBusy || !selectedInvoice}>
+                  {invoicesBusy ? "Saving..." : "Record payment"}
+                </Button>
+              </div>
+            }
+          >
+            {selectedInvoice ? (
+              <form
+                id="record-payment-form"
+                className="form"
+                onSubmit={async (event) => {
+                  event.preventDefault();
+                  if (!auth) {
+                    return;
+                  }
+                  setError(null);
+                  setSuccess(null);
+                  setInvoicesBusy(true);
+                  try {
+                    const amount = Number(newPaymentForm.amount);
+                    if (!Number.isFinite(amount) || amount <= 0) {
+                      throw new Error("Amount must be greater than 0");
+                    }
+                    if (amount > selectedInvoice.invoice.balance) {
+                      throw new Error("Amount cannot exceed invoice balance");
+                    }
+                    await createInvoicePayment(auth.token, selectedInvoice.invoice.id, {
+                      amount,
+                      method: newPaymentForm.method,
+                      notes: newPaymentForm.notes ? newPaymentForm.notes : null
+                    });
+                    setNewPaymentForm({ amount: "", method: "CASH", notes: "" });
+                    setSuccess("Payment recorded.");
+                    setInvoicePaymentOpen(false);
+                    await Promise.all([refreshInvoices(), loadInvoiceDetail(selectedInvoice.invoice.id)]);
+                  } catch (caught: unknown) {
+                    setError(caught instanceof Error ? caught.message : "Failed to record payment");
+                  } finally {
+                    setInvoicesBusy(false);
+                  }
+                }}
+              >
+                <div className="note">
+                  <strong>{selectedInvoice.invoice.invoiceNumber}</strong> • Balance: {formatUGX(selectedInvoice.invoice.balance)}
+                </div>
+
+                <TextField
+                  label="Amount (UGX)"
+                  type="number"
+                  min={1}
+                  max={selectedInvoice.invoice.balance}
+                  value={newPaymentForm.amount}
+                  onChange={(event) => setNewPaymentForm((prev) => ({ ...prev, amount: event.target.value }))}
+                  required
+                />
+
+                <SelectField
+                  label="Method"
+                  value={newPaymentForm.method}
+                  onChange={(event) =>
+                    setNewPaymentForm((prev) => ({
+                      ...prev,
+                      method:
+                        event.target.value === "MOBILE_MONEY"
+                          ? "MOBILE_MONEY"
+                          : event.target.value === "CARD"
+                            ? "CARD"
+                            : "CASH"
+                    }))
+                  }
+                >
+                  <option value="CASH">Cash</option>
+                  <option value="MOBILE_MONEY">Mobile Money</option>
+                  <option value="CARD">Card</option>
+                </SelectField>
+
+                <TextAreaField
+                  label="Notes (optional)"
+                  value={newPaymentForm.notes}
+                  onChange={(event) => setNewPaymentForm((prev) => ({ ...prev, notes: event.target.value }))}
+                />
+              </form>
+            ) : (
+              <div className="note">Select an invoice first on the Invoices screen.</div>
+            )}
+          </Modal>
+        </>
+      ) : null}
     </div>
   );
 }

@@ -1040,6 +1040,70 @@ export interface InvoiceReport {
   summary: InvoiceReportSummary;
 }
 
+export interface PaymentsReportItem {
+  id: string;
+  invoiceId: string;
+  invoiceNumber: string;
+  shopId: string;
+  shopCode: string;
+  shopName: string;
+  customerMobileNumber: string;
+  customerName: string;
+  method: PaymentMethod;
+  amount: number;
+  notes?: string | null;
+  createdByFullName?: string | null;
+  createdAt: string;
+}
+
+export interface PaymentsReportSummary {
+  count: number;
+  totalAmount: number;
+  cashAmount: number;
+  mobileMoneyAmount: number;
+  cardAmount: number;
+}
+
+export interface PaymentsReport {
+  method?: PaymentMethod | null;
+  dateFrom: string;
+  dateTo: string;
+  shopId?: string | null;
+  items: PaymentsReportItem[];
+  summary: PaymentsReportSummary;
+}
+
+export interface CommissionsReportItem {
+  userId: string;
+  fullName: string;
+  shopId: string;
+  shopCode: string;
+  shopName: string;
+  saleCount: number;
+  totalAmount: number;
+  cashAmount: number;
+  mobileMoneyAmount: number;
+  cardAmount: number;
+  creditAmount: number;
+}
+
+export interface CommissionsReportTotals {
+  saleCount: number;
+  totalAmount: number;
+  cashAmount: number;
+  mobileMoneyAmount: number;
+  cardAmount: number;
+  creditAmount: number;
+}
+
+export interface CommissionsReport {
+  dateFrom: string;
+  dateTo: string;
+  shopId?: string | null;
+  items: CommissionsReportItem[];
+  totals: CommissionsReportTotals;
+}
+
 export interface ExpenseReportItem {
   id: string;
   shopId: string;
@@ -1170,6 +1234,21 @@ export function getSalesReport(
   );
 }
 
+export function getCommissionsReport(
+  token: string,
+  params: { shopId?: string; dateFrom?: string; dateTo?: string }
+): Promise<CommissionsReport> {
+  return request<CommissionsReport>(
+    withQuery("api/reports/commissions", {
+      shopId: params.shopId,
+      dateFrom: params.dateFrom,
+      dateTo: params.dateTo
+    }),
+    undefined,
+    token
+  );
+}
+
 export function getInvoiceReport(
   token: string,
   params: { status?: InvoiceReportStatus; shopId?: string; dateFrom?: string; dateTo?: string }
@@ -1178,6 +1257,22 @@ export function getInvoiceReport(
     withQuery("api/reports/invoices", {
       status: params.status ?? "ALL",
       shopId: params.shopId,
+      dateFrom: params.dateFrom,
+      dateTo: params.dateTo
+    }),
+    undefined,
+    token
+  );
+}
+
+export function getPaymentsReport(
+  token: string,
+  params: { shopId?: string; method?: PaymentMethod; dateFrom?: string; dateTo?: string }
+): Promise<PaymentsReport> {
+  return request<PaymentsReport>(
+    withQuery("api/reports/payments", {
+      shopId: params.shopId,
+      method: params.method,
       dateFrom: params.dateFrom,
       dateTo: params.dateTo
     }),
@@ -1256,6 +1351,22 @@ export function exportSalesReport(
   );
 }
 
+export function exportCommissionsReport(
+  token: string,
+  params: { shopId?: string; dateFrom?: string; dateTo?: string },
+  format: ReportExportFormat
+): Promise<{ blob: Blob; filename: string }> {
+  return downloadFile(
+    withQuery("api/reports/commissions", {
+      shopId: params.shopId,
+      dateFrom: params.dateFrom,
+      dateTo: params.dateTo,
+      format
+    }),
+    token
+  );
+}
+
 export function exportInvoiceReport(
   token: string,
   params: { status?: InvoiceReportStatus; shopId?: string; dateFrom?: string; dateTo?: string },
@@ -1265,6 +1376,23 @@ export function exportInvoiceReport(
     withQuery("api/reports/invoices", {
       status: params.status ?? "ALL",
       shopId: params.shopId,
+      dateFrom: params.dateFrom,
+      dateTo: params.dateTo,
+      format
+    }),
+    token
+  );
+}
+
+export function exportPaymentsReport(
+  token: string,
+  params: { shopId?: string; method?: PaymentMethod; dateFrom?: string; dateTo?: string },
+  format: ReportExportFormat
+): Promise<{ blob: Blob; filename: string }> {
+  return downloadFile(
+    withQuery("api/reports/payments", {
+      shopId: params.shopId,
+      method: params.method,
       dateFrom: params.dateFrom,
       dateTo: params.dateTo,
       format
