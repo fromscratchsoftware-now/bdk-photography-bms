@@ -705,6 +705,47 @@ function phase1_normalize_email(string $value): string {
   return $trimmed !== "" ? strtolower($trimmed) : "";
 }
 
+function phase1_normalize_product_name(string $value): string {
+  $name = trim($value);
+  if ($name === "") {
+    return "";
+  }
+
+  $collapsed = preg_replace('/\\s+/', ' ', $name);
+  if (is_string($collapsed) && $collapsed !== "") {
+    $name = $collapsed;
+  }
+
+  $normalizedDims = preg_replace_callback(
+    '/(\\d+)\\s*[xX×]\\s*(\\d+)/u',
+    function (array $matches): string {
+      $left = $matches[1] ?? "";
+      $right = $matches[2] ?? "";
+      return $left . "×" . $right;
+    },
+    $name
+  );
+  if (is_string($normalizedDims) && $normalizedDims !== "") {
+    $name = $normalizedDims;
+  }
+
+  $normalizedFrame = preg_replace('/\\bframes\\b/iu', 'Frames', $name);
+  if (is_string($normalizedFrame) && $normalizedFrame !== "") {
+    $name = $normalizedFrame;
+  }
+  $normalizedFrame = preg_replace('/\\bframe\\b/iu', 'Frame', $name);
+  if (is_string($normalizedFrame) && $normalizedFrame !== "") {
+    $name = $normalizedFrame;
+  }
+
+  $collapsed = preg_replace('/\\s+/', ' ', trim($name));
+  if (is_string($collapsed) && $collapsed !== "") {
+    $name = $collapsed;
+  }
+
+  return $name;
+}
+
 function phase1_find_user_by_email(PDO $pdo, string $email): ?array {
   $normalized = phase1_normalize_email($email);
   if ($normalized === "") {
@@ -2968,7 +3009,7 @@ function phase1_handle(string $method, string $route): void {
     if (array_key_exists("skuCode", $body)) {
       json_response(400, ["error" => "ValidationError", "message" => "skuCode is auto-generated and cannot be set"]);
     }
-    $name = isset($body["name"]) && is_string($body["name"]) ? trim($body["name"]) : "";
+    $name = isset($body["name"]) && is_string($body["name"]) ? phase1_normalize_product_name($body["name"]) : "";
     $categoryId = isset($body["categoryId"]) && is_string($body["categoryId"]) ? trim($body["categoryId"]) : "";
     $productType = isset($body["productType"]) && is_string($body["productType"]) ? trim($body["productType"]) : "";
     $unitOfMeasure = isset($body["unitOfMeasure"]) && is_string($body["unitOfMeasure"]) ? trim($body["unitOfMeasure"]) : "";
@@ -3120,7 +3161,7 @@ function phase1_handle(string $method, string $route): void {
     $nextBoardSizeCode = $existing["board_size_code"] === null ? null : (string)$existing["board_size_code"];
     $nextNotes = $existing["notes"] ?? null;
     if (array_key_exists("name", $body)) {
-      $value = is_string($body["name"]) ? trim($body["name"]) : "";
+      $value = is_string($body["name"]) ? phase1_normalize_product_name($body["name"]) : "";
       if ($value === "") {
         json_response(400, ["error" => "ValidationError", "message" => "name cannot be empty"]);
       }

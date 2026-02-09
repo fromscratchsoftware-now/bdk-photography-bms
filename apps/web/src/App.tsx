@@ -2295,6 +2295,19 @@ export default function App(): JSX.Element {
       .replace(/'/g, "&#039;");
   }
 
+  function normalizeProductName(value: string): string {
+    const trimmed = value.trim().replace(/\s+/g, " ");
+    if (!trimmed) {
+      return "";
+    }
+    const normalizedDims = trimmed.replace(/(\d+)\s*[xX×]\s*(\d+)/g, "$1×$2");
+    return normalizedDims
+      .replace(/\bframes\b/gi, "Frames")
+      .replace(/\bframe\b/gi, "Frame")
+      .trim()
+      .replace(/\s+/g, " ");
+  }
+
   function openInvoicePrint(detail: InvoiceDetail, payments: InvoicePayment[]): void {
     const invoice = detail.invoice;
 
@@ -5510,8 +5523,12 @@ Payments update invoice status:
                         <input
                           value={newProductForm.name}
                           onChange={(event) => setNewProductForm((prev) => ({ ...prev, name: event.target.value }))}
+                          onBlur={() =>
+                            setNewProductForm((prev) => ({ ...prev, name: normalizeProductName(prev.name) }))
+                          }
                           required
                         />
+                        <span className="hint">Use consistent size naming like 4×6 Frame (x is standardized to ×).</span>
                       </label>
                       <label>
                         Unit of Measure
@@ -5776,8 +5793,12 @@ Payments update invoice status:
                               onChange={(event) =>
                                 setEditingProductForm((prev) => (prev ? { ...prev, name: event.target.value } : prev))
                               }
+                              onBlur={() =>
+                                setEditingProductForm((prev) => (prev ? { ...prev, name: normalizeProductName(prev.name) } : prev))
+                              }
                               required
                             />
+                            <span className="hint">Use consistent size naming like 4×6 Frame (x is standardized to ×).</span>
                           </label>
                           <label>
                             Unit of Measure
