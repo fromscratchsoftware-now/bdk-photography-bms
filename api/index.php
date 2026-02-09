@@ -7182,7 +7182,7 @@ function phase1_handle(string $method, string $route): void {
       "SELECT q.id, q.template_id, q.template_key, q.channel, q.recipient_type, q.recipient_customer_id, q.recipient_user_id, q.to_address, " .
         "q.rendered_subject, q.rendered_body, q.payload_json, q.status, q.dedupe_key, q.error_message, q.notes, " .
         "q.created_by_user_id, cu.full_name AS created_by_full_name, q.created_at, q.updated_at, " .
-        "c.mobile_number AS customer_mobile, c.first_name AS customer_first_name, c.last_name AS customer_last_name, c.email AS customer_email, " .
+        "c.mobile AS customer_mobile, c.first_name AS customer_first_name, c.last_name AS customer_last_name, c.email AS customer_email, " .
         "u.full_name AS recipient_user_full_name " .
       "FROM messaging_queue q " .
       "LEFT JOIN users cu ON cu.id = q.created_by_user_id " .
@@ -7439,7 +7439,7 @@ function phase1_handle(string $method, string $route): void {
     $rows = phase1_db_fetch_all(
       $pdo,
       "SELECT i.id AS invoice_id, i.invoice_number, i.shop_id, sh.code AS shop_code, sh.name AS shop_name, " .
-        "i.customer_id, c.mobile_number AS customer_mobile, c.email AS customer_email, c.first_name, c.last_name, " .
+        "i.customer_id, c.mobile AS customer_mobile, c.email AS customer_email, c.first_name, c.last_name, " .
         "i.due_date, i.balance " .
       "FROM invoices i " .
       "JOIN customers c ON c.id = i.customer_id " .
