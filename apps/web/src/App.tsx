@@ -1,20 +1,33 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
+  createCustomer,
   createExpenseCategory,
+  createInvoice,
+  createInvoicePayment,
   createProduct,
   createProductCategory,
+  getInvoice,
   getMe,
+  listCustomers,
   listExpenseCategories,
+  listInvoicePayments,
+  listInvoices,
   listProductCategories,
   listProducts,
   listShops,
   listUsers,
   login,
+  updateCustomer,
+  updateInvoice,
   updateExpenseCategory,
   updateProduct,
   updateProductCategory,
   type AuthUser,
+  type Customer,
   type ExpenseCategory,
+  type Invoice,
+  type InvoiceDetail,
+  type InvoicePayment,
   type Product,
   type ProductCategory,
   type Shop
@@ -25,7 +38,7 @@ type AuthState = {
   user: AuthUser;
 };
 
-type ActiveView = "overview" | "master-data";
+type ActiveView = "overview" | "customers" | "invoices" | "master-data";
 type MasterSection = "expense-categories" | "product-categories" | "products";
 
 const AUTH_STORAGE_KEY = "bdk.auth.phase1.v1";
@@ -83,6 +96,51 @@ export default function App(): JSX.Element {
   const [expenseCategories, setExpenseCategories] = useState<ExpenseCategory[]>([]);
   const [productCategories, setProductCategories] = useState<ProductCategory[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
+
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [customersBusy, setCustomersBusy] = useState(false);
+  const [newCustomerForm, setNewCustomerForm] = useState({
+    mobileNumber: "",
+    firstName: "",
+    lastName: "",
+    email: "",
+    notes: "",
+    isActive: true
+  });
+  const [editingCustomerId, setEditingCustomerId] = useState<string | null>(null);
+  const [editingCustomerForm, setEditingCustomerForm] = useState<{
+    mobileNumber: string;
+    firstName: string;
+    lastName: string;
+    email: string;
+    notes: string;
+    isActive: boolean;
+  } | null>(null);
+
+  const [invoices, setInvoices] = useState<Invoice[]>([]);
+  const [invoicesBusy, setInvoicesBusy] = useState(false);
+  const [selectedInvoice, setSelectedInvoice] = useState<InvoiceDetail | null>(null);
+  const [selectedInvoicePayments, setSelectedInvoicePayments] = useState<InvoicePayment[]>([]);
+  const [newInvoiceForm, setNewInvoiceForm] = useState<{
+    shopId: string;
+    customerId: string;
+    status: "DRAFT" | "ISSUED";
+    dueDate: string;
+    notes: string;
+    lines: Array<{ description: string; quantity: string; unitPrice: string; notes: string }>;
+  }>({
+    shopId: "",
+    customerId: "",
+    status: "DRAFT",
+    dueDate: "",
+    notes: "",
+    lines: [{ description: "", quantity: "1", unitPrice: "", notes: "" }]
+  });
+  const [newPaymentForm, setNewPaymentForm] = useState<{ amount: string; method: "CASH" | "MOBILE_MONEY" | "CARD"; notes: string }>({
+    amount: "",
+    method: "CASH",
+    notes: ""
+  });
 
   const [masterBusy, setMasterBusy] = useState(false);
   const [editingExpenseCategoryId, setEditingExpenseCategoryId] = useState<string | null>(null);
@@ -149,6 +207,9 @@ export default function App(): JSX.Element {
 
   const canViewUsers = authUser?.role === "ADMIN" || authUser?.role === "MANAGER";
   const canManageMasterData = authUser?.role === "ADMIN";
+  const canManageCustomers = authUser?.role === "ADMIN" || authUser?.role === "SALES";
+  const canManageInvoices = authUser?.role === "ADMIN" || authUser?.role === "SALES";
+  const canVoidInvoices = authUser?.role === "ADMIN";
 
   const shopCodesForUser = useMemo(() => {
     const map = new Map<string, string>();
@@ -170,6 +231,10 @@ export default function App(): JSX.Element {
     setActiveView("overview");
     setShops([]);
     setUsers([]);
+    setCustomers([]);
+    setInvoices([]);
+    setSelectedInvoice(null);
+    setSelectedInvoicePayments([]);
     setSuccess(null);
     setError(message ?? null);
   }
@@ -236,6 +301,8 @@ export default function App(): JSX.Element {
 
         setShops(shopData);
         setUsers(userData);
+
+        setNewInvoiceForm((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
       } catch (caught: unknown) {
         if (!cancelled) {
           setError(caught instanceof Error ? caught.message : "Failed to load data");
@@ -289,6 +356,87 @@ export default function App(): JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeView, auth?.token, canManageMasterData]);
 
+  async function refreshCustomers(): Promise<void> {
+    if (!auth) {
+      return;
+    }
+    setCustomersBusy(true);
+    setError(null);
+    try {
+      const data = await listCustomers(auth.token);
+      setCustomers(data);
+
+      const firstActive = data.find((c) => c.isActive) ?? data[0];
+      if (firstActive) {
+        setNewInvoiceForm((prev) => (prev.customerId ? prev : { ...prev, customerId: firstActive.id }));
+      }
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to load customers");
+    } finally {
+      setCustomersBusy(false);
+    }
+  }
+
+  async function refreshInvoices(): Promise<void> {
+    if (!auth) {
+      return;
+    }
+    setInvoicesBusy(true);
+    setError(null);
+    try {
+      const data = await listInvoices(auth.token);
+      setInvoices(data);
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to load invoices");
+    } finally {
+      setInvoicesBusy(false);
+    }
+  }
+
+  async function loadInvoiceDetail(invoiceId: string): Promise<void> {
+    if (!auth) {
+      return;
+    }
+    setInvoicesBusy(true);
+    setError(null);
+    try {
+      const [detail, payments] = await Promise.all([
+        getInvoice(auth.token, invoiceId),
+        listInvoicePayments(auth.token, invoiceId)
+      ]);
+      setSelectedInvoice(detail);
+      setSelectedInvoicePayments(payments);
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to load invoice");
+    } finally {
+      setInvoicesBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!auth) {
+      return;
+    }
+    if (activeView !== "customers") {
+      return;
+    }
+    void refreshCustomers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeView, auth?.token]);
+
+  useEffect(() => {
+    if (!auth) {
+      return;
+    }
+    if (activeView !== "invoices") {
+      return;
+    }
+    void (async () => {
+      await Promise.all([refreshInvoices(), refreshCustomers()]);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeView, auth?.token]);
+
   async function submitLogin(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     setError(null);
@@ -311,6 +459,161 @@ export default function App(): JSX.Element {
 
   if (booting) {
     return <div className="page loading">Loading...</div>;
+  }
+
+  function escapeHtml(value: string): string {
+    return value
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/\"/g, "&quot;")
+      .replace(/'/g, "&#039;");
+  }
+
+  function openInvoicePrint(detail: InvoiceDetail, payments: InvoicePayment[]): void {
+    const invoice = detail.invoice;
+
+    const lineRows = detail.lines
+      .map(
+        (l) => `<tr>
+  <td>${escapeHtml(l.description)}</td>
+  <td style="text-align:right;">${l.quantity}</td>
+  <td style="text-align:right;">${l.unitPrice}</td>
+  <td style="text-align:right;">${l.lineTotal}</td>
+</tr>`
+      )
+      .join("");
+
+    const paymentRows = payments
+      .map(
+        (p) => `<tr>
+  <td>${escapeHtml(p.createdAt)}</td>
+  <td>${escapeHtml(p.method)}</td>
+  <td style="text-align:right;">${p.amount}</td>
+  <td>${escapeHtml(p.notes ?? "")}</td>
+</tr>`
+      )
+      .join("");
+
+    const issuedAtHtml = invoice.issuedAt
+      ? `<div class="muted" style="margin-top: 8px;">Issued at</div><div>${escapeHtml(invoice.issuedAt)}</div>`
+      : "";
+    const dueDateHtml = invoice.dueDate
+      ? `<div class="muted" style="margin-top: 8px;">Due date</div><div>${escapeHtml(invoice.dueDate)}</div>`
+      : "";
+    const emailHtml = invoice.customerEmail
+      ? `<div class="muted" style="margin-top: 6px;">Email</div><div>${escapeHtml(invoice.customerEmail)}</div>`
+      : "";
+    const notesHtml = invoice.notes
+      ? `<div class="muted" style="margin-top: 14px;">Notes</div><div>${escapeHtml(invoice.notes)}</div>`
+      : "";
+
+    const html = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>${escapeHtml(invoice.invoiceNumber)} - BDK Photography</title>
+    <style>
+      :root { color-scheme: light; }
+      body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 28px; color: #0f172a; }
+      h1 { font-size: 22px; margin: 0 0 4px; }
+      h2 { font-size: 14px; margin: 16px 0 8px; }
+      .muted { color: #475569; font-size: 12px; }
+      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 20px; margin-top: 10px; }
+      .box { border: 1px solid #cbd5e1; border-radius: 10px; padding: 12px; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { border-bottom: 1px solid #e2e8f0; padding: 8px 6px; font-size: 12px; vertical-align: top; }
+      th { text-align: left; background: #f8fafc; }
+      .totals td { border-bottom: 0; }
+      .right { text-align: right; }
+      @media print {
+        body { margin: 0; }
+        .no-print { display: none !important; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="no-print" style="display:flex; justify-content:flex-end; margin-bottom: 12px;">
+      <button onclick="window.print()" style="padding:8px 12px; border:1px solid #cbd5e1; background:#fff; border-radius:8px; cursor:pointer;">Print</button>
+    </div>
+
+    <h1>BDK Photography</h1>
+    <div class="muted">Invoice: <strong>${escapeHtml(invoice.invoiceNumber)}</strong></div>
+
+    <div class="grid">
+      <div class="box">
+        <div class="muted">Shop</div>
+        <div><strong>${escapeHtml(invoice.shopCode)}</strong> ${escapeHtml(invoice.shopName)}</div>
+        <div class="muted" style="margin-top: 8px;">Status</div>
+        <div><strong>${escapeHtml(invoice.status)}</strong></div>
+        ${issuedAtHtml}
+        ${dueDateHtml}
+      </div>
+      <div class="box">
+        <div class="muted">Customer</div>
+        <div><strong>${escapeHtml(invoice.customerFirstName)} ${escapeHtml(invoice.customerLastName)}</strong></div>
+        <div class="muted" style="margin-top: 6px;">Mobile</div>
+        <div>${escapeHtml(invoice.customerMobileNumber)}</div>
+        ${emailHtml}
+      </div>
+    </div>
+
+    <h2>Line Items</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Description</th>
+          <th class="right">Qty</th>
+          <th class="right">Unit</th>
+          <th class="right">Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${lineRows || '<tr><td colspan="4">No lines</td></tr>'}
+        <tr class="totals">
+          <td colspan="3" class="right"><strong>Total</strong></td>
+          <td class="right"><strong>${invoice.totalAmount}</strong></td>
+        </tr>
+        <tr class="totals">
+          <td colspan="3" class="right"><strong>Paid</strong></td>
+          <td class="right"><strong>${invoice.paidAmount}</strong></td>
+        </tr>
+        <tr class="totals">
+          <td colspan="3" class="right"><strong>Balance</strong></td>
+          <td class="right"><strong>${invoice.balance}</strong></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>Payments</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>Method</th>
+          <th class="right">Amount</th>
+          <th>Notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${paymentRows || '<tr><td colspan="4">No payments</td></tr>'}
+      </tbody>
+    </table>
+
+    ${notesHtml}
+  </body>
+</html>`;
+
+    const win = window.open("", "_blank", "noopener,noreferrer");
+    if (!win) {
+      setError("Popup blocked. Allow popups to print.");
+      return;
+    }
+    win.document.open();
+    win.document.write(html);
+    win.document.close();
+    win.focus();
   }
 
   const yieldPerSheet =
@@ -363,6 +666,20 @@ export default function App(): JSX.Element {
             onClick={() => setActiveView("overview")}
           >
             Overview
+          </button>
+          <button
+            className={`tab ${activeView === "customers" ? "isActive" : ""}`}
+            type="button"
+            onClick={() => setActiveView("customers")}
+          >
+            Customers
+          </button>
+          <button
+            className={`tab ${activeView === "invoices" ? "isActive" : ""}`}
+            type="button"
+            onClick={() => setActiveView("invoices")}
+          >
+            Invoices
           </button>
           {canManageMasterData ? (
             <button
@@ -522,6 +839,846 @@ export default function App(): JSX.Element {
                 <li>Capital dashboard + exports</li>
               </ul>
             </section>
+          </>
+        ) : activeView === "customers" ? (
+          <>
+            <section className="card" style={{ gridColumn: "1 / -1" }}>
+              <h2>Customers</h2>
+              <p className="hint">Create and manage customers for invoicing, credit, and reminders.</p>
+            </section>
+
+            {canManageCustomers ? (
+              <section className="card">
+                <h2>Create Customer</h2>
+                <form
+                  className="form"
+                  onSubmit={async (event) => {
+                    event.preventDefault();
+                    if (!auth) {
+                      return;
+                    }
+                    setError(null);
+                    setSuccess(null);
+                    setCustomersBusy(true);
+                    try {
+                      await createCustomer(auth.token, {
+                        mobileNumber: newCustomerForm.mobileNumber,
+                        firstName: newCustomerForm.firstName,
+                        lastName: newCustomerForm.lastName,
+                        email: newCustomerForm.email ? newCustomerForm.email : null,
+                        notes: newCustomerForm.notes ? newCustomerForm.notes : null,
+                        isActive: newCustomerForm.isActive
+                      });
+                      setNewCustomerForm({
+                        mobileNumber: "",
+                        firstName: "",
+                        lastName: "",
+                        email: "",
+                        notes: "",
+                        isActive: true
+                      });
+                      setSuccess("Customer created.");
+                      await refreshCustomers();
+                    } catch (caught: unknown) {
+                      setError(caught instanceof Error ? caught.message : "Failed to create customer");
+                    } finally {
+                      setCustomersBusy(false);
+                    }
+                  }}
+                >
+                  <label>
+                    Mobile number
+                    <input
+                      value={newCustomerForm.mobileNumber}
+                      onChange={(event) =>
+                        setNewCustomerForm((prev) => ({ ...prev, mobileNumber: event.target.value }))
+                      }
+                      placeholder="0700 000 000"
+                      required
+                    />
+                  </label>
+                  <label>
+                    First name
+                    <input
+                      value={newCustomerForm.firstName}
+                      onChange={(event) => setNewCustomerForm((prev) => ({ ...prev, firstName: event.target.value }))}
+                      required
+                    />
+                  </label>
+                  <label>
+                    Last name
+                    <input
+                      value={newCustomerForm.lastName}
+                      onChange={(event) => setNewCustomerForm((prev) => ({ ...prev, lastName: event.target.value }))}
+                      required
+                    />
+                  </label>
+                  <label>
+                    Email (optional)
+                    <input
+                      value={newCustomerForm.email}
+                      onChange={(event) => setNewCustomerForm((prev) => ({ ...prev, email: event.target.value }))}
+                      placeholder="name@example.com"
+                    />
+                  </label>
+                  <label>
+                    Notes (optional)
+                    <input
+                      value={newCustomerForm.notes}
+                      onChange={(event) => setNewCustomerForm((prev) => ({ ...prev, notes: event.target.value }))}
+                    />
+                  </label>
+                  <label className="checkbox">
+                    <input
+                      type="checkbox"
+                      checked={newCustomerForm.isActive}
+                      onChange={(event) => setNewCustomerForm((prev) => ({ ...prev, isActive: event.target.checked }))}
+                    />
+                    Active
+                  </label>
+                  <button type="submit" disabled={customersBusy}>
+                    {customersBusy ? "Saving..." : "Create"}
+                  </button>
+                </form>
+              </section>
+            ) : (
+              <section className="card">
+                <h2>Create Customer</h2>
+                <div className="note">You don’t have permission to create or edit customers.</div>
+              </section>
+            )}
+
+            <section className="card" style={{ gridColumn: "1 / -1" }}>
+              <h2>Customer List</h2>
+              {customersBusy ? <p className="hint">Loading...</p> : null}
+              <div className="tableWrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Mobile</th>
+                      <th>Name</th>
+                      <th>Email</th>
+                      <th>Active</th>
+                      <th>Notes</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {customers.length ? (
+                      customers.map((c) => (
+                        <tr key={c.id} className={editingCustomerId === c.id ? "isSelected" : ""}>
+                          <td>{c.mobileNumber}</td>
+                          <td>
+                            {c.firstName} {c.lastName}
+                          </td>
+                          <td>{c.email ?? "-"}</td>
+                          <td>{c.isActive ? "Yes" : "No"}</td>
+                          <td>{c.notes ?? "-"}</td>
+                          <td>
+                            {canManageCustomers ? (
+                              <div className="approvalActions">
+                                <button
+                                  data-variant="ghost"
+                                  type="button"
+                                  onClick={() => {
+                                    setEditingCustomerId(c.id);
+                                    setEditingCustomerForm({
+                                      mobileNumber: c.mobileNumber,
+                                      firstName: c.firstName,
+                                      lastName: c.lastName,
+                                      email: c.email ?? "",
+                                      notes: c.notes ?? "",
+                                      isActive: c.isActive
+                                    });
+                                  }}
+                                >
+                                  Edit
+                                </button>
+                                <button
+                                  data-variant="ghost"
+                                  type="button"
+                                  onClick={async () => {
+                                    if (!auth) {
+                                      return;
+                                    }
+                                    setError(null);
+                                    setSuccess(null);
+                                    setCustomersBusy(true);
+                                    try {
+                                      await updateCustomer(auth.token, c.id, { isActive: !c.isActive });
+                                      setSuccess("Customer updated.");
+                                      await refreshCustomers();
+                                    } catch (caught: unknown) {
+                                      setError(caught instanceof Error ? caught.message : "Failed to update customer");
+                                    } finally {
+                                      setCustomersBusy(false);
+                                    }
+                                  }}
+                                >
+                                  {c.isActive ? "Deactivate" : "Activate"}
+                                </button>
+                              </div>
+                            ) : (
+                              "-"
+                            )}
+                          </td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan={6}>No customers yet.</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              {editingCustomerId && editingCustomerForm ? (
+                <div className="approvalRow">
+                  <div>
+                    <p className="subhead">Edit Customer</p>
+                    <form
+                      className="form form--three"
+                      onSubmit={async (event) => {
+                        event.preventDefault();
+                        if (!auth) {
+                          return;
+                        }
+                        setError(null);
+                        setSuccess(null);
+                        setCustomersBusy(true);
+                        try {
+                          await updateCustomer(auth.token, editingCustomerId, {
+                            mobileNumber: editingCustomerForm.mobileNumber,
+                            firstName: editingCustomerForm.firstName,
+                            lastName: editingCustomerForm.lastName,
+                            email: editingCustomerForm.email ? editingCustomerForm.email : null,
+                            notes: editingCustomerForm.notes ? editingCustomerForm.notes : null,
+                            isActive: editingCustomerForm.isActive
+                          });
+                          setEditingCustomerId(null);
+                          setEditingCustomerForm(null);
+                          setSuccess("Customer saved.");
+                          await refreshCustomers();
+                        } catch (caught: unknown) {
+                          setError(caught instanceof Error ? caught.message : "Failed to save customer");
+                        } finally {
+                          setCustomersBusy(false);
+                        }
+                      }}
+                    >
+                      <label>
+                        Mobile number
+                        <input
+                          value={editingCustomerForm.mobileNumber}
+                          onChange={(event) =>
+                            setEditingCustomerForm((prev) =>
+                              prev ? { ...prev, mobileNumber: event.target.value } : prev
+                            )
+                          }
+                          required
+                        />
+                      </label>
+                      <label>
+                        First name
+                        <input
+                          value={editingCustomerForm.firstName}
+                          onChange={(event) =>
+                            setEditingCustomerForm((prev) => (prev ? { ...prev, firstName: event.target.value } : prev))
+                          }
+                          required
+                        />
+                      </label>
+                      <label>
+                        Last name
+                        <input
+                          value={editingCustomerForm.lastName}
+                          onChange={(event) =>
+                            setEditingCustomerForm((prev) => (prev ? { ...prev, lastName: event.target.value } : prev))
+                          }
+                          required
+                        />
+                      </label>
+                      <label>
+                        Email
+                        <input
+                          value={editingCustomerForm.email}
+                          onChange={(event) =>
+                            setEditingCustomerForm((prev) => (prev ? { ...prev, email: event.target.value } : prev))
+                          }
+                        />
+                      </label>
+                      <label>
+                        Notes
+                        <input
+                          value={editingCustomerForm.notes}
+                          onChange={(event) =>
+                            setEditingCustomerForm((prev) => (prev ? { ...prev, notes: event.target.value } : prev))
+                          }
+                        />
+                      </label>
+                      <label className="checkbox">
+                        <input
+                          type="checkbox"
+                          checked={editingCustomerForm.isActive}
+                          onChange={(event) =>
+                            setEditingCustomerForm((prev) => (prev ? { ...prev, isActive: event.target.checked } : prev))
+                          }
+                        />
+                        Active
+                      </label>
+                      <button type="submit" disabled={customersBusy}>
+                        {customersBusy ? "Saving..." : "Save"}
+                      </button>
+                      <button
+                        data-variant="ghost"
+                        type="button"
+                        onClick={() => {
+                          setEditingCustomerId(null);
+                          setEditingCustomerForm(null);
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </form>
+                  </div>
+                </div>
+              ) : null}
+            </section>
+          </>
+        ) : activeView === "invoices" ? (
+          <>
+            <section className="card" style={{ gridColumn: "1 / -1" }}>
+              <h2>Invoices</h2>
+              <p className="hint">Create invoices, print them, and record installment payments (cash/mobile money/card).</p>
+            </section>
+
+            {canManageInvoices ? (
+              <section className="card" style={{ gridColumn: "1 / -1" }}>
+                <h2>Create Invoice</h2>
+                {customers.length ? (
+                  <form
+                    className="form form--three"
+                    onSubmit={async (event) => {
+                      event.preventDefault();
+                      if (!auth) {
+                        return;
+                      }
+                      setError(null);
+                      setSuccess(null);
+                      setInvoicesBusy(true);
+                      try {
+                        const lines = newInvoiceForm.lines.map((l) => ({
+                          description: l.description,
+                          quantity: Number(l.quantity),
+                          unitPrice: Number(l.unitPrice),
+                          notes: l.notes ? l.notes : null
+                        }));
+
+                        const created = await createInvoice(auth.token, {
+                          shopId: newInvoiceForm.shopId || undefined,
+                          customerId: newInvoiceForm.customerId,
+                          status: newInvoiceForm.status,
+                          dueDate: newInvoiceForm.dueDate ? newInvoiceForm.dueDate : null,
+                          notes: newInvoiceForm.notes ? newInvoiceForm.notes : null,
+                          lines
+                        });
+
+                        setSelectedInvoice(created);
+                        setSelectedInvoicePayments([]);
+                        setSuccess("Invoice created.");
+
+                        await refreshInvoices();
+
+                        setNewInvoiceForm((prev) => ({
+                          ...prev,
+                          status: "DRAFT",
+                          dueDate: "",
+                          notes: "",
+                          lines: [{ description: "", quantity: "1", unitPrice: "", notes: "" }]
+                        }));
+                        setNewPaymentForm({ amount: "", method: "CASH", notes: "" });
+                      } catch (caught: unknown) {
+                        setError(caught instanceof Error ? caught.message : "Failed to create invoice");
+                      } finally {
+                        setInvoicesBusy(false);
+                      }
+                    }}
+                  >
+                    <label>
+                      Shop
+                      <select
+                        value={newInvoiceForm.shopId}
+                        onChange={(event) => setNewInvoiceForm((prev) => ({ ...prev, shopId: event.target.value }))}
+                        disabled={authUser?.role !== "ADMIN"}
+                        required={authUser?.role === "ADMIN"}
+                      >
+                        {shops.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.code} • {s.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Customer
+                      <select
+                        value={newInvoiceForm.customerId}
+                        onChange={(event) =>
+                          setNewInvoiceForm((prev) => ({ ...prev, customerId: event.target.value }))
+                        }
+                        required
+                      >
+                        {customers
+                          .filter((c) => c.isActive)
+                          .map((c) => (
+                            <option key={c.id} value={c.id}>
+                              {c.firstName} {c.lastName} • {c.mobileNumber}
+                            </option>
+                          ))}
+                      </select>
+                    </label>
+                    <label>
+                      Status
+                      <select
+                        value={newInvoiceForm.status}
+                        onChange={(event) =>
+                          setNewInvoiceForm((prev) => ({
+                            ...prev,
+                            status: event.target.value === "ISSUED" ? "ISSUED" : "DRAFT"
+                          }))
+                        }
+                      >
+                        <option value="DRAFT">Draft</option>
+                        <option value="ISSUED">Issued</option>
+                      </select>
+                    </label>
+                    <label>
+                      Due date (optional)
+                      <input
+                        type="date"
+                        value={newInvoiceForm.dueDate}
+                        onChange={(event) => setNewInvoiceForm((prev) => ({ ...prev, dueDate: event.target.value }))}
+                      />
+                    </label>
+                    <label>
+                      Notes (optional)
+                      <input
+                        value={newInvoiceForm.notes}
+                        onChange={(event) => setNewInvoiceForm((prev) => ({ ...prev, notes: event.target.value }))}
+                      />
+                    </label>
+
+                    <div style={{ gridColumn: "1 / -1" }}>
+                      <p className="subhead">Line Items</p>
+                      <div className="stack">
+                        {newInvoiceForm.lines.map((line, idx) => (
+                          <div key={idx} className="note" style={{ borderStyle: "dashed" }}>
+                            <div className="form form--three" style={{ marginTop: 0 }}>
+                              <label>
+                                Description
+                                <input
+                                  value={line.description}
+                                  onChange={(event) =>
+                                    setNewInvoiceForm((prev) => {
+                                      const nextLines = [...prev.lines];
+                                      nextLines[idx] = { ...nextLines[idx], description: event.target.value };
+                                      return { ...prev, lines: nextLines };
+                                    })
+                                  }
+                                  required
+                                />
+                              </label>
+                              <label>
+                                Qty
+                                <input
+                                  type="number"
+                                  min={1}
+                                  value={line.quantity}
+                                  onChange={(event) =>
+                                    setNewInvoiceForm((prev) => {
+                                      const nextLines = [...prev.lines];
+                                      nextLines[idx] = { ...nextLines[idx], quantity: event.target.value };
+                                      return { ...prev, lines: nextLines };
+                                    })
+                                  }
+                                  required
+                                />
+                              </label>
+                              <label>
+                                Unit Price (UGX)
+                                <input
+                                  type="number"
+                                  min={0}
+                                  value={line.unitPrice}
+                                  onChange={(event) =>
+                                    setNewInvoiceForm((prev) => {
+                                      const nextLines = [...prev.lines];
+                                      nextLines[idx] = { ...nextLines[idx], unitPrice: event.target.value };
+                                      return { ...prev, lines: nextLines };
+                                    })
+                                  }
+                                  required
+                                />
+                              </label>
+                              <label style={{ gridColumn: "1 / -1" }}>
+                                Notes (optional)
+                                <input
+                                  value={line.notes}
+                                  onChange={(event) =>
+                                    setNewInvoiceForm((prev) => {
+                                      const nextLines = [...prev.lines];
+                                      nextLines[idx] = { ...nextLines[idx], notes: event.target.value };
+                                      return { ...prev, lines: nextLines };
+                                    })
+                                  }
+                                />
+                              </label>
+                              <div className="approvalActions" style={{ gridColumn: "1 / -1" }}>
+                                <button
+                                  data-variant="ghost"
+                                  type="button"
+                                  onClick={() =>
+                                    setNewInvoiceForm((prev) => ({
+                                      ...prev,
+                                      lines:
+                                        prev.lines.length <= 1
+                                          ? prev.lines
+                                          : prev.lines.filter((_, lineIdx) => lineIdx !== idx)
+                                    }))
+                                  }
+                                  disabled={newInvoiceForm.lines.length <= 1}
+                                >
+                                  Remove Line
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="approvalActions" style={{ marginTop: "0.8rem" }}>
+                        <button
+                          data-variant="ghost"
+                          type="button"
+                          onClick={() =>
+                            setNewInvoiceForm((prev) => ({
+                              ...prev,
+                              lines: [...prev.lines, { description: "", quantity: "1", unitPrice: "", notes: "" }]
+                            }))
+                          }
+                        >
+                          Add Line
+                        </button>
+                      </div>
+                    </div>
+
+                    <button type="submit" disabled={invoicesBusy}>
+                      {invoicesBusy ? "Saving..." : "Create Invoice"}
+                    </button>
+                  </form>
+                ) : (
+                  <div className="note">Create a customer first.</div>
+                )}
+              </section>
+            ) : (
+              <section className="card" style={{ gridColumn: "1 / -1" }}>
+                <h2>Create Invoice</h2>
+                <div className="note">You don’t have permission to create invoices.</div>
+              </section>
+            )}
+
+            <section className="card" style={{ gridColumn: "1 / -1" }}>
+              <h2>Invoice List</h2>
+              {invoicesBusy ? <p className="hint">Loading...</p> : null}
+              <div className="tableWrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Invoice #</th>
+                      <th>Shop</th>
+                      <th>Customer</th>
+                      <th>Status</th>
+                      <th>Total</th>
+                      <th>Balance</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {invoices.length ? (
+                      invoices.map((inv) => (
+                        <tr key={inv.id} className={selectedInvoice?.invoice.id === inv.id ? "isSelected" : ""}>
+                          <td>{inv.invoiceNumber}</td>
+                          <td>{inv.shopCode}</td>
+                          <td>
+                            {inv.customerFirstName} {inv.customerLastName}
+                          </td>
+                          <td>{inv.status}</td>
+                          <td>{inv.totalAmount}</td>
+                          <td>{inv.balance}</td>
+                          <td>
+                            <div className="approvalActions">
+                              <button
+                                data-variant="ghost"
+                                type="button"
+                                onClick={async () => {
+                                  await loadInvoiceDetail(inv.id);
+                                }}
+                              >
+                                View
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan={7}>No invoices yet.</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            {selectedInvoice ? (
+              <section className="card" style={{ gridColumn: "1 / -1" }}>
+                <div className="meta" style={{ alignItems: "flex-start" }}>
+                  <div>
+                    <p className="eyebrow" style={{ marginBottom: 0 }}>
+                      BDK Photography
+                    </p>
+                    <h2 style={{ marginTop: "0.2rem" }}>{selectedInvoice.invoice.invoiceNumber}</h2>
+                    <div className="hint">
+                      {selectedInvoice.invoice.shopCode} • {selectedInvoice.invoice.shopName}
+                    </div>
+                    <div className="hint">
+                      Customer: {selectedInvoice.invoice.customerFirstName} {selectedInvoice.invoice.customerLastName} •{" "}
+                      {selectedInvoice.invoice.customerMobileNumber}
+                    </div>
+                  </div>
+                  <div className="approvalActions">
+                    <button
+                      data-variant="ghost"
+                      type="button"
+                      onClick={() => openInvoicePrint(selectedInvoice, selectedInvoicePayments)}
+                    >
+                      Print
+                    </button>
+                    {canManageInvoices && selectedInvoice.invoice.status === "DRAFT" ? (
+                      <button
+                        data-variant="ghost"
+                        type="button"
+                        onClick={async () => {
+                          if (!auth) {
+                            return;
+                          }
+                          setError(null);
+                          setSuccess(null);
+                          setInvoicesBusy(true);
+                          try {
+                            const updated = await updateInvoice(auth.token, selectedInvoice.invoice.id, { status: "ISSUED" });
+                            setSelectedInvoice(updated);
+                            setSuccess("Invoice issued.");
+                            await refreshInvoices();
+                          } catch (caught: unknown) {
+                            setError(caught instanceof Error ? caught.message : "Failed to issue invoice");
+                          } finally {
+                            setInvoicesBusy(false);
+                          }
+                        }}
+                      >
+                        Issue
+                      </button>
+                    ) : null}
+                    {canVoidInvoices && selectedInvoice.invoice.status !== "VOID" ? (
+                      <button
+                        data-variant="ghost"
+                        type="button"
+                        onClick={async () => {
+                          if (!auth) {
+                            return;
+                          }
+                          const ok = window.confirm("Void this invoice? This cannot be undone.");
+                          if (!ok) {
+                            return;
+                          }
+                          setError(null);
+                          setSuccess(null);
+                          setInvoicesBusy(true);
+                          try {
+                            const updated = await updateInvoice(auth.token, selectedInvoice.invoice.id, { status: "VOID" });
+                            setSelectedInvoice(updated);
+                            setSuccess("Invoice voided.");
+                            await refreshInvoices();
+                          } catch (caught: unknown) {
+                            setError(caught instanceof Error ? caught.message : "Failed to void invoice");
+                          } finally {
+                            setInvoicesBusy(false);
+                          }
+                        }}
+                      >
+                        Void
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+
+                <div className="divider" />
+
+                <div className="tableWrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Description</th>
+                        <th>Qty</th>
+                        <th>Unit</th>
+                        <th>Total</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {selectedInvoice.lines.map((l) => (
+                        <tr key={l.id}>
+                          <td>{l.description}</td>
+                          <td>{l.quantity}</td>
+                          <td>{l.unitPrice}</td>
+                          <td>{l.lineTotal}</td>
+                        </tr>
+                      ))}
+                      <tr>
+                        <td colSpan={3}>
+                          <strong>Total</strong>
+                        </td>
+                        <td>
+                          <strong>{selectedInvoice.invoice.totalAmount}</strong>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td colSpan={3}>
+                          <strong>Paid</strong>
+                        </td>
+                        <td>
+                          <strong>{selectedInvoice.invoice.paidAmount}</strong>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td colSpan={3}>
+                          <strong>Balance</strong>
+                        </td>
+                        <td>
+                          <strong>{selectedInvoice.invoice.balance}</strong>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="divider" />
+
+                <h3>Payments</h3>
+                <div className="tableWrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Date</th>
+                        <th>Method</th>
+                        <th>Amount</th>
+                        <th>Notes</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {selectedInvoicePayments.length ? (
+                        selectedInvoicePayments.map((p) => (
+                          <tr key={p.id}>
+                            <td>{p.createdAt}</td>
+                            <td>{p.method}</td>
+                            <td>{p.amount}</td>
+                            <td>{p.notes ?? "-"}</td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td colSpan={4}>No payments yet.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                {canManageInvoices && selectedInvoice.invoice.status !== "VOID" && selectedInvoice.invoice.balance > 0 ? (
+                  <div style={{ marginTop: "1rem" }}>
+                    <p className="subhead">Record Payment</p>
+                    <form
+                      className="form form--three"
+                      onSubmit={async (event) => {
+                        event.preventDefault();
+                        if (!auth) {
+                          return;
+                        }
+                        setError(null);
+                        setSuccess(null);
+                        setInvoicesBusy(true);
+                        try {
+                          await createInvoicePayment(auth.token, selectedInvoice.invoice.id, {
+                            amount: Number(newPaymentForm.amount),
+                            method: newPaymentForm.method,
+                            notes: newPaymentForm.notes ? newPaymentForm.notes : null
+                          });
+                          setNewPaymentForm({ amount: "", method: "CASH", notes: "" });
+                          setSuccess("Payment recorded.");
+                          await Promise.all([refreshInvoices(), loadInvoiceDetail(selectedInvoice.invoice.id)]);
+                        } catch (caught: unknown) {
+                          setError(caught instanceof Error ? caught.message : "Failed to record payment");
+                        } finally {
+                          setInvoicesBusy(false);
+                        }
+                      }}
+                    >
+                      <label>
+                        Amount (UGX)
+                        <input
+                          type="number"
+                          min={1}
+                          value={newPaymentForm.amount}
+                          onChange={(event) => setNewPaymentForm((prev) => ({ ...prev, amount: event.target.value }))}
+                          required
+                        />
+                      </label>
+                      <label>
+                        Method
+                        <select
+                          value={newPaymentForm.method}
+                          onChange={(event) =>
+                            setNewPaymentForm((prev) => ({
+                              ...prev,
+                              method:
+                                event.target.value === "MOBILE_MONEY"
+                                  ? "MOBILE_MONEY"
+                                  : event.target.value === "CARD"
+                                    ? "CARD"
+                                    : "CASH"
+                            }))
+                          }
+                        >
+                          <option value="CASH">Cash</option>
+                          <option value="MOBILE_MONEY">Mobile Money</option>
+                          <option value="CARD">Card</option>
+                        </select>
+                      </label>
+                      <label>
+                        Notes (optional)
+                        <input
+                          value={newPaymentForm.notes}
+                          onChange={(event) => setNewPaymentForm((prev) => ({ ...prev, notes: event.target.value }))}
+                        />
+                      </label>
+                      <button type="submit" disabled={invoicesBusy}>
+                        {invoicesBusy ? "Saving..." : "Record Payment"}
+                      </button>
+                    </form>
+                  </div>
+                ) : null}
+              </section>
+            ) : null}
           </>
         ) : (
           <>

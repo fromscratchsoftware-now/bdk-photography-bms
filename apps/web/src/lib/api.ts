@@ -79,6 +79,18 @@ export interface Shop {
   updatedAt?: string;
 }
 
+export interface Customer {
+  id: string;
+  mobileNumber: string;
+  firstName: string;
+  lastName: string;
+  email?: string | null;
+  isActive: boolean;
+  notes?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ExpenseCategory {
   id: string;
   name: string;
@@ -119,6 +131,61 @@ export interface Product {
   updatedAt: string;
 }
 
+export type InvoiceStatus = "DRAFT" | "ISSUED" | "PARTIALLY_PAID" | "PAID" | "VOID";
+
+export interface Invoice {
+  id: string;
+  invoiceNumber: string;
+  shopId: string;
+  shopCode: string;
+  shopName: string;
+  sequenceNumber: number;
+  customerId: string;
+  customerMobileNumber: string;
+  customerFirstName: string;
+  customerLastName: string;
+  customerEmail?: string | null;
+  status: InvoiceStatus;
+  issuedAt?: string | null;
+  dueDate?: string | null;
+  totalAmount: number;
+  paidAmount: number;
+  balance: number;
+  notes?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface InvoiceLine {
+  id: string;
+  invoiceId: string;
+  sortOrder: number;
+  description: string;
+  quantity: number;
+  unitPrice: number;
+  lineTotal: number;
+  notes?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface InvoiceDetail {
+  invoice: Invoice;
+  lines: InvoiceLine[];
+}
+
+export type PaymentMethod = "CASH" | "MOBILE_MONEY" | "CARD";
+
+export interface InvoicePayment {
+  id: string;
+  invoiceId: string;
+  amount: number;
+  method: PaymentMethod;
+  notes?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export function login(payload: { mobileNumber: string; password: string }): Promise<AuthResponse> {
   return request<AuthResponse>("api/auth/login", {
     method: "POST",
@@ -136,6 +203,53 @@ export function listShops(token: string): Promise<Shop[]> {
 
 export function listUsers(token: string): Promise<AuthUser[]> {
   return request<AuthUser[]>("api/users", undefined, token);
+}
+
+export function listCustomers(token: string): Promise<Customer[]> {
+  return request<Customer[]>("api/customers", undefined, token);
+}
+
+export function createCustomer(
+  token: string,
+  payload: {
+    mobileNumber: string;
+    firstName: string;
+    lastName: string;
+    email?: string | null;
+    notes?: string | null;
+    isActive?: boolean;
+  }
+): Promise<Customer> {
+  return request<Customer>(
+    "api/customers",
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function updateCustomer(
+  token: string,
+  id: string,
+  payload: Partial<{
+    mobileNumber: string;
+    firstName: string;
+    lastName: string;
+    email: string | null;
+    notes: string | null;
+    isActive: boolean;
+  }>
+): Promise<Customer> {
+  return request<Customer>(
+    `api/customers/${id}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
 }
 
 export function listExpenseCategories(token: string): Promise<ExpenseCategory[]> {
@@ -253,6 +367,85 @@ export function updateProduct(
     `api/products/${id}`,
     {
       method: "PATCH",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function listInvoices(token: string): Promise<Invoice[]> {
+  return request<Invoice[]>("api/invoices", undefined, token);
+}
+
+export function getInvoice(token: string, id: string): Promise<InvoiceDetail> {
+  return request<InvoiceDetail>(`api/invoices/${id}`, undefined, token);
+}
+
+export function createInvoice(
+  token: string,
+  payload: {
+    shopId?: string;
+    customerId: string;
+    status?: "DRAFT" | "ISSUED";
+    dueDate?: string | null;
+    notes?: string | null;
+    lines: Array<{
+      description: string;
+      quantity: number;
+      unitPrice: number;
+      notes?: string | null;
+    }>;
+  }
+): Promise<InvoiceDetail> {
+  return request<InvoiceDetail>(
+    "api/invoices",
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function updateInvoice(
+  token: string,
+  id: string,
+  payload: Partial<{
+    status: "ISSUED" | "VOID";
+    customerId: string;
+    dueDate: string | null;
+    notes: string | null;
+    lines: Array<{
+      description: string;
+      quantity: number;
+      unitPrice: number;
+      notes?: string | null;
+    }>;
+  }>
+): Promise<InvoiceDetail> {
+  return request<InvoiceDetail>(
+    `api/invoices/${id}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function listInvoicePayments(token: string, invoiceId: string): Promise<InvoicePayment[]> {
+  return request<InvoicePayment[]>(`api/invoices/${invoiceId}/payments`, undefined, token);
+}
+
+export function createInvoicePayment(
+  token: string,
+  invoiceId: string,
+  payload: { amount: number; method: PaymentMethod; notes?: string | null }
+): Promise<{ payment: InvoicePayment }> {
+  return request<{ payment: InvoicePayment }>(
+    `api/invoices/${invoiceId}/payments`,
+    {
+      method: "POST",
       body: JSON.stringify(payload)
     },
     token
