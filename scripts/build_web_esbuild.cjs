@@ -58,7 +58,10 @@ async function main() {
     bundle: true,
     format: "esm",
     platform: "browser",
-    target: ["es2020"],
+    // Shared-host deployments often get accessed from older Android WebViews.
+    // ES2020 syntax (nullish coalescing / optional chaining) can cause a hard blank page.
+    // Target ES2017 for broader compatibility while keeping async/await.
+    target: ["es2017"],
     jsx: "automatic",
     loader: {
       ".css": "css"
