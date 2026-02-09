@@ -1,6 +1,8 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
+  createBankingRequest,
   createCustomer,
+  createCashTransfer,
   createExpenseCategory,
   createExpense,
   createInvoice,
@@ -9,14 +11,22 @@ import {
   createSale,
   createProduct,
   createProductCategory,
+  decideBankingRequest,
+  decideCashTransfer,
+  getAdminCashOverview,
+  getCashMe,
   getSale,
   getInvoice,
   getMe,
+  listBankingRequests,
+  listCashRecipients,
+  listCashTransfers,
   listCustomers,
   listExpenses,
   listExpenseCategories,
   listInvoicePayments,
   listInvoices,
+  listMyNotifications,
   listReconciliationLocks,
   listSales,
   listProductCategories,
@@ -24,6 +34,7 @@ import {
   listShops,
   listUsers,
   login,
+  markNotificationRead,
   updateSale,
   updateCustomer,
   updateInvoice,
@@ -32,13 +43,19 @@ import {
   updateProductCategory,
   voidSale,
   voidExpense,
+  type AdminCashOverview,
   type AuthUser,
+  type BankingRequest,
+  type CashRecipient,
+  type CashSummary,
+  type CashTransfer,
   type Customer,
   type Expense,
   type ExpenseCategory,
   type Invoice,
   type InvoiceDetail,
   type InvoicePayment,
+  type NotificationItem,
   type Product,
   type ProductCategory,
   type ReconciliationLock,
@@ -53,7 +70,7 @@ type AuthState = {
   user: AuthUser;
 };
 
-type ActiveView = "overview" | "customers" | "invoices" | "sales" | "expenses" | "master-data";
+type ActiveView = "overview" | "customers" | "invoices" | "sales" | "expenses" | "cash" | "master-data";
 type MasterSection = "expense-categories" | "product-categories" | "products";
 
 const AUTH_STORAGE_KEY = "bdk.auth.phase1.v1";
@@ -222,6 +239,32 @@ export default function App(): JSX.Element {
     notes: ""
   });
 
+  const [cashBusy, setCashBusy] = useState(false);
+  const [cashSummary, setCashSummary] = useState<CashSummary | null>(null);
+  const [cashRecipients, setCashRecipients] = useState<CashRecipient[]>([]);
+  const [cashTransfers, setCashTransfers] = useState<CashTransfer[]>([]);
+  const [bankingRequests, setBankingRequests] = useState<BankingRequest[]>([]);
+  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
+  const [adminCashOverview, setAdminCashOverview] = useState<AdminCashOverview | null>(null);
+
+  const [adminCashFilters, setAdminCashFilters] = useState<{ shopId: string; dateFrom: string; dateTo: string }>({
+    shopId: "",
+    dateFrom: "",
+    dateTo: ""
+  });
+
+  const [newTransferForm, setNewTransferForm] = useState<{ shopId: string; receiverUserId: string; amountUGX: string; notes: string }>({
+    shopId: "",
+    receiverUserId: "",
+    amountUGX: "",
+    notes: ""
+  });
+
+  const [newBankingForm, setNewBankingForm] = useState<{ amountUGX: string; notes: string }>({
+    amountUGX: "",
+    notes: ""
+  });
+
   const [masterBusy, setMasterBusy] = useState(false);
   const [editingExpenseCategoryId, setEditingExpenseCategoryId] = useState<string | null>(null);
   const [editingExpenseCategoryForm, setEditingExpenseCategoryForm] = useState<{
@@ -296,6 +339,8 @@ export default function App(): JSX.Element {
   const canViewExpenses = authUser?.role === "ADMIN" || authUser?.role === "MANAGER" || authUser?.role === "SALES";
   const canCreateExpenses = authUser?.role === "ADMIN" || authUser?.role === "SALES";
   const canVoidExpenses = authUser?.role === "ADMIN";
+  const canViewCash = authUser?.role === "ADMIN" || authUser?.role === "MANAGER" || authUser?.role === "SALES";
+  const canApproveBanking = authUser?.role === "ADMIN";
 
   const shopCodesForUser = useMemo(() => {
     const map = new Map<string, string>();
@@ -327,6 +372,12 @@ export default function App(): JSX.Element {
     setReconciliationLocks([]);
     setSaleDraftId(null);
     setExpenses([]);
+    setCashSummary(null);
+    setCashRecipients([]);
+    setCashTransfers([]);
+    setBankingRequests([]);
+    setNotifications([]);
+    setAdminCashOverview(null);
     setSuccess(null);
     setError(message ?? null);
   }
@@ -400,6 +451,8 @@ export default function App(): JSX.Element {
         setReconcileForm((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
         setExpenseFilters((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
         setNewExpenseForm((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
+        setAdminCashFilters((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
+        setNewTransferForm((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
       } catch (caught: unknown) {
         if (!cancelled) {
           setError(caught instanceof Error ? caught.message : "Failed to load data");
@@ -891,6 +944,188 @@ export default function App(): JSX.Element {
     }));
   }, [activeView, authUser?.role, expenseFilters.shopId, expenseFilters.expenseDate]);
 
+  async function refreshCashData(): Promise<void> {
+    if (!auth || !canViewCash) {
+      return;
+    }
+
+    setCashBusy(true);
+    setError(null);
+
+    try {
+      const recipientsPromise =
+        authUser?.role === "ADMIN" && newTransferForm.shopId
+          ? listCashRecipients(auth.token, { shopId: newTransferForm.shopId })
+          : listCashRecipients(auth.token);
+
+      const bankingsPromise =
+        authUser?.role === "ADMIN"
+          ? listBankingRequests(auth.token, { status: "PENDING" })
+          : listBankingRequests(auth.token);
+
+      const overviewPromise =
+        authUser?.role === "ADMIN"
+          ? getAdminCashOverview(auth.token, {
+              shopId: adminCashFilters.shopId || undefined,
+              dateFrom: adminCashFilters.dateFrom || undefined,
+              dateTo: adminCashFilters.dateTo || undefined
+            })
+          : Promise.resolve(null);
+
+      const [summary, recipients, transfers, bankings, notifs, overview] = await Promise.all([
+        getCashMe(auth.token),
+        recipientsPromise,
+        listCashTransfers(auth.token),
+        bankingsPromise,
+        listMyNotifications(auth.token),
+        overviewPromise
+      ]);
+
+      setCashSummary(summary);
+      setCashRecipients(recipients);
+      setCashTransfers(transfers);
+      setBankingRequests(bankings);
+      setNotifications(notifs);
+      setAdminCashOverview(overview);
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to load cash data");
+    } finally {
+      setCashBusy(false);
+    }
+  }
+
+  async function submitCashTransfer(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (!auth) {
+      return;
+    }
+    setError(null);
+    setSuccess(null);
+    setCashBusy(true);
+
+    try {
+      const amount = Number.parseInt(newTransferForm.amountUGX, 10);
+      if (!newTransferForm.receiverUserId) {
+        throw new Error("Receiver is required.");
+      }
+      if (!Number.isFinite(amount) || amount <= 0) {
+        throw new Error("Amount must be greater than 0.");
+      }
+      if (authUser?.role === "ADMIN" && !newTransferForm.shopId) {
+        throw new Error("Shop is required.");
+      }
+
+      const trimmedNotes = newTransferForm.notes.trim();
+
+      await createCashTransfer(auth.token, {
+        ...(authUser?.role === "ADMIN" ? { shopId: newTransferForm.shopId } : {}),
+        receiverUserId: newTransferForm.receiverUserId,
+        amountUGX: amount,
+        notes: trimmedNotes ? trimmedNotes : null
+      });
+
+      setSuccess("Transfer request sent.");
+      setNewTransferForm((prev) => ({ ...prev, receiverUserId: "", amountUGX: "", notes: "" }));
+      await refreshCashData();
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to create transfer");
+    } finally {
+      setCashBusy(false);
+    }
+  }
+
+  async function decideTransfer(transferId: string, decision: "APPROVE" | "REJECT"): Promise<void> {
+    if (!auth) {
+      return;
+    }
+    setError(null);
+    setSuccess(null);
+    setCashBusy(true);
+    try {
+      await decideCashTransfer(auth.token, transferId, { decision });
+      setSuccess(decision === "APPROVE" ? "Transfer approved." : "Transfer rejected.");
+      await refreshCashData();
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to update transfer");
+    } finally {
+      setCashBusy(false);
+    }
+  }
+
+  async function submitBanking(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (!auth || authUser?.role !== "SALES") {
+      return;
+    }
+    setError(null);
+    setSuccess(null);
+    setCashBusy(true);
+    try {
+      const amount = Number.parseInt(newBankingForm.amountUGX, 10);
+      if (!Number.isFinite(amount) || amount <= 0) {
+        throw new Error("Amount must be greater than 0.");
+      }
+      const trimmedNotes = newBankingForm.notes.trim();
+      await createBankingRequest(auth.token, {
+        amountUGX: amount,
+        notes: trimmedNotes ? trimmedNotes : null
+      });
+      setSuccess("Banking request submitted.");
+      setNewBankingForm({ amountUGX: "", notes: "" });
+      await refreshCashData();
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to create banking request");
+    } finally {
+      setCashBusy(false);
+    }
+  }
+
+  async function decideBanking(bankingId: string, decision: "APPROVE" | "REJECT"): Promise<void> {
+    if (!auth || !canApproveBanking) {
+      return;
+    }
+    setError(null);
+    setSuccess(null);
+    setCashBusy(true);
+    try {
+      await decideBankingRequest(auth.token, bankingId, { decision });
+      setSuccess(decision === "APPROVE" ? "Banking approved." : "Banking rejected.");
+      await refreshCashData();
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to update banking request");
+    } finally {
+      setCashBusy(false);
+    }
+  }
+
+  async function handleMarkNotificationRead(notifId: string): Promise<void> {
+    if (!auth) {
+      return;
+    }
+    setError(null);
+    setCashBusy(true);
+    try {
+      await markNotificationRead(auth.token, notifId);
+      const next = await listMyNotifications(auth.token);
+      setNotifications(next);
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to mark notification read");
+    } finally {
+      setCashBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!auth || !canViewCash) {
+      return;
+    }
+    if (activeView !== "cash") {
+      return;
+    }
+    void refreshCashData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeView, auth?.token, canViewCash, authUser?.role, newTransferForm.shopId]);
+
   async function submitLogin(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     setError(null);
@@ -1093,7 +1328,7 @@ export default function App(): JSX.Element {
         <p className="eyebrow">BDK Photography</p>
         <h1>Business Management System</h1>
         <p className="subtitle">
-          Phases 1-5: authentication (JWT), master data, customers, invoices/payments, sales POS, reconciliation locks, and expenses.
+          Phases 1-6: authentication (JWT), master data, customers, invoices/payments, sales POS, reconciliation locks, expenses, and cash tracking.
         </p>
 
         <div className="divider" style={{ background: "rgba(255,255,255,0.22)" }} />
@@ -1161,6 +1396,15 @@ export default function App(): JSX.Element {
               Expenses
             </button>
           ) : null}
+          {canViewCash ? (
+            <button
+              className={`tab ${activeView === "cash" ? "isActive" : ""}`}
+              type="button"
+              onClick={() => setActiveView("cash")}
+            >
+              Cash
+            </button>
+          ) : null}
           {canManageMasterData ? (
             <button
               className={`tab ${activeView === "master-data" ? "isActive" : ""}`}
@@ -1220,9 +1464,10 @@ export default function App(): JSX.Element {
                 <li>Phase 3: Customers, invoices, and installment payments</li>
                 <li>Phase 4: Sales (POS) + daily reconciliation locks</li>
                 <li>Phase 5: Expenses (payment source: salesperson cash vs admin/bank)</li>
+                <li>Phase 6: Cash tracking (cash at hand, transfers, banking approvals, notifications)</li>
               </ul>
               <div className="note">
-                Next phases will add workshop production, inventory/transfers, cash workflows, messaging, and reporting.
+                Next phases will add workshop production, inventory/transfers, messaging, reporting, and the capital dashboard.
               </div>
             </section>
           </>
@@ -2893,6 +3138,409 @@ export default function App(): JSX.Element {
                     ) : (
                       <tr>
                         <td colSpan={8}>No expenses found.</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </>
+        ) : activeView === "cash" ? (
+          <>
+            <section className="card" style={{ gridColumn: "1 / -1" }}>
+              <h2>Phase 6: Cash Tracking</h2>
+              <p className="hint">
+                Cash at hand is derived from cash sales, cash installment payments, salesperson-cash expenses, approved transfers, and approved bankings.
+              </p>
+              <button type="button" data-variant="ghost" onClick={() => void refreshCashData()} disabled={cashBusy}>
+                {cashBusy ? "Refreshing..." : "Refresh"}
+              </button>
+            </section>
+
+            <section className="card">
+              <h2>My Cash</h2>
+              {cashSummary ? (
+                <>
+                  <p className="hint" style={{ marginTop: 0 }}>
+                    <strong>Cash at hand:</strong> UGX {cashSummary.cashAtHand}
+                  </p>
+                  <ul className="stack">
+                    <li>
+                      <strong>Cash sales:</strong> {cashSummary.cashSales}
+                    </li>
+                    <li>
+                      <strong>Cash invoice payments:</strong> {cashSummary.cashInvoicePayments}
+                    </li>
+                    <li>
+                      <strong>Cash expenses:</strong> {cashSummary.cashExpenses}
+                    </li>
+                    <li>
+                      <strong>Transfers sent:</strong> {cashSummary.transfersSent}
+                    </li>
+                    <li>
+                      <strong>Transfers received:</strong> {cashSummary.transfersReceived}
+                    </li>
+                    <li>
+                      <strong>Banked:</strong> {cashSummary.banked}
+                    </li>
+                  </ul>
+                  <p className="hint">Computed at {cashSummary.computedAt}</p>
+                </>
+              ) : (
+                <p className="hint">No cash summary loaded yet.</p>
+              )}
+            </section>
+
+            <section className="card">
+              <h2>Transfer Cash</h2>
+              <form className="form" onSubmit={submitCashTransfer}>
+                {authUser.role === "ADMIN" ? (
+                  <label>
+                    Shop
+                    <select
+                      value={newTransferForm.shopId}
+                      onChange={(event) => setNewTransferForm((prev) => ({ ...prev, shopId: event.target.value }))}
+                      required
+                    >
+                      <option value="">Select shop...</option>
+                      {shops.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.code} - {s.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+                <label>
+                  Receiver
+                  <select
+                    value={newTransferForm.receiverUserId}
+                    onChange={(event) => setNewTransferForm((prev) => ({ ...prev, receiverUserId: event.target.value }))}
+                    required
+                  >
+                    <option value="">Select recipient...</option>
+                    {cashRecipients.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.fullName} ({r.role})
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Amount (UGX)
+                  <input
+                    value={newTransferForm.amountUGX}
+                    onChange={(event) => setNewTransferForm((prev) => ({ ...prev, amountUGX: event.target.value }))}
+                    inputMode="numeric"
+                    placeholder="50000"
+                    required
+                  />
+                </label>
+                <label>
+                  Notes (optional)
+                  <input value={newTransferForm.notes} onChange={(event) => setNewTransferForm((prev) => ({ ...prev, notes: event.target.value }))} />
+                </label>
+                <button type="submit" disabled={cashBusy}>
+                  {cashBusy ? "Sending..." : "Send Transfer"}
+                </button>
+              </form>
+              <p className="hint">Transfers do not affect cash until the receiver approves.</p>
+            </section>
+
+            <section className="card" style={{ gridColumn: "1 / -1" }}>
+              <h2>Pending Transfer Approvals</h2>
+              <div className="tableWrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      <th>Shop</th>
+                      <th>From</th>
+                      <th className="right">Amount</th>
+                      <th>Notes</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {cashTransfers.filter((t) => t.status === "PENDING" && t.receiverUserId === authUser.id).length ? (
+                      cashTransfers
+                        .filter((t) => t.status === "PENDING" && t.receiverUserId === authUser.id)
+                        .map((transfer) => (
+                          <tr key={transfer.id}>
+                            <td>{transfer.createdAt.slice(0, 10)}</td>
+                            <td>{transfer.shopCode}</td>
+                            <td>{transfer.senderFullName}</td>
+                            <td className="right">{transfer.amountUGX}</td>
+                            <td>{transfer.requestNotes ?? "-"}</td>
+                            <td>
+                              <button
+                                type="button"
+                                data-variant="ghost"
+                                onClick={() => void decideTransfer(transfer.id, "APPROVE")}
+                                disabled={cashBusy}
+                              >
+                                Approve
+                              </button>{" "}
+                              <button
+                                type="button"
+                                data-variant="ghost"
+                                onClick={() => void decideTransfer(transfer.id, "REJECT")}
+                                disabled={cashBusy}
+                              >
+                                Reject
+                              </button>
+                            </td>
+                          </tr>
+                        ))
+                    ) : (
+                      <tr>
+                        <td colSpan={6}>No pending approvals.</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            {authUser.role === "SALES" ? (
+              <section className="card">
+                <h2>Bank Cash</h2>
+                <form className="form" onSubmit={submitBanking}>
+                  <label>
+                    Amount (UGX)
+                    <input
+                      value={newBankingForm.amountUGX}
+                      onChange={(event) => setNewBankingForm((prev) => ({ ...prev, amountUGX: event.target.value }))}
+                      inputMode="numeric"
+                      placeholder="100000"
+                      required
+                    />
+                  </label>
+                  <label>
+                    Notes (optional)
+                    <input value={newBankingForm.notes} onChange={(event) => setNewBankingForm((prev) => ({ ...prev, notes: event.target.value }))} />
+                  </label>
+                  <button type="submit" disabled={cashBusy}>
+                    {cashBusy ? "Submitting..." : "Submit Banking Request"}
+                  </button>
+                </form>
+                <p className="hint">Banking does not reduce cash at hand until admin approval.</p>
+              </section>
+            ) : null}
+
+            {authUser.role === "ADMIN" ? (
+              <section className="card" style={{ gridColumn: "1 / -1" }}>
+                <h2>Pending Banking Approvals</h2>
+                <div className="tableWrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Date</th>
+                        <th>Shop</th>
+                        <th>User</th>
+                        <th className="right">Amount</th>
+                        <th>Notes</th>
+                        <th>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {bankingRequests.length ? (
+                        bankingRequests.map((req) => (
+                          <tr key={req.id}>
+                            <td>{req.createdAt.slice(0, 10)}</td>
+                            <td>{req.shopCode}</td>
+                            <td>{req.userFullName}</td>
+                            <td className="right">{req.amountUGX}</td>
+                            <td>{req.requestNotes ?? "-"}</td>
+                            <td>
+                              <button
+                                type="button"
+                                data-variant="ghost"
+                                onClick={() => void decideBanking(req.id, "APPROVE")}
+                                disabled={cashBusy}
+                              >
+                                Approve
+                              </button>{" "}
+                              <button
+                                type="button"
+                                data-variant="ghost"
+                                onClick={() => void decideBanking(req.id, "REJECT")}
+                                disabled={cashBusy}
+                              >
+                                Reject
+                              </button>
+                            </td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td colSpan={6}>No pending banking requests.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            ) : (
+              <section className="card" style={{ gridColumn: "1 / -1" }}>
+                <h2>{authUser.role === "SALES" ? "My Banking Requests" : "Banking Requests"}</h2>
+                <div className="tableWrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Date</th>
+                        <th>Shop</th>
+                        {authUser.role !== "SALES" ? <th>User</th> : null}
+                        <th className="right">Amount</th>
+                        <th>Status</th>
+                        <th>Notes</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {bankingRequests.length ? (
+                        bankingRequests.map((req) => (
+                          <tr key={req.id}>
+                            <td>{req.createdAt.slice(0, 10)}</td>
+                            <td>{req.shopCode}</td>
+                            {authUser.role !== "SALES" ? <td>{req.userFullName}</td> : null}
+                            <td className="right">{req.amountUGX}</td>
+                            <td>{req.status}</td>
+                            <td>{req.requestNotes ?? "-"}</td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td colSpan={authUser.role !== "SALES" ? 6 : 5}>No banking requests found.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            )}
+
+            {authUser.role === "ADMIN" ? (
+              <section className="card" style={{ gridColumn: "1 / -1" }}>
+                <h2>Admin Cash Overview</h2>
+                <form
+                  className="form"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void refreshCashData();
+                  }}
+                >
+                  <label>
+                    Shop filter
+                    <select
+                      value={adminCashFilters.shopId}
+                      onChange={(event) => setAdminCashFilters((prev) => ({ ...prev, shopId: event.target.value }))}
+                    >
+                      <option value="">All shops</option>
+                      {shops.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.code} - {s.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Date from (optional)
+                    <input
+                      type="date"
+                      value={adminCashFilters.dateFrom}
+                      onChange={(event) => setAdminCashFilters((prev) => ({ ...prev, dateFrom: event.target.value }))}
+                    />
+                  </label>
+                  <label>
+                    Date to (optional)
+                    <input
+                      type="date"
+                      value={adminCashFilters.dateTo}
+                      onChange={(event) => setAdminCashFilters((prev) => ({ ...prev, dateTo: event.target.value }))}
+                    />
+                  </label>
+                  <button type="submit" disabled={cashBusy}>
+                    {cashBusy ? "Refreshing..." : "Refresh Overview"}
+                  </button>
+                </form>
+
+                <div className="tableWrap" style={{ marginTop: "1rem" }}>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>User</th>
+                        <th>Shop</th>
+                        <th className="right">Cash at hand</th>
+                        <th className="right">Banked (range)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {adminCashOverview?.items?.length ? (
+                        adminCashOverview.items.map((item) => (
+                          <tr key={item.userId}>
+                            <td>{item.fullName}</td>
+                            <td>{item.shopCode ?? "-"}</td>
+                            <td className="right">{item.cashAtHand}</td>
+                            <td className="right">{item.bankedTotal}</td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td colSpan={4}>No sales users found.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                    {adminCashOverview?.totals ? (
+                      <tfoot>
+                        <tr>
+                          <th colSpan={2} style={{ textAlign: "right" }}>
+                            Totals
+                          </th>
+                          <th className="right">{adminCashOverview.totals.cashAtHand}</th>
+                          <th className="right">{adminCashOverview.totals.bankedTotal}</th>
+                        </tr>
+                      </tfoot>
+                    ) : null}
+                  </table>
+                </div>
+              </section>
+            ) : null}
+
+            <section className="card" style={{ gridColumn: "1 / -1" }}>
+              <h2>Notifications</h2>
+              <div className="tableWrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      <th>Title</th>
+                      <th>Message</th>
+                      <th>Status</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {notifications.length ? (
+                      notifications.map((n) => (
+                        <tr key={n.id} style={{ opacity: n.isRead ? 0.65 : 1 }}>
+                          <td>{n.createdAt.slice(0, 10)}</td>
+                          <td>{n.title}</td>
+                          <td>{n.message}</td>
+                          <td>{n.isRead ? "Read" : "Unread"}</td>
+                          <td>
+                            {!n.isRead ? (
+                              <button type="button" data-variant="ghost" onClick={() => void handleMarkNotificationRead(n.id)} disabled={cashBusy}>
+                                Mark read
+                              </button>
+                            ) : (
+                              "-"
+                            )}
+                          </td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan={5}>No notifications.</td>
                       </tr>
                     )}
                   </tbody>

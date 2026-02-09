@@ -438,6 +438,74 @@ function phase1_is_shop_date_locked(PDO $pdo, string $shopId, string $lockDateYm
   return $row !== null;
 }
 
+function phase1_cash_summary(PDO $pdo, string $userId): array {
+  $cashSalesRow = phase1_db_fetch_one(
+    $pdo,
+    "SELECT COALESCE(SUM(total_amount), 0) AS total " .
+      "FROM sales WHERE user_id = :user_id AND payment_method = 'CASH' AND is_void = 0",
+    [":user_id" => $userId]
+  );
+  $cashSales = $cashSalesRow ? (int)($cashSalesRow["total"] ?? 0) : 0;
+
+  // Installment payments collected as cash also increase cash at hand.
+  $cashPaymentsRow = phase1_db_fetch_one(
+    $pdo,
+    "SELECT COALESCE(SUM(amount), 0) AS total " .
+      "FROM invoice_payments WHERE created_by_user_id = :user_id AND method = 'CASH'",
+    [":user_id" => $userId]
+  );
+  $cashInvoicePayments = $cashPaymentsRow ? (int)($cashPaymentsRow["total"] ?? 0) : 0;
+
+  $cashExpensesRow = phase1_db_fetch_one(
+    $pdo,
+    "SELECT COALESCE(SUM(amount_ugx), 0) AS total " .
+      "FROM expenses WHERE paid_by_user_id = :user_id AND payment_source = 'SALESPERSON_CASH' AND is_void = 0",
+    [":user_id" => $userId]
+  );
+  $cashExpenses = $cashExpensesRow ? (int)($cashExpensesRow["total"] ?? 0) : 0;
+
+  $sentRow = phase1_db_fetch_one(
+    $pdo,
+    "SELECT COALESCE(SUM(amount_ugx), 0) AS total " .
+      "FROM cash_transfers WHERE sender_user_id = :user_id AND status = 'APPROVED'",
+    [":user_id" => $userId]
+  );
+  $transfersSent = $sentRow ? (int)($sentRow["total"] ?? 0) : 0;
+
+  $receivedRow = phase1_db_fetch_one(
+    $pdo,
+    "SELECT COALESCE(SUM(amount_ugx), 0) AS total " .
+      "FROM cash_transfers WHERE receiver_user_id = :user_id AND status = 'APPROVED'",
+    [":user_id" => $userId]
+  );
+  $transfersReceived = $receivedRow ? (int)($receivedRow["total"] ?? 0) : 0;
+
+  $bankedRow = phase1_db_fetch_one(
+    $pdo,
+    "SELECT COALESCE(SUM(amount_ugx), 0) AS total " .
+      "FROM banking_requests WHERE user_id = :user_id AND status = 'APPROVED'",
+    [":user_id" => $userId]
+  );
+  $banked = $bankedRow ? (int)($bankedRow["total"] ?? 0) : 0;
+
+  $cashAtHand = $cashSales + $cashInvoicePayments - $cashExpenses - $transfersSent + $transfersReceived - $banked;
+
+  return [
+    "cashAtHand" => $cashAtHand,
+    "cashSales" => $cashSales,
+    "cashInvoicePayments" => $cashInvoicePayments,
+    "cashExpenses" => $cashExpenses,
+    "transfersSent" => $transfersSent,
+    "transfersReceived" => $transfersReceived,
+    "banked" => $banked,
+  ];
+}
+
+function phase1_cash_at_hand(PDO $pdo, string $userId): int {
+  $summary = phase1_cash_summary($pdo, $userId);
+  return (int)($summary["cashAtHand"] ?? 0);
+}
+
 function phase1_handle(string $method, string $route): void {
   $pdo = mysql_pdo();
 
@@ -917,26 +985,9 @@ function phase1_handle(string $method, string $route): void {
 
       // Negative cash blocking (admin override is implicit by role).
       if ($roleName !== "ADMIN") {
-        $cashSalesRow = phase1_db_fetch_one(
-          $pdo,
-          "SELECT COALESCE(SUM(total_amount), 0) AS total " .
-          "FROM sales WHERE user_id = :user_id AND payment_method = 'CASH' AND is_void = 0",
-          [":user_id" => $paidByUserId]
-        );
-        $cashSales = $cashSalesRow ? (int)($cashSalesRow["total"] ?? 0) : 0;
-
-        $cashExpensesRow = phase1_db_fetch_one(
-          $pdo,
-          "SELECT COALESCE(SUM(amount_ugx), 0) AS total " .
-          "FROM expenses WHERE paid_by_user_id = :user_id AND payment_source = 'SALESPERSON_CASH' AND is_void = 0",
-          [":user_id" => $paidByUserId]
-        );
-        $cashExpenses = $cashExpensesRow ? (int)($cashExpensesRow["total"] ?? 0) : 0;
-
-        $available = $cashSales - $cashExpenses;
-        if ($available < 0) {
-          $available = 0;
-        }
+        $summary = phase1_cash_summary($pdo, $paidByUserId);
+        $available = (int)($summary["cashAtHand"] ?? 0);
+        $available = max(0, $available);
         if ($available < $amount) {
           json_response(400, [
             "error" => "BadRequest",
@@ -3931,6 +3982,946 @@ function phase1_handle(string $method, string $route): void {
       }
       json_response(500, ["error" => "InternalServerError", "message" => "Failed to void sale"]);
     }
+  }
+
+  // Phase 6 — Cash Tracking (derived cash at hand + approvals)
+  if ($method === "GET" && $route === "cash/me") {
+    phase1_require_role($roleName, ["ADMIN", "MANAGER", "SALES"]);
+    $userId = (string)($authUser["id"] ?? "");
+    $summary = phase1_cash_summary($pdo, $userId);
+    json_response(200, ["data" => array_merge(["userId" => $userId, "computedAt" => now_iso()], $summary)]);
+  }
+
+  if ($method === "GET" && $route === "cash/recipients") {
+    phase1_require_role($roleName, ["ADMIN", "MANAGER", "SALES"]);
+
+    $shopId = isset($_GET["shopId"]) && is_string($_GET["shopId"]) ? trim($_GET["shopId"]) : "";
+    $viewerUserId = (string)($authUser["id"] ?? "");
+
+    if ($roleName === "ADMIN") {
+      $params = [":viewer_user_id" => $viewerUserId];
+      $where = ["u.is_active = 1", "u.id <> :viewer_user_id"];
+      if ($shopId !== "") {
+        $where[] = "(r.name = 'ADMIN' OR EXISTS (" .
+          "SELECT 1 FROM user_shop_assignment a WHERE a.user_id = u.id AND a.unassigned_at IS NULL AND a.shop_id = :shop_id" .
+        "))";
+        $params[":shop_id"] = $shopId;
+      }
+
+      $rows = phase1_db_fetch_all(
+        $pdo,
+        "SELECT DISTINCT u.id, u.full_name, r.name AS role_name " .
+          "FROM users u JOIN roles r ON r.id = u.role_id " .
+          "WHERE " . implode(" AND ", $where) . " " .
+          "ORDER BY (r.name = 'ADMIN') DESC, u.full_name ASC",
+        $params
+      );
+
+      $recipients = array_map(function ($row) {
+        return [
+          "id" => (string)($row["id"] ?? ""),
+          "fullName" => (string)($row["full_name"] ?? ""),
+          "role" => (string)($row["role_name"] ?? ""),
+        ];
+      }, $rows);
+
+      json_response(200, ["data" => $recipients]);
+    }
+
+    $shopIds = phase1_assigned_shop_ids($assignments);
+    if (count($shopIds) < 1) {
+      json_response(200, ["data" => []]);
+    }
+
+    $placeholders = [];
+    $params = [":viewer_user_id" => $viewerUserId];
+    foreach ($shopIds as $idx => $id) {
+      $key = ":shop_" . (string)$idx;
+      $placeholders[] = $key;
+      $params[$key] = $id;
+    }
+
+    $rows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT DISTINCT u.id, u.full_name, r.name AS role_name " .
+        "FROM users u " .
+        "JOIN roles r ON r.id = u.role_id " .
+        "LEFT JOIN user_shop_assignment a ON a.user_id = u.id AND a.unassigned_at IS NULL " .
+        "WHERE u.is_active = 1 AND u.id <> :viewer_user_id " .
+          "AND (r.name = 'ADMIN' OR a.shop_id IN (" . implode(", ", $placeholders) . ")) " .
+        "ORDER BY (r.name = 'ADMIN') DESC, u.full_name ASC",
+      $params
+    );
+
+    $recipients = array_map(function ($row) {
+      return [
+        "id" => (string)($row["id"] ?? ""),
+        "fullName" => (string)($row["full_name"] ?? ""),
+        "role" => (string)($row["role_name"] ?? ""),
+      ];
+    }, $rows);
+
+    json_response(200, ["data" => $recipients]);
+  }
+
+  if ($method === "GET" && $route === "cash/transfers") {
+    phase1_require_role($roleName, ["ADMIN", "MANAGER", "SALES"]);
+
+    $status = isset($_GET["status"]) && is_string($_GET["status"]) ? strtoupper(trim($_GET["status"])) : "";
+    $shopId = isset($_GET["shopId"]) && is_string($_GET["shopId"]) ? trim($_GET["shopId"]) : "";
+
+    if ($status !== "" && !in_array($status, ["PENDING", "APPROVED", "REJECTED"], true)) {
+      json_response(400, ["error" => "ValidationError", "message" => "status must be PENDING, APPROVED, or REJECTED"]);
+    }
+
+    $where = [];
+    $params = [];
+
+    if ($roleName === "SALES") {
+      $viewerUserId = (string)($authUser["id"] ?? "");
+      $where[] = "(t.sender_user_id = :viewer_user_id OR t.receiver_user_id = :viewer_user_id)";
+      $params[":viewer_user_id"] = $viewerUserId;
+    } elseif ($roleName === "MANAGER") {
+      $shopIds = phase1_assigned_shop_ids($assignments);
+      if (count($shopIds) < 1) {
+        json_response(200, ["data" => []]);
+      }
+      $placeholders = [];
+      foreach ($shopIds as $idx => $id) {
+        $key = ":shop_" . (string)$idx;
+        $placeholders[] = $key;
+        $params[$key] = $id;
+      }
+      $where[] = "t.shop_id IN (" . implode(", ", $placeholders) . ")";
+    } else {
+      if ($shopId !== "") {
+        $where[] = "t.shop_id = :shop_id";
+        $params[":shop_id"] = $shopId;
+      }
+    }
+
+    if ($status !== "") {
+      $where[] = "t.status = :status";
+      $params[":status"] = $status;
+    }
+
+    if (count($where) < 1) {
+      $where[] = "1=1";
+    }
+
+    $rows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT t.id, t.shop_id, sh.code AS shop_code, sh.name AS shop_name, " .
+        "t.sender_user_id, su.full_name AS sender_full_name, " .
+        "t.receiver_user_id, ru.full_name AS receiver_full_name, " .
+        "t.amount_ugx, t.status, t.request_notes, t.decision_notes, t.decided_at, t.decided_by_user_id, du.full_name AS decided_by_full_name, " .
+        "t.created_at, t.updated_at " .
+      "FROM cash_transfers t " .
+      "JOIN shops sh ON sh.id = t.shop_id " .
+      "JOIN users su ON su.id = t.sender_user_id " .
+      "JOIN users ru ON ru.id = t.receiver_user_id " .
+      "LEFT JOIN users du ON du.id = t.decided_by_user_id " .
+      "WHERE " . implode(" AND ", $where) . " " .
+      "ORDER BY t.created_at DESC " .
+      "LIMIT 200",
+      $params
+    );
+
+    $out = array_map(function ($row) {
+      return [
+        "id" => (string)($row["id"] ?? ""),
+        "shopId" => (string)($row["shop_id"] ?? ""),
+        "shopCode" => (string)($row["shop_code"] ?? ""),
+        "shopName" => (string)($row["shop_name"] ?? ""),
+        "senderUserId" => (string)($row["sender_user_id"] ?? ""),
+        "senderFullName" => (string)($row["sender_full_name"] ?? ""),
+        "receiverUserId" => (string)($row["receiver_user_id"] ?? ""),
+        "receiverFullName" => (string)($row["receiver_full_name"] ?? ""),
+        "amountUGX" => (int)($row["amount_ugx"] ?? 0),
+        "status" => (string)($row["status"] ?? ""),
+        "requestNotes" => $row["request_notes"] ?? null,
+        "decisionNotes" => $row["decision_notes"] ?? null,
+        "decidedAt" => $row["decided_at"] ?? null,
+        "decidedByUserId" => $row["decided_by_user_id"] ?? null,
+        "decidedByFullName" => $row["decided_by_full_name"] ?? null,
+        "createdAt" => (string)($row["created_at"] ?? ""),
+        "updatedAt" => (string)($row["updated_at"] ?? ""),
+      ];
+    }, $rows);
+
+    json_response(200, ["data" => $out]);
+  }
+
+  if ($method === "POST" && $route === "cash/transfers") {
+    phase1_require_role($roleName, ["ADMIN", "MANAGER", "SALES"]);
+    $body = read_json_body();
+
+    $receiverUserId = isset($body["receiverUserId"]) && is_string($body["receiverUserId"]) ? trim($body["receiverUserId"]) : "";
+    $amount = isset($body["amountUGX"]) ? (int)$body["amountUGX"] : 0;
+    $notes = array_key_exists("notes", $body) ? $body["notes"] : null;
+    $requestedShopId = isset($body["shopId"]) && is_string($body["shopId"]) ? trim($body["shopId"]) : "";
+
+    if ($receiverUserId === "" || $amount <= 0) {
+      json_response(400, ["error" => "ValidationError", "message" => "receiverUserId and amountUGX (>0) are required"]);
+    }
+    if ($notes !== null && !is_string($notes)) {
+      json_response(400, ["error" => "ValidationError", "message" => "notes must be a string or null"]);
+    }
+
+    $actorUserId = (string)($authUser["id"] ?? "");
+
+    $shopId = "";
+    if ($roleName === "ADMIN") {
+      if ($requestedShopId === "") {
+        json_response(400, ["error" => "ValidationError", "message" => "shopId is required"]);
+      }
+      $shopId = $requestedShopId;
+    } else {
+      $shopId = phase1_primary_shop_id($assignments);
+      if ($shopId === "") {
+        json_response(400, ["error" => "ValidationError", "message" => "User is not assigned to a shop"]);
+      }
+    }
+
+    phase1_require_shop_access($roleName, $assignments, $shopId);
+
+    if ($receiverUserId === $actorUserId) {
+      json_response(400, ["error" => "ValidationError", "message" => "Cannot transfer cash to yourself"]);
+    }
+
+    $receiverRow = phase1_db_fetch_one(
+      $pdo,
+      "SELECT u.id, u.full_name, u.is_active, r.name AS role_name " .
+      "FROM users u JOIN roles r ON r.id = u.role_id WHERE u.id = :id LIMIT 1",
+      [":id" => $receiverUserId]
+    );
+    if (!$receiverRow || (int)($receiverRow["is_active"] ?? 0) !== 1) {
+      json_response(400, ["error" => "ValidationError", "message" => "Invalid receiverUserId"]);
+    }
+
+    $receiverRole = (string)($receiverRow["role_name"] ?? "");
+    if ($receiverRole !== "ADMIN") {
+      $receiverAssignment = phase1_db_fetch_one(
+        $pdo,
+        "SELECT id FROM user_shop_assignment WHERE user_id = :user_id AND shop_id = :shop_id AND unassigned_at IS NULL LIMIT 1",
+        [":user_id" => $receiverUserId, ":shop_id" => $shopId]
+      );
+      if (!$receiverAssignment) {
+        json_response(400, ["error" => "ValidationError", "message" => "Receiver is not assigned to this shop"]);
+      }
+    }
+
+    // Negative cash blocking (admin override is implicit by role).
+    if ($roleName !== "ADMIN") {
+      $available = max(0, phase1_cash_at_hand($pdo, $actorUserId));
+      if ($available < $amount) {
+        json_response(400, [
+          "error" => "BadRequest",
+          "message" => "Insufficient cash at hand. Available: " . $available . ", required: " . $amount,
+        ]);
+      }
+    }
+
+    $transferId = create_id("ctr");
+
+    try {
+      $stmt = $pdo->prepare(
+        "INSERT INTO cash_transfers (id, shop_id, sender_user_id, receiver_user_id, amount_ugx, status, request_notes) " .
+        "VALUES (:id, :shop_id, :sender_user_id, :receiver_user_id, :amount_ugx, 'PENDING', :request_notes)"
+      );
+      $stmt->execute([
+        ":id" => $transferId,
+        ":shop_id" => $shopId,
+        ":sender_user_id" => $actorUserId,
+        ":receiver_user_id" => $receiverUserId,
+        ":amount_ugx" => $amount,
+        ":request_notes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+      ]);
+    } catch (Throwable $error) {
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to create transfer"]);
+    }
+
+    $row = phase1_db_fetch_one(
+      $pdo,
+      "SELECT t.id, t.shop_id, sh.code AS shop_code, sh.name AS shop_name, " .
+        "t.sender_user_id, su.full_name AS sender_full_name, " .
+        "t.receiver_user_id, ru.full_name AS receiver_full_name, " .
+        "t.amount_ugx, t.status, t.request_notes, t.decision_notes, t.decided_at, t.decided_by_user_id, du.full_name AS decided_by_full_name, " .
+        "t.created_at, t.updated_at " .
+      "FROM cash_transfers t " .
+      "JOIN shops sh ON sh.id = t.shop_id " .
+      "JOIN users su ON su.id = t.sender_user_id " .
+      "JOIN users ru ON ru.id = t.receiver_user_id " .
+      "LEFT JOIN users du ON du.id = t.decided_by_user_id " .
+      "WHERE t.id = :id LIMIT 1",
+      [":id" => $transferId]
+    );
+
+    $public = $row ? [
+      "id" => (string)$row["id"],
+      "shopId" => (string)$row["shop_id"],
+      "shopCode" => (string)$row["shop_code"],
+      "shopName" => (string)$row["shop_name"],
+      "senderUserId" => (string)$row["sender_user_id"],
+      "senderFullName" => (string)$row["sender_full_name"],
+      "receiverUserId" => (string)$row["receiver_user_id"],
+      "receiverFullName" => (string)$row["receiver_full_name"],
+      "amountUGX" => (int)$row["amount_ugx"],
+      "status" => (string)$row["status"],
+      "requestNotes" => $row["request_notes"] ?? null,
+      "decisionNotes" => $row["decision_notes"] ?? null,
+      "decidedAt" => $row["decided_at"] ?? null,
+      "decidedByUserId" => $row["decided_by_user_id"] ?? null,
+      "decidedByFullName" => $row["decided_by_full_name"] ?? null,
+      "createdAt" => (string)$row["created_at"],
+      "updatedAt" => (string)$row["updated_at"],
+    ] : [
+      "id" => $transferId,
+      "shopId" => $shopId,
+      "senderUserId" => $actorUserId,
+      "receiverUserId" => $receiverUserId,
+      "amountUGX" => $amount,
+      "status" => "PENDING",
+      "requestNotes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+    ];
+
+    phase1_audit_log($pdo, $actorUserId !== "" ? $actorUserId : null, "CREATE", "cash_transfer", $transferId, null, $public);
+    json_response(201, ["data" => $public]);
+  }
+
+  if ($method === "PATCH" && preg_match('/^cash\\/transfers\\/([^\\/]+)\\/decision$/', $route, $matches) === 1) {
+    phase1_require_role($roleName, ["ADMIN", "MANAGER", "SALES"]);
+    $transferId = (string)$matches[1];
+    $body = read_json_body();
+
+    $decision = isset($body["decision"]) && is_string($body["decision"]) ? strtoupper(trim($body["decision"])) : "";
+    $notes = array_key_exists("notes", $body) ? $body["notes"] : null;
+
+    if ($decision !== "APPROVE" && $decision !== "REJECT") {
+      json_response(400, ["error" => "ValidationError", "message" => "decision must be APPROVE or REJECT"]);
+    }
+    if ($notes !== null && !is_string($notes)) {
+      json_response(400, ["error" => "ValidationError", "message" => "notes must be a string or null"]);
+    }
+
+    $actorUserId = (string)($authUser["id"] ?? "");
+
+    try {
+      $pdo->beginTransaction();
+
+      $existing = phase1_db_fetch_one(
+        $pdo,
+        "SELECT id, shop_id, sender_user_id, receiver_user_id, amount_ugx, status, request_notes, decision_notes, decided_at, decided_by_user_id, created_at, updated_at " .
+        "FROM cash_transfers WHERE id = :id FOR UPDATE",
+        [":id" => $transferId]
+      );
+      if (!$existing) {
+        $pdo->rollBack();
+        json_response(404, ["error" => "HttpError", "message" => "Transfer not found"]);
+      }
+
+      $receiverUserId = (string)($existing["receiver_user_id"] ?? "");
+      if ($roleName !== "ADMIN" && $receiverUserId !== $actorUserId) {
+        $pdo->rollBack();
+        json_response(403, ["error" => "HttpError", "message" => "Only the receiver can approve or reject this transfer"]);
+      }
+
+      $status = (string)($existing["status"] ?? "");
+      if ($status !== "PENDING") {
+        $pdo->rollBack();
+        json_response(400, ["error" => "BadRequest", "message" => "Only pending transfers can be decided"]);
+      }
+
+      $senderUserId = (string)($existing["sender_user_id"] ?? "");
+      $amount = (int)($existing["amount_ugx"] ?? 0);
+
+      $newStatus = $decision === "APPROVE" ? "APPROVED" : "REJECTED";
+
+      if ($newStatus === "APPROVED" && $roleName !== "ADMIN") {
+        $available = max(0, phase1_cash_at_hand($pdo, $senderUserId));
+        if ($available < $amount) {
+          $pdo->rollBack();
+          json_response(400, [
+            "error" => "BadRequest",
+            "message" => "Sender has insufficient cash at hand to approve. Available: " . $available . ", required: " . $amount,
+          ]);
+        }
+      }
+
+      phase1_db_execute(
+        $pdo,
+        "UPDATE cash_transfers SET status = :status, decision_notes = :decision_notes, decided_at = NOW(), decided_by_user_id = :decided_by_user_id, updated_at = NOW() WHERE id = :id",
+        [
+          ":status" => $newStatus,
+          ":decision_notes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+          ":decided_by_user_id" => $actorUserId !== "" ? $actorUserId : null,
+          ":id" => $transferId,
+        ]
+      );
+
+      $row = phase1_db_fetch_one(
+        $pdo,
+        "SELECT t.id, t.shop_id, sh.code AS shop_code, sh.name AS shop_name, " .
+          "t.sender_user_id, su.full_name AS sender_full_name, " .
+          "t.receiver_user_id, ru.full_name AS receiver_full_name, " .
+          "t.amount_ugx, t.status, t.request_notes, t.decision_notes, t.decided_at, t.decided_by_user_id, du.full_name AS decided_by_full_name, " .
+          "t.created_at, t.updated_at " .
+        "FROM cash_transfers t " .
+        "JOIN shops sh ON sh.id = t.shop_id " .
+        "JOIN users su ON su.id = t.sender_user_id " .
+        "JOIN users ru ON ru.id = t.receiver_user_id " .
+        "LEFT JOIN users du ON du.id = t.decided_by_user_id " .
+        "WHERE t.id = :id LIMIT 1",
+        [":id" => $transferId]
+      );
+
+      $pdo->commit();
+
+      $beforePublic = [
+        "id" => (string)$existing["id"],
+        "shopId" => (string)$existing["shop_id"],
+        "senderUserId" => (string)$existing["sender_user_id"],
+        "receiverUserId" => (string)$existing["receiver_user_id"],
+        "amountUGX" => (int)$existing["amount_ugx"],
+        "status" => (string)$existing["status"],
+        "requestNotes" => $existing["request_notes"] ?? null,
+        "decisionNotes" => $existing["decision_notes"] ?? null,
+        "decidedAt" => $existing["decided_at"] ?? null,
+        "decidedByUserId" => $existing["decided_by_user_id"] ?? null,
+        "createdAt" => (string)$existing["created_at"],
+        "updatedAt" => (string)$existing["updated_at"],
+      ];
+
+      $afterPublic = $row ? [
+        "id" => (string)$row["id"],
+        "shopId" => (string)$row["shop_id"],
+        "shopCode" => (string)$row["shop_code"],
+        "shopName" => (string)$row["shop_name"],
+        "senderUserId" => (string)$row["sender_user_id"],
+        "senderFullName" => (string)$row["sender_full_name"],
+        "receiverUserId" => (string)$row["receiver_user_id"],
+        "receiverFullName" => (string)$row["receiver_full_name"],
+        "amountUGX" => (int)$row["amount_ugx"],
+        "status" => (string)$row["status"],
+        "requestNotes" => $row["request_notes"] ?? null,
+        "decisionNotes" => $row["decision_notes"] ?? null,
+        "decidedAt" => $row["decided_at"] ?? null,
+        "decidedByUserId" => $row["decided_by_user_id"] ?? null,
+        "decidedByFullName" => $row["decided_by_full_name"] ?? null,
+        "createdAt" => (string)$row["created_at"],
+        "updatedAt" => (string)$row["updated_at"],
+      ] : array_merge($beforePublic, [
+        "status" => $newStatus,
+        "decisionNotes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+        "decidedAt" => now_iso(),
+        "decidedByUserId" => $actorUserId,
+      ]);
+
+      phase1_audit_log($pdo, $actorUserId !== "" ? $actorUserId : null, "UPDATE", "cash_transfer", $transferId, $beforePublic, $afterPublic);
+      json_response(200, ["data" => $afterPublic]);
+    } catch (Throwable $error) {
+      if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+      }
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to decide transfer"]);
+    }
+  }
+
+  if ($method === "GET" && $route === "cash/bankings") {
+    phase1_require_role($roleName, ["ADMIN", "MANAGER", "SALES"]);
+
+    $status = isset($_GET["status"]) && is_string($_GET["status"]) ? strtoupper(trim($_GET["status"])) : "";
+    $shopId = isset($_GET["shopId"]) && is_string($_GET["shopId"]) ? trim($_GET["shopId"]) : "";
+
+    if ($status !== "" && !in_array($status, ["PENDING", "APPROVED", "REJECTED"], true)) {
+      json_response(400, ["error" => "ValidationError", "message" => "status must be PENDING, APPROVED, or REJECTED"]);
+    }
+
+    $where = [];
+    $params = [];
+
+    if ($roleName === "SALES") {
+      $viewerUserId = (string)($authUser["id"] ?? "");
+      $where[] = "b.user_id = :viewer_user_id";
+      $params[":viewer_user_id"] = $viewerUserId;
+    } elseif ($roleName === "MANAGER") {
+      $shopIds = phase1_assigned_shop_ids($assignments);
+      if (count($shopIds) < 1) {
+        json_response(200, ["data" => []]);
+      }
+      $placeholders = [];
+      foreach ($shopIds as $idx => $id) {
+        $key = ":shop_" . (string)$idx;
+        $placeholders[] = $key;
+        $params[$key] = $id;
+      }
+      $where[] = "b.shop_id IN (" . implode(", ", $placeholders) . ")";
+    } else {
+      if ($shopId !== "") {
+        $where[] = "b.shop_id = :shop_id";
+        $params[":shop_id"] = $shopId;
+      }
+    }
+
+    if ($status !== "") {
+      $where[] = "b.status = :status";
+      $params[":status"] = $status;
+    }
+
+    if (count($where) < 1) {
+      $where[] = "1=1";
+    }
+
+    $rows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT b.id, b.shop_id, sh.code AS shop_code, sh.name AS shop_name, " .
+        "b.user_id, u.full_name AS user_full_name, " .
+        "b.amount_ugx, b.status, b.request_notes, b.decision_notes, b.decided_at, b.decided_by_user_id, du.full_name AS decided_by_full_name, " .
+        "b.created_at, b.updated_at " .
+      "FROM banking_requests b " .
+      "JOIN shops sh ON sh.id = b.shop_id " .
+      "JOIN users u ON u.id = b.user_id " .
+      "LEFT JOIN users du ON du.id = b.decided_by_user_id " .
+      "WHERE " . implode(" AND ", $where) . " " .
+      "ORDER BY b.created_at DESC " .
+      "LIMIT 200",
+      $params
+    );
+
+    $out = array_map(function ($row) {
+      return [
+        "id" => (string)($row["id"] ?? ""),
+        "shopId" => (string)($row["shop_id"] ?? ""),
+        "shopCode" => (string)($row["shop_code"] ?? ""),
+        "shopName" => (string)($row["shop_name"] ?? ""),
+        "userId" => (string)($row["user_id"] ?? ""),
+        "userFullName" => (string)($row["user_full_name"] ?? ""),
+        "amountUGX" => (int)($row["amount_ugx"] ?? 0),
+        "status" => (string)($row["status"] ?? ""),
+        "requestNotes" => $row["request_notes"] ?? null,
+        "decisionNotes" => $row["decision_notes"] ?? null,
+        "decidedAt" => $row["decided_at"] ?? null,
+        "decidedByUserId" => $row["decided_by_user_id"] ?? null,
+        "decidedByFullName" => $row["decided_by_full_name"] ?? null,
+        "createdAt" => (string)($row["created_at"] ?? ""),
+        "updatedAt" => (string)($row["updated_at"] ?? ""),
+      ];
+    }, $rows);
+
+    json_response(200, ["data" => $out]);
+  }
+
+  if ($method === "POST" && $route === "cash/bankings") {
+    phase1_require_role($roleName, ["SALES"]);
+    $body = read_json_body();
+
+    $amount = isset($body["amountUGX"]) ? (int)$body["amountUGX"] : 0;
+    $notes = array_key_exists("notes", $body) ? $body["notes"] : null;
+
+    if ($amount <= 0) {
+      json_response(400, ["error" => "ValidationError", "message" => "amountUGX (>0) is required"]);
+    }
+    if ($notes !== null && !is_string($notes)) {
+      json_response(400, ["error" => "ValidationError", "message" => "notes must be a string or null"]);
+    }
+
+    $actorUserId = (string)($authUser["id"] ?? "");
+    $shopId = phase1_primary_shop_id($assignments);
+    if ($shopId === "") {
+      json_response(400, ["error" => "ValidationError", "message" => "Sales user is not assigned to a shop"]);
+    }
+
+    $available = max(0, phase1_cash_at_hand($pdo, $actorUserId));
+    if ($available < $amount) {
+      json_response(400, [
+        "error" => "BadRequest",
+        "message" => "Insufficient cash at hand. Available: " . $available . ", required: " . $amount,
+      ]);
+    }
+
+    $bankingId = create_id("bank");
+
+    try {
+      $stmt = $pdo->prepare(
+        "INSERT INTO banking_requests (id, shop_id, user_id, amount_ugx, status, request_notes) " .
+        "VALUES (:id, :shop_id, :user_id, :amount_ugx, 'PENDING', :request_notes)"
+      );
+      $stmt->execute([
+        ":id" => $bankingId,
+        ":shop_id" => $shopId,
+        ":user_id" => $actorUserId,
+        ":amount_ugx" => $amount,
+        ":request_notes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+      ]);
+    } catch (Throwable $error) {
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to create banking request"]);
+    }
+
+    $row = phase1_db_fetch_one(
+      $pdo,
+      "SELECT b.id, b.shop_id, sh.code AS shop_code, sh.name AS shop_name, " .
+        "b.user_id, u.full_name AS user_full_name, " .
+        "b.amount_ugx, b.status, b.request_notes, b.decision_notes, b.decided_at, b.decided_by_user_id, du.full_name AS decided_by_full_name, " .
+        "b.created_at, b.updated_at " .
+      "FROM banking_requests b " .
+      "JOIN shops sh ON sh.id = b.shop_id " .
+      "JOIN users u ON u.id = b.user_id " .
+      "LEFT JOIN users du ON du.id = b.decided_by_user_id " .
+      "WHERE b.id = :id LIMIT 1",
+      [":id" => $bankingId]
+    );
+
+    $public = $row ? [
+      "id" => (string)$row["id"],
+      "shopId" => (string)$row["shop_id"],
+      "shopCode" => (string)$row["shop_code"],
+      "shopName" => (string)$row["shop_name"],
+      "userId" => (string)$row["user_id"],
+      "userFullName" => (string)$row["user_full_name"],
+      "amountUGX" => (int)$row["amount_ugx"],
+      "status" => (string)$row["status"],
+      "requestNotes" => $row["request_notes"] ?? null,
+      "decisionNotes" => $row["decision_notes"] ?? null,
+      "decidedAt" => $row["decided_at"] ?? null,
+      "decidedByUserId" => $row["decided_by_user_id"] ?? null,
+      "decidedByFullName" => $row["decided_by_full_name"] ?? null,
+      "createdAt" => (string)$row["created_at"],
+      "updatedAt" => (string)$row["updated_at"],
+    ] : [
+      "id" => $bankingId,
+      "shopId" => $shopId,
+      "userId" => $actorUserId,
+      "amountUGX" => $amount,
+      "status" => "PENDING",
+      "requestNotes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+    ];
+
+    phase1_audit_log($pdo, $actorUserId !== "" ? $actorUserId : null, "CREATE", "banking_request", $bankingId, null, $public);
+    json_response(201, ["data" => $public]);
+  }
+
+  if ($method === "PATCH" && preg_match('/^cash\\/bankings\\/([^\\/]+)\\/decision$/', $route, $matches) === 1) {
+    phase1_require_role($roleName, ["ADMIN"]);
+    $bankingId = (string)$matches[1];
+    $body = read_json_body();
+
+    $decision = isset($body["decision"]) && is_string($body["decision"]) ? strtoupper(trim($body["decision"])) : "";
+    $notes = array_key_exists("notes", $body) ? $body["notes"] : null;
+
+    if ($decision !== "APPROVE" && $decision !== "REJECT") {
+      json_response(400, ["error" => "ValidationError", "message" => "decision must be APPROVE or REJECT"]);
+    }
+    if ($notes !== null && !is_string($notes)) {
+      json_response(400, ["error" => "ValidationError", "message" => "notes must be a string or null"]);
+    }
+
+    $actorUserId = (string)($authUser["id"] ?? "");
+
+    try {
+      $pdo->beginTransaction();
+
+      $existing = phase1_db_fetch_one(
+        $pdo,
+        "SELECT id, shop_id, user_id, amount_ugx, status, request_notes, decision_notes, decided_at, decided_by_user_id, created_at, updated_at " .
+        "FROM banking_requests WHERE id = :id FOR UPDATE",
+        [":id" => $bankingId]
+      );
+      if (!$existing) {
+        $pdo->rollBack();
+        json_response(404, ["error" => "HttpError", "message" => "Banking request not found"]);
+      }
+
+      $status = (string)($existing["status"] ?? "");
+      if ($status !== "PENDING") {
+        $pdo->rollBack();
+        json_response(400, ["error" => "BadRequest", "message" => "Only pending banking requests can be decided"]);
+      }
+
+      $newStatus = $decision === "APPROVE" ? "APPROVED" : "REJECTED";
+
+      phase1_db_execute(
+        $pdo,
+        "UPDATE banking_requests SET status = :status, decision_notes = :decision_notes, decided_at = NOW(), decided_by_user_id = :decided_by_user_id, updated_at = NOW() WHERE id = :id",
+        [
+          ":status" => $newStatus,
+          ":decision_notes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+          ":decided_by_user_id" => $actorUserId !== "" ? $actorUserId : null,
+          ":id" => $bankingId,
+        ]
+      );
+
+      $targetUserId = (string)($existing["user_id"] ?? "");
+      $amount = (int)($existing["amount_ugx"] ?? 0);
+      $shopId = (string)($existing["shop_id"] ?? "");
+
+      // Create an in-app notification for the requester.
+      $title = $newStatus === "APPROVED" ? "Banking approved" : "Banking rejected";
+      $message = "Your banking request of UGX " . $amount . " was " . strtolower($newStatus) . ".";
+      $meta = json_encode(["bankingRequestId" => $bankingId, "status" => $newStatus, "amountUGX" => $amount, "shopId" => $shopId], JSON_UNESCAPED_SLASHES);
+
+      $stmtNotif = $pdo->prepare(
+        "INSERT INTO notifications (id, user_id, type, title, message, meta_json, is_read) " .
+        "VALUES (:id, :user_id, :type, :title, :message, :meta_json, 0)"
+      );
+      $stmtNotif->execute([
+        ":id" => create_id("notif"),
+        ":user_id" => $targetUserId,
+        ":type" => "BANKING_DECISION",
+        ":title" => $title,
+        ":message" => $message,
+        ":meta_json" => is_string($meta) ? $meta : null,
+      ]);
+
+      $row = phase1_db_fetch_one(
+        $pdo,
+        "SELECT b.id, b.shop_id, sh.code AS shop_code, sh.name AS shop_name, " .
+          "b.user_id, u.full_name AS user_full_name, " .
+          "b.amount_ugx, b.status, b.request_notes, b.decision_notes, b.decided_at, b.decided_by_user_id, du.full_name AS decided_by_full_name, " .
+          "b.created_at, b.updated_at " .
+        "FROM banking_requests b " .
+        "JOIN shops sh ON sh.id = b.shop_id " .
+        "JOIN users u ON u.id = b.user_id " .
+        "LEFT JOIN users du ON du.id = b.decided_by_user_id " .
+        "WHERE b.id = :id LIMIT 1",
+        [":id" => $bankingId]
+      );
+
+      $pdo->commit();
+
+      $beforePublic = [
+        "id" => (string)$existing["id"],
+        "shopId" => (string)$existing["shop_id"],
+        "userId" => (string)$existing["user_id"],
+        "amountUGX" => (int)$existing["amount_ugx"],
+        "status" => (string)$existing["status"],
+        "requestNotes" => $existing["request_notes"] ?? null,
+        "decisionNotes" => $existing["decision_notes"] ?? null,
+        "decidedAt" => $existing["decided_at"] ?? null,
+        "decidedByUserId" => $existing["decided_by_user_id"] ?? null,
+        "createdAt" => (string)$existing["created_at"],
+        "updatedAt" => (string)$existing["updated_at"],
+      ];
+
+      $afterPublic = $row ? [
+        "id" => (string)$row["id"],
+        "shopId" => (string)$row["shop_id"],
+        "shopCode" => (string)$row["shop_code"],
+        "shopName" => (string)$row["shop_name"],
+        "userId" => (string)$row["user_id"],
+        "userFullName" => (string)$row["user_full_name"],
+        "amountUGX" => (int)$row["amount_ugx"],
+        "status" => (string)$row["status"],
+        "requestNotes" => $row["request_notes"] ?? null,
+        "decisionNotes" => $row["decision_notes"] ?? null,
+        "decidedAt" => $row["decided_at"] ?? null,
+        "decidedByUserId" => $row["decided_by_user_id"] ?? null,
+        "decidedByFullName" => $row["decided_by_full_name"] ?? null,
+        "createdAt" => (string)$row["created_at"],
+        "updatedAt" => (string)$row["updated_at"],
+      ] : array_merge($beforePublic, [
+        "status" => $newStatus,
+        "decisionNotes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+        "decidedAt" => now_iso(),
+        "decidedByUserId" => $actorUserId,
+      ]);
+
+      phase1_audit_log($pdo, $actorUserId !== "" ? $actorUserId : null, "UPDATE", "banking_request", $bankingId, $beforePublic, $afterPublic);
+      json_response(200, ["data" => $afterPublic]);
+    } catch (Throwable $error) {
+      if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+      }
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to decide banking request"]);
+    }
+  }
+
+  if ($method === "GET" && $route === "cash/admin/overview") {
+    phase1_require_role($roleName, ["ADMIN"]);
+
+    $shopId = isset($_GET["shopId"]) && is_string($_GET["shopId"]) ? trim($_GET["shopId"]) : "";
+    $dateFrom = isset($_GET["dateFrom"]) && is_string($_GET["dateFrom"]) ? trim($_GET["dateFrom"]) : "";
+    $dateTo = isset($_GET["dateTo"]) && is_string($_GET["dateTo"]) ? trim($_GET["dateTo"]) : "";
+
+    if ($dateFrom !== "" && !is_valid_ymd_date($dateFrom)) {
+      json_response(400, ["error" => "ValidationError", "message" => "dateFrom must be YYYY-MM-DD"]);
+    }
+    if ($dateTo !== "" && !is_valid_ymd_date($dateTo)) {
+      json_response(400, ["error" => "ValidationError", "message" => "dateTo must be YYYY-MM-DD"]);
+    }
+
+    $params = [];
+    $where = ["u.is_active = 1", "r.name = 'SALES'"];
+    if ($shopId !== "") {
+      $where[] = "EXISTS (" .
+        "SELECT 1 FROM user_shop_assignment a WHERE a.user_id = u.id AND a.unassigned_at IS NULL AND a.shop_id = :shop_id" .
+      ")";
+      $params[":shop_id"] = $shopId;
+    }
+
+    $usersRows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT u.id, u.full_name " .
+        "FROM users u JOIN roles r ON r.id = u.role_id " .
+        "WHERE " . implode(" AND ", $where) . " " .
+        "ORDER BY u.full_name ASC",
+      $params
+    );
+
+    $items = [];
+    $totalCashAtHand = 0;
+    $totalBanked = 0;
+
+    foreach ($usersRows as $row) {
+      if (!is_array($row)) {
+        continue;
+      }
+      $userId = (string)($row["id"] ?? "");
+      if ($userId === "") {
+        continue;
+      }
+
+      $assign = phase1_load_assignments($pdo, $userId);
+      $primaryShopId = phase1_primary_shop_id($assign);
+      $shopMeta = ["shopId" => $primaryShopId, "shopCode" => null, "shopName" => null];
+      foreach ($assign as $a) {
+        if (!is_array($a)) {
+          continue;
+        }
+        if ((string)($a["shop_id"] ?? "") === $primaryShopId) {
+          $shopMeta["shopCode"] = (string)($a["shop_code"] ?? "");
+          $shopMeta["shopName"] = (string)($a["shop_name"] ?? "");
+          break;
+        }
+      }
+
+      $summary = phase1_cash_summary($pdo, $userId);
+      $cashAtHand = (int)($summary["cashAtHand"] ?? 0);
+
+      $bankWhere = ["user_id = :user_id", "status = 'APPROVED'", "decided_at IS NOT NULL"];
+      $bankParams = [":user_id" => $userId];
+      if ($shopId !== "") {
+        $bankWhere[] = "shop_id = :shop_id";
+        $bankParams[":shop_id"] = $shopId;
+      }
+      if ($dateFrom !== "") {
+        $bankWhere[] = "DATE(decided_at) >= :date_from";
+        $bankParams[":date_from"] = $dateFrom;
+      }
+      if ($dateTo !== "") {
+        $bankWhere[] = "DATE(decided_at) <= :date_to";
+        $bankParams[":date_to"] = $dateTo;
+      }
+
+      $bankedRow = phase1_db_fetch_one(
+        $pdo,
+        "SELECT COALESCE(SUM(amount_ugx), 0) AS total FROM banking_requests WHERE " . implode(" AND ", $bankWhere),
+        $bankParams
+      );
+      $banked = $bankedRow ? (int)($bankedRow["total"] ?? 0) : 0;
+
+      $items[] = [
+        "userId" => $userId,
+        "fullName" => (string)($row["full_name"] ?? ""),
+        "shopId" => $shopMeta["shopId"],
+        "shopCode" => $shopMeta["shopCode"],
+        "shopName" => $shopMeta["shopName"],
+        "cashAtHand" => $cashAtHand,
+        "bankedTotal" => $banked,
+      ];
+
+      $totalCashAtHand += $cashAtHand;
+      $totalBanked += $banked;
+    }
+
+    json_response(200, ["data" => ["items" => $items, "totals" => ["cashAtHand" => $totalCashAtHand, "bankedTotal" => $totalBanked]]]);
+  }
+
+  if ($method === "GET" && $route === "notifications/me") {
+    $userId = (string)($authUser["id"] ?? "");
+
+    $rows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT id, type, title, message, meta_json, is_read, created_at, updated_at " .
+      "FROM notifications WHERE user_id = :user_id ORDER BY created_at DESC LIMIT 100",
+      [":user_id" => $userId]
+    );
+
+    $out = array_map(function ($row) {
+      $metaRaw = $row["meta_json"] ?? null;
+      $meta = null;
+      if (is_string($metaRaw) && $metaRaw !== "") {
+        $decoded = json_decode($metaRaw, true);
+        if (is_array($decoded)) {
+          $meta = $decoded;
+        }
+      } elseif (is_array($metaRaw)) {
+        $meta = $metaRaw;
+      }
+
+      return [
+        "id" => (string)($row["id"] ?? ""),
+        "type" => (string)($row["type"] ?? ""),
+        "title" => (string)($row["title"] ?? ""),
+        "message" => (string)($row["message"] ?? ""),
+        "meta" => $meta,
+        "isRead" => (int)($row["is_read"] ?? 0) === 1,
+        "createdAt" => (string)($row["created_at"] ?? ""),
+        "updatedAt" => (string)($row["updated_at"] ?? ""),
+      ];
+    }, $rows);
+
+    json_response(200, ["data" => $out]);
+  }
+
+  if ($method === "PATCH" && preg_match('/^notifications\\/([^\\/]+)\\/read$/', $route, $matches) === 1) {
+    $notifId = (string)$matches[1];
+    $userId = (string)($authUser["id"] ?? "");
+
+    $existing = phase1_db_fetch_one(
+      $pdo,
+      "SELECT id, user_id, is_read FROM notifications WHERE id = :id LIMIT 1",
+      [":id" => $notifId]
+    );
+    if (!$existing || (string)($existing["user_id"] ?? "") !== $userId) {
+      json_response(404, ["error" => "HttpError", "message" => "Notification not found"]);
+    }
+
+    phase1_db_execute(
+      $pdo,
+      "UPDATE notifications SET is_read = 1, updated_at = NOW() WHERE id = :id",
+      [":id" => $notifId]
+    );
+
+    $row = phase1_db_fetch_one(
+      $pdo,
+      "SELECT id, type, title, message, meta_json, is_read, created_at, updated_at " .
+      "FROM notifications WHERE id = :id LIMIT 1",
+      [":id" => $notifId]
+    );
+
+    $metaRaw = $row ? ($row["meta_json"] ?? null) : null;
+    $meta = null;
+    if (is_string($metaRaw) && $metaRaw !== "") {
+      $decoded = json_decode($metaRaw, true);
+      if (is_array($decoded)) {
+        $meta = $decoded;
+      }
+    } elseif (is_array($metaRaw)) {
+      $meta = $metaRaw;
+    }
+
+    $public = $row ? [
+      "id" => (string)($row["id"] ?? ""),
+      "type" => (string)($row["type"] ?? ""),
+      "title" => (string)($row["title"] ?? ""),
+      "message" => (string)($row["message"] ?? ""),
+      "meta" => $meta,
+      "isRead" => (int)($row["is_read"] ?? 0) === 1,
+      "createdAt" => (string)($row["created_at"] ?? ""),
+      "updatedAt" => (string)($row["updated_at"] ?? ""),
+    ] : ["id" => $notifId, "isRead" => true];
+
+    json_response(200, ["data" => $public]);
   }
 
   json_response(404, ["error" => "NotFound", "message" => "Route not found"]);

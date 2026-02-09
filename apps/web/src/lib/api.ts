@@ -284,6 +284,95 @@ export interface SaleDetail {
   lines: SaleLine[];
 }
 
+export interface CashSummary {
+  userId: string;
+  computedAt: string;
+  cashAtHand: number;
+  cashSales: number;
+  cashInvoicePayments: number;
+  cashExpenses: number;
+  transfersSent: number;
+  transfersReceived: number;
+  banked: number;
+}
+
+export interface CashRecipient {
+  id: string;
+  fullName: string;
+  role: Role;
+}
+
+export type CashTransferStatus = "PENDING" | "APPROVED" | "REJECTED";
+
+export interface CashTransfer {
+  id: string;
+  shopId: string;
+  shopCode: string;
+  shopName: string;
+  senderUserId: string;
+  senderFullName: string;
+  receiverUserId: string;
+  receiverFullName: string;
+  amountUGX: number;
+  status: CashTransferStatus;
+  requestNotes?: string | null;
+  decisionNotes?: string | null;
+  decidedAt?: string | null;
+  decidedByUserId?: string | null;
+  decidedByFullName?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type BankingRequestStatus = "PENDING" | "APPROVED" | "REJECTED";
+
+export interface BankingRequest {
+  id: string;
+  shopId: string;
+  shopCode: string;
+  shopName: string;
+  userId: string;
+  userFullName: string;
+  amountUGX: number;
+  status: BankingRequestStatus;
+  requestNotes?: string | null;
+  decisionNotes?: string | null;
+  decidedAt?: string | null;
+  decidedByUserId?: string | null;
+  decidedByFullName?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AdminCashOverviewItem {
+  userId: string;
+  fullName: string;
+  shopId: string | null;
+  shopCode: string | null;
+  shopName: string | null;
+  cashAtHand: number;
+  bankedTotal: number;
+}
+
+export interface AdminCashOverview {
+  items: AdminCashOverviewItem[];
+  totals: {
+    cashAtHand: number;
+    bankedTotal: number;
+  };
+}
+
+export interface NotificationItem {
+  id: string;
+  type: string;
+  title: string;
+  message: string;
+  meta?: Record<string, unknown> | null;
+  isRead: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export function login(payload: { mobileNumber: string; password: string }): Promise<AuthResponse> {
   return request<AuthResponse>("api/auth/login", {
     method: "POST",
@@ -713,6 +802,143 @@ export function voidSale(token: string, saleId: string): Promise<{ sale: Sale }>
     `api/sales/${saleId}`,
     {
       method: "DELETE"
+    },
+    token
+  );
+}
+
+export function getCashMe(token: string): Promise<CashSummary> {
+  return request<CashSummary>("api/cash/me", undefined, token);
+}
+
+export function listCashRecipients(token: string, params?: { shopId?: string }): Promise<CashRecipient[]> {
+  return request<CashRecipient[]>(
+    withQuery("api/cash/recipients", {
+      shopId: params?.shopId
+    }),
+    undefined,
+    token
+  );
+}
+
+export function listCashTransfers(
+  token: string,
+  params?: {
+    status?: CashTransferStatus;
+    shopId?: string;
+  }
+): Promise<CashTransfer[]> {
+  return request<CashTransfer[]>(
+    withQuery("api/cash/transfers", {
+      status: params?.status,
+      shopId: params?.shopId
+    }),
+    undefined,
+    token
+  );
+}
+
+export function createCashTransfer(
+  token: string,
+  payload: { receiverUserId: string; amountUGX: number; notes?: string | null; shopId?: string }
+): Promise<CashTransfer> {
+  return request<CashTransfer>(
+    "api/cash/transfers",
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function decideCashTransfer(
+  token: string,
+  transferId: string,
+  payload: { decision: "APPROVE" | "REJECT"; notes?: string | null }
+): Promise<CashTransfer> {
+  return request<CashTransfer>(
+    `api/cash/transfers/${transferId}/decision`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function listBankingRequests(
+  token: string,
+  params?: {
+    status?: BankingRequestStatus;
+    shopId?: string;
+  }
+): Promise<BankingRequest[]> {
+  return request<BankingRequest[]>(
+    withQuery("api/cash/bankings", {
+      status: params?.status,
+      shopId: params?.shopId
+    }),
+    undefined,
+    token
+  );
+}
+
+export function createBankingRequest(token: string, payload: { amountUGX: number; notes?: string | null }): Promise<BankingRequest> {
+  return request<BankingRequest>(
+    "api/cash/bankings",
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function decideBankingRequest(
+  token: string,
+  bankingRequestId: string,
+  payload: { decision: "APPROVE" | "REJECT"; notes?: string | null }
+): Promise<BankingRequest> {
+  return request<BankingRequest>(
+    `api/cash/bankings/${bankingRequestId}/decision`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function getAdminCashOverview(
+  token: string,
+  params?: {
+    shopId?: string;
+    dateFrom?: string;
+    dateTo?: string;
+  }
+): Promise<AdminCashOverview> {
+  return request<AdminCashOverview>(
+    withQuery("api/cash/admin/overview", {
+      shopId: params?.shopId,
+      dateFrom: params?.dateFrom,
+      dateTo: params?.dateTo
+    }),
+    undefined,
+    token
+  );
+}
+
+export function listMyNotifications(token: string): Promise<NotificationItem[]> {
+  return request<NotificationItem[]>("api/notifications/me", undefined, token);
+}
+
+export function markNotificationRead(token: string, notifId: string): Promise<NotificationItem> {
+  return request<NotificationItem>(
+    `api/notifications/${notifId}/read`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({})
     },
     token
   );
