@@ -2863,7 +2863,7 @@ export default function App(): JSX.Element {
               <ul className="stack">
                 <li>MySQL foundation tables (users, shops, roles, audit logs, reconciliation locks)</li>
                 <li>JWT login and RBAC (admins, managers, sales)</li>
-                <li>Phase 2: Master data (expense categories, product categories, products)</li>
+                <li>Phase 2: Configurations (expense + product categories) and Production → Products</li>
                 <li>Phase 3: Customers, invoices, and installment payments</li>
                 <li>Phase 4: Sales (POS) + daily reconciliation locks</li>
                 <li>Phase 5: Expenses (payment source: salesperson cash vs admin/bank)</li>
