@@ -58,11 +58,7 @@ function json_response(int $status, $payload): void {
 
 function debug_enabled(): bool {
   $env = strtolower(trim((string)(getenv("BDK_DEBUG") ?: "")));
-  if (in_array($env, ["1", "true", "yes", "on"], true)) {
-    return true;
-  }
-  $q = isset($_GET["debug"]) && is_string($_GET["debug"]) ? strtolower(trim($_GET["debug"])) : "";
-  return in_array($q, ["1", "true", "yes", "on"], true);
+  return in_array($env, ["1", "true", "yes", "on"], true);
 }
 
 // Prevent blank HTTP 500s in production when an uncaught Throwable occurs.
