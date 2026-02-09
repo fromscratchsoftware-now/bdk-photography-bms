@@ -5,12 +5,17 @@ import {
   createCashTransfer,
   createExpenseCategory,
   createExpense,
+  createDamageEvent,
   createInvoice,
   createInvoicePayment,
+  createInventoryTransfer,
   createReconciliationLock,
   createSale,
+  createStockReceipt,
   createProduct,
   createProductCategory,
+  createWorkshopBatch,
+  createWorkshopSheetReceipt,
   decideBankingRequest,
   decideCashTransfer,
   exportCashReport,
@@ -28,12 +33,16 @@ import {
   getMe,
   getPlReport,
   getSalesReport,
+  getWorkshopSheetSummary,
   listBankingRequests,
   listCashRecipients,
   listCashTransfers,
   listCustomers,
+  listDamageEvents,
   listExpenses,
   listExpenseCategories,
+  listInventoryStock,
+  listInventoryTransfers,
   listInvoicePayments,
   listInvoices,
   listMyNotifications,
@@ -43,8 +52,13 @@ import {
   listProducts,
   listShops,
   listUsers,
+  listWorkshopBatches,
+  listWorkshopSheetReceipts,
+  listWorkshopStock,
   login,
   markNotificationRead,
+  receiveInventoryTransfer,
+  shipInventoryTransfer,
   updateSale,
   updateCustomer,
   updateInvoice,
@@ -69,6 +83,9 @@ import {
   type InvoicePayment,
   type InvoiceReport,
   type InvoiceReportStatus,
+  type InventoryStockRow,
+  type InventoryTransfer,
+  type InventoryTransferStatus,
   type NotificationItem,
   type PlReport,
   type Product,
@@ -78,9 +95,15 @@ import {
   type Sale,
   type SaleDetail,
   type SalePaymentMethod,
+  type ShopDamageEvent,
+  type StockReceipt,
   type SalesReport,
   type SalesReportPeriod,
-  type Shop
+  type Shop,
+  type WorkshopBatch,
+  type WorkshopSheetReceipt,
+  type WorkshopSheetSummary,
+  type WorkshopStockRow
 } from "./lib/api";
 
 type AuthState = {
@@ -88,9 +111,10 @@ type AuthState = {
   user: AuthUser;
 };
 
-type ActiveView = "overview" | "customers" | "invoices" | "sales" | "expenses" | "cash" | "reports" | "master-data";
+type ActiveView = "overview" | "customers" | "invoices" | "inventory" | "sales" | "expenses" | "cash" | "reports" | "master-data";
 type MasterSection = "expense-categories" | "product-categories" | "products";
 type ReportSection = "sales" | "invoices" | "cash" | "expenses" | "pl";
+type InventorySection = "stock" | "transfers" | "workshop";
 
 const AUTH_STORAGE_KEY = "bdk.auth.phase1.v1";
 
@@ -357,6 +381,99 @@ export default function App(): JSX.Element {
     dateTo: todayLocalYmd()
   });
 
+  const [inventorySection, setInventorySection] = useState<InventorySection>("stock");
+  const [inventoryBusy, setInventoryBusy] = useState(false);
+  const [inventoryFilters, setInventoryFilters] = useState<{ shopId: string; transferStatus: InventoryTransferStatus | "" }>({
+    shopId: "",
+    transferStatus: ""
+  });
+  const [inventoryDateRange, setInventoryDateRange] = useState<{ dateFrom: string; dateTo: string }>({
+    dateFrom: daysAgoLocalYmd(29),
+    dateTo: todayLocalYmd()
+  });
+
+  const [shopStockRows, setShopStockRows] = useState<InventoryStockRow[]>([]);
+  const [damageEvents, setDamageEvents] = useState<ShopDamageEvent[]>([]);
+  const [inventoryTransfers, setInventoryTransfers] = useState<InventoryTransfer[]>([]);
+  const [transferReceiveDrafts, setTransferReceiveDrafts] = useState<Record<string, Record<string, string>>>({});
+  const [transferReceiveNotesDrafts, setTransferReceiveNotesDrafts] = useState<Record<string, string>>({});
+
+  const [workshopSheetSummary, setWorkshopSheetSummary] = useState<WorkshopSheetSummary | null>(null);
+  const [workshopSheetReceipts, setWorkshopSheetReceipts] = useState<WorkshopSheetReceipt[]>([]);
+  const [workshopStockRows, setWorkshopStockRows] = useState<WorkshopStockRow[]>([]);
+  const [workshopBatches, setWorkshopBatches] = useState<WorkshopBatch[]>([]);
+
+  const [newStockReceiptForm, setNewStockReceiptForm] = useState<{
+    shopId: string;
+    productId: string;
+    receiptDate: string;
+    quantity: string;
+    notes: string;
+  }>({
+    shopId: "",
+    productId: "",
+    receiptDate: todayLocalYmd(),
+    quantity: "",
+    notes: ""
+  });
+
+  const [newDamageForm, setNewDamageForm] = useState<{
+    shopId: string;
+    productId: string;
+    damageDate: string;
+    quantity: string;
+    reason: string;
+    notes: string;
+  }>({
+    shopId: "",
+    productId: "",
+    damageDate: todayLocalYmd(),
+    quantity: "",
+    reason: "",
+    notes: ""
+  });
+
+  const [newSheetReceiptForm, setNewSheetReceiptForm] = useState<{
+    receiptDate: string;
+    quantitySheets: string;
+    supplier: string;
+    costPerSheet: string;
+    notes: string;
+  }>({
+    receiptDate: todayLocalYmd(),
+    quantitySheets: "",
+    supplier: "",
+    costPerSheet: "",
+    notes: ""
+  });
+
+  const [newWorkshopBatchForm, setNewWorkshopBatchForm] = useState<{
+    batchDate: string;
+    notes: string;
+    lines: Array<{
+      productId: string;
+      sheetsUsed: string;
+      actualGood: string;
+      actualDamaged: string;
+      actualWaste: string;
+      notes: string;
+    }>;
+  }>({
+    batchDate: todayLocalYmd(),
+    notes: "",
+    lines: [{ productId: "", sheetsUsed: "1", actualGood: "", actualDamaged: "0", actualWaste: "0", notes: "" }]
+  });
+
+  const [newInvTransferForm, setNewInvTransferForm] = useState<{
+    toShopId: string;
+    notes: string;
+    lines: Array<{ productId: string; quantity: string }>;
+  }>({
+    toShopId: "",
+    notes: "",
+    lines: [{ productId: "", quantity: "1" }]
+  });
+
   const [masterBusy, setMasterBusy] = useState(false);
   const [editingExpenseCategoryId, setEditingExpenseCategoryId] = useState<string | null>(null);
   const [editingExpenseCategoryForm, setEditingExpenseCategoryForm] = useState<{
@@ -434,6 +551,13 @@ export default function App(): JSX.Element {
   const canViewCash = authUser?.role === "ADMIN" || authUser?.role === "MANAGER" || authUser?.role === "SALES";
   const canApproveBanking = authUser?.role === "ADMIN";
   const canViewReports = authUser?.role === "ADMIN" || authUser?.role === "MANAGER";
+  const canViewInventory = authUser?.role === "ADMIN" || authUser?.role === "MANAGER" || authUser?.role === "SALES";
+  const canManageWorkshop = authUser?.role === "ADMIN";
+  const canManageInventoryTransfers = authUser?.role === "ADMIN";
+  const canReceiveInventoryTransfers = authUser?.role === "ADMIN" || authUser?.role === "SALES";
+  const canReceiveStock = authUser?.role === "ADMIN";
+  const canRecordDamages = authUser?.role === "ADMIN" || authUser?.role === "SALES";
+  const canViewWorkshop = authUser?.role === "ADMIN" || authUser?.role === "MANAGER";
 
   const shopCodesForUser = useMemo(() => {
     const map = new Map<string, string>();
@@ -476,6 +600,27 @@ export default function App(): JSX.Element {
     setCashReport(null);
     setExpenseReport(null);
     setPlReport(null);
+    setInventorySection("stock");
+    setInventoryFilters({ shopId: "", transferStatus: "" });
+    setInventoryDateRange({ dateFrom: daysAgoLocalYmd(29), dateTo: todayLocalYmd() });
+    setShopStockRows([]);
+    setDamageEvents([]);
+    setInventoryTransfers([]);
+    setTransferReceiveDrafts({});
+    setTransferReceiveNotesDrafts({});
+    setWorkshopSheetSummary(null);
+    setWorkshopSheetReceipts([]);
+    setWorkshopStockRows([]);
+    setWorkshopBatches([]);
+    setNewStockReceiptForm({ shopId: "", productId: "", receiptDate: todayLocalYmd(), quantity: "", notes: "" });
+    setNewDamageForm({ shopId: "", productId: "", damageDate: todayLocalYmd(), quantity: "", reason: "", notes: "" });
+    setNewSheetReceiptForm({ receiptDate: todayLocalYmd(), quantitySheets: "", supplier: "", costPerSheet: "", notes: "" });
+    setNewWorkshopBatchForm({
+      batchDate: todayLocalYmd(),
+      notes: "",
+      lines: [{ productId: "", sheetsUsed: "1", actualGood: "", actualDamaged: "0", actualWaste: "0", notes: "" }]
+    });
+    setNewInvTransferForm({ toShopId: "", notes: "", lines: [{ productId: "", quantity: "1" }] });
     setSuccess(null);
     setError(message ?? null);
   }
@@ -556,6 +701,10 @@ export default function App(): JSX.Element {
         setCashReportFilters((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
         setExpenseReportFilters((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
         setPlReportFilters((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
+        setInventoryFilters((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
+        setNewStockReceiptForm((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
+        setNewDamageForm((prev) => (prev.shopId || !shopData.length ? prev : { ...prev, shopId: shopData[0].id }));
+        setNewInvTransferForm((prev) => (prev.toShopId || !shopData.length ? prev : { ...prev, toShopId: shopData[0].id }));
       } catch (caught: unknown) {
         if (!cancelled) {
           setError(caught instanceof Error ? caught.message : "Failed to load data");
@@ -1400,6 +1549,166 @@ export default function App(): JSX.Element {
     plReportFilters.dateTo
   ]);
 
+  async function refreshInventoryStockData(): Promise<void> {
+    if (!auth || !canViewInventory) {
+      return;
+    }
+    setInventoryBusy(true);
+    setError(null);
+    try {
+      const [productData, stockData, damageData] = await Promise.all([
+        listProducts(auth.token),
+        listInventoryStock(auth.token, { shopId: inventoryFilters.shopId || undefined }),
+        listDamageEvents(auth.token, {
+          shopId: inventoryFilters.shopId || undefined,
+          dateFrom: inventoryDateRange.dateFrom || undefined,
+          dateTo: inventoryDateRange.dateTo || undefined
+        })
+      ]);
+      setProducts(productData);
+      setShopStockRows(stockData);
+      setDamageEvents(damageData.items);
+
+      const firstActiveProduct = productData.find((p) => p.isActive) ?? productData[0] ?? null;
+      const firstActiveNonBoard =
+        productData.find((p) => p.isActive && p.productType === "NON_BOARD") ??
+        productData.find((p) => p.productType === "NON_BOARD") ??
+        null;
+
+      if (firstActiveNonBoard) {
+        setNewStockReceiptForm((prev) => (prev.productId ? prev : { ...prev, productId: firstActiveNonBoard.id }));
+      } else if (firstActiveProduct) {
+        setNewStockReceiptForm((prev) => (prev.productId ? prev : { ...prev, productId: firstActiveProduct.id }));
+      }
+
+      if (firstActiveProduct) {
+        setNewDamageForm((prev) => (prev.productId ? prev : { ...prev, productId: firstActiveProduct.id }));
+      }
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to load inventory");
+    } finally {
+      setInventoryBusy(false);
+    }
+  }
+
+  async function refreshInventoryTransfersData(): Promise<void> {
+    if (!auth || !canViewInventory) {
+      return;
+    }
+    setInventoryBusy(true);
+    setError(null);
+    try {
+      const [productData, transfersData] = await Promise.all([
+        listProducts(auth.token),
+        listInventoryTransfers(auth.token, {
+          shopId: inventoryFilters.shopId || undefined,
+          status: inventoryFilters.transferStatus || undefined
+        })
+      ]);
+      setProducts(productData);
+      setInventoryTransfers(transfersData);
+
+      const firstBoard =
+        productData.find((p) => p.isActive && p.productType === "BOARD") ?? productData.find((p) => p.productType === "BOARD") ?? null;
+      if (firstBoard) {
+        setNewInvTransferForm((prev) => {
+          const lines = prev.lines.length ? prev.lines : [{ productId: "", quantity: "1" }];
+          if (lines[0].productId) {
+            return prev;
+          }
+          const nextLines = [...lines];
+          nextLines[0] = { ...nextLines[0], productId: firstBoard.id };
+          return { ...prev, lines: nextLines };
+        });
+      }
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to load transfers");
+    } finally {
+      setInventoryBusy(false);
+    }
+  }
+
+  async function refreshWorkshopData(): Promise<void> {
+    if (!auth || !canViewWorkshop) {
+      return;
+    }
+    setInventoryBusy(true);
+    setError(null);
+    try {
+      const [productData, summary, receiptsData, batchesData, stockData] = await Promise.all([
+        listProducts(auth.token),
+        getWorkshopSheetSummary(auth.token),
+        listWorkshopSheetReceipts(auth.token, { dateFrom: inventoryDateRange.dateFrom, dateTo: inventoryDateRange.dateTo }),
+        listWorkshopBatches(auth.token, { dateFrom: inventoryDateRange.dateFrom, dateTo: inventoryDateRange.dateTo }),
+        listWorkshopStock(auth.token)
+      ]);
+
+      setProducts(productData);
+      setWorkshopSheetSummary(summary);
+      setWorkshopSheetReceipts(receiptsData.items);
+      setWorkshopBatches(batchesData.items);
+      setWorkshopStockRows(stockData);
+
+      const firstBoard = productData.find((p) => p.isActive && p.productType === "BOARD") ?? null;
+      if (firstBoard) {
+        setNewWorkshopBatchForm((prev) => {
+          const lines = prev.lines.length ? prev.lines : [{ productId: "", sheetsUsed: "1", actualGood: "", actualDamaged: "0", actualWaste: "0", notes: "" }];
+          if (lines[0].productId) {
+            return prev;
+          }
+          const nextLines = [...lines];
+          nextLines[0] = { ...nextLines[0], productId: firstBoard.id };
+          return { ...prev, lines: nextLines };
+        });
+        setNewInvTransferForm((prev) => {
+          const lines = prev.lines.length ? prev.lines : [{ productId: "", quantity: "1" }];
+          if (lines[0].productId) {
+            return prev;
+          }
+          const nextLines = [...lines];
+          nextLines[0] = { ...nextLines[0], productId: firstBoard.id };
+          return { ...prev, lines: nextLines };
+        });
+      }
+    } catch (caught: unknown) {
+      setError(caught instanceof Error ? caught.message : "Failed to load workshop data");
+    } finally {
+      setInventoryBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!auth || !canViewInventory) {
+      return;
+    }
+    if (activeView !== "inventory") {
+      return;
+    }
+    if (inventorySection === "stock") {
+      void refreshInventoryStockData();
+      return;
+    }
+    if (inventorySection === "transfers") {
+      void refreshInventoryTransfersData();
+      return;
+    }
+    if (inventorySection === "workshop") {
+      void refreshWorkshopData();
+      return;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    activeView,
+    auth?.token,
+    canViewInventory,
+    canViewWorkshop,
+    inventorySection,
+    inventoryFilters.shopId,
+    inventoryFilters.transferStatus,
+    inventoryDateRange.dateFrom,
+    inventoryDateRange.dateTo
+  ]);
+
   async function submitLogin(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     setError(null);
@@ -1602,7 +1911,7 @@ export default function App(): JSX.Element {
         <p className="eyebrow">BDK Photography</p>
         <h1>Business Management System</h1>
         <p className="subtitle">
-          Phases 1-7: authentication (JWT), master data, customers, invoices/payments, sales POS, reconciliation locks, expenses, cash tracking, and reports/exports.
+          Phases 1-8: authentication (JWT), master data, customers, invoices/payments, sales POS, reconciliation locks, expenses, cash tracking, reports/exports, plus workshop and inventory transfers.
         </p>
 
         <div className="divider" style={{ background: "rgba(255,255,255,0.22)" }} />
@@ -1652,6 +1961,15 @@ export default function App(): JSX.Element {
           >
             Invoices
           </button>
+          {canViewInventory ? (
+            <button
+              className={`tab ${activeView === "inventory" ? "isActive" : ""}`}
+              type="button"
+              onClick={() => setActiveView("inventory")}
+            >
+              Inventory
+            </button>
+          ) : null}
           {canViewSales ? (
             <button
               className={`tab ${activeView === "sales" ? "isActive" : ""}`}
@@ -1843,12 +2161,11 @@ export default function App(): JSX.Element {
             <section className="card">
               <h2>Next Modules</h2>
               <ul className="stack">
-                <li>Workshop (full sheets, cutting, yield, waste)</li>
-                <li>Inventory and transfers (workshop → shops)</li>
-                <li>Cash tracking with approvals, banking</li>
                 <li>Messaging (SMS / WhatsApp / Email)</li>
-                <li>Capital dashboard + exports</li>
-                <li>Reports (sales, inventory, cash movement, credit aging)</li>
+                <li>Admin daily summary notifications</li>
+                <li>Workshop yield + waste reporting</li>
+                <li>Inventory movement reports + exports</li>
+                <li>Audit log viewer UI</li>
               </ul>
             </section>
           </>
@@ -2691,6 +3008,1295 @@ export default function App(): JSX.Element {
                 ) : null}
               </section>
             ) : null}
+          </>
+        ) : activeView === "inventory" ? (
+          <>
+            <section className="card" style={{ gridColumn: "1 / -1" }}>
+              <h2>Inventory</h2>
+              <p className="hint">Shop stock, workshop output, and transfers (Draft → Shipped → Received).</p>
+
+              <div className="tabs" style={{ marginTop: "0.85rem" }}>
+                <button
+                  className={`tab ${inventorySection === "stock" ? "isActive" : ""}`}
+                  type="button"
+                  onClick={() => setInventorySection("stock")}
+                >
+                  Stock
+                </button>
+                <button
+                  className={`tab ${inventorySection === "transfers" ? "isActive" : ""}`}
+                  type="button"
+                  onClick={() => setInventorySection("transfers")}
+                >
+                  Transfers
+                </button>
+                {canViewWorkshop ? (
+                  <button
+                    className={`tab ${inventorySection === "workshop" ? "isActive" : ""}`}
+                    type="button"
+                    onClick={() => setInventorySection("workshop")}
+                  >
+                    Workshop
+                  </button>
+                ) : null}
+              </div>
+            </section>
+
+            {inventorySection === "stock" ? (
+              <>
+                <section className="card" style={{ gridColumn: "1 / -1" }}>
+                  <h2>Stock Filters</h2>
+                  <form
+                    className="form form--three"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void refreshInventoryStockData();
+                    }}
+                  >
+                    <label>
+                      Shop
+                      <select
+                        value={inventoryFilters.shopId}
+                        onChange={(event) => {
+                          const shopId = event.target.value;
+                          setInventoryFilters((prev) => ({ ...prev, shopId }));
+                          setNewStockReceiptForm((prev) => ({ ...prev, shopId }));
+                          setNewDamageForm((prev) => ({ ...prev, shopId }));
+                        }}
+                        disabled={authUser?.role === "SALES"}
+                      >
+                        {shops.map((shop) => (
+                          <option key={shop.id} value={shop.id}>
+                            {shop.code} — {shop.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Damages from
+                      <input
+                        type="date"
+                        value={inventoryDateRange.dateFrom}
+                        onChange={(event) => setInventoryDateRange((prev) => ({ ...prev, dateFrom: event.target.value }))}
+                      />
+                    </label>
+                    <label>
+                      Damages to
+                      <input
+                        type="date"
+                        value={inventoryDateRange.dateTo}
+                        onChange={(event) => setInventoryDateRange((prev) => ({ ...prev, dateTo: event.target.value }))}
+                      />
+                    </label>
+                    <button type="submit" disabled={inventoryBusy}>
+                      {inventoryBusy ? "Loading..." : "Refresh"}
+                    </button>
+                  </form>
+                </section>
+
+                <section className="card" style={{ gridColumn: "1 / -1" }}>
+                  <h2>Stock On Hand</h2>
+                  <div className="tableWrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Shop</th>
+                          <th>SKU</th>
+                          <th>Product</th>
+                          <th>Type</th>
+                          <th>Qty</th>
+                          <th>Updated</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {shopStockRows.length ? (
+                          shopStockRows.map((row) => (
+                            <tr key={`${row.shopId}-${row.productId}`}>
+                              <td>
+                                {row.shopCode} — {row.shopName}
+                              </td>
+                              <td>{row.skuCode}</td>
+                              <td>{row.productName}</td>
+                              <td>{row.productType}</td>
+                              <td>{row.quantity}</td>
+                              <td>{row.updatedAt}</td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan={6}>No stock records.</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+
+                {canReceiveStock ? (
+                  <section className="card">
+                    <h2>Receive Stock (Non-Boards)</h2>
+                    <p className="hint">Use this for purchased items. Boards should arrive via Transfers.</p>
+
+                    {products.some((p) => p.isActive && p.productType === "NON_BOARD") ? (
+                      <form
+                        className="form"
+                        onSubmit={async (event) => {
+                          event.preventDefault();
+                          if (!auth) {
+                            return;
+                          }
+                          setError(null);
+                          setSuccess(null);
+                          setInventoryBusy(true);
+                          try {
+                            const qty = Number(newStockReceiptForm.quantity);
+                            if (!Number.isFinite(qty) || qty <= 0) {
+                              throw new Error("Quantity must be greater than 0");
+                            }
+
+                            const picked = products.find((p) => p.id === newStockReceiptForm.productId) ?? null;
+                            if (!picked || picked.productType !== "NON_BOARD") {
+                              throw new Error("Please choose a non-board product");
+                            }
+
+                            await createStockReceipt(auth.token, {
+                              shopId: newStockReceiptForm.shopId || inventoryFilters.shopId,
+                              productId: newStockReceiptForm.productId,
+                              receiptDate: newStockReceiptForm.receiptDate ? newStockReceiptForm.receiptDate : undefined,
+                              quantity: qty,
+                              notes: newStockReceiptForm.notes ? newStockReceiptForm.notes : null
+                            });
+
+                            setNewStockReceiptForm((prev) => ({ ...prev, quantity: "", notes: "" }));
+                            setSuccess("Stock received.");
+                            await refreshInventoryStockData();
+                          } catch (caught: unknown) {
+                            setError(caught instanceof Error ? caught.message : "Failed to receive stock");
+                          } finally {
+                            setInventoryBusy(false);
+                          }
+                        }}
+                      >
+                        <label>
+                          Shop
+                          <select
+                            value={newStockReceiptForm.shopId || inventoryFilters.shopId}
+                            onChange={(event) => setNewStockReceiptForm((prev) => ({ ...prev, shopId: event.target.value }))}
+                          >
+                            {shops.map((shop) => (
+                              <option key={shop.id} value={shop.id}>
+                                {shop.code} — {shop.name}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          Product
+                          <select
+                            value={newStockReceiptForm.productId}
+                            onChange={(event) => setNewStockReceiptForm((prev) => ({ ...prev, productId: event.target.value }))}
+                            required
+                          >
+                            {products
+                              .filter((p) => p.isActive && p.productType === "NON_BOARD")
+                              .map((product) => (
+                                <option key={product.id} value={product.id}>
+                                  {product.skuCode} — {product.name}
+                                </option>
+                              ))}
+                          </select>
+                        </label>
+                        <label>
+                          Quantity
+                          <input
+                            type="number"
+                            min={1}
+                            value={newStockReceiptForm.quantity}
+                            onChange={(event) => setNewStockReceiptForm((prev) => ({ ...prev, quantity: event.target.value }))}
+                            required
+                          />
+                        </label>
+                        <label>
+                          Date
+                          <input
+                            type="date"
+                            value={newStockReceiptForm.receiptDate}
+                            onChange={(event) => setNewStockReceiptForm((prev) => ({ ...prev, receiptDate: event.target.value }))}
+                          />
+                        </label>
+                        <label>
+                          Notes (optional)
+                          <input
+                            value={newStockReceiptForm.notes}
+                            onChange={(event) => setNewStockReceiptForm((prev) => ({ ...prev, notes: event.target.value }))}
+                          />
+                        </label>
+                        <button type="submit" disabled={inventoryBusy}>
+                          {inventoryBusy ? "Saving..." : "Receive"}
+                        </button>
+                      </form>
+                    ) : (
+                      <div className="note">No active non-board products found. Create products in Master Data first.</div>
+                    )}
+                  </section>
+                ) : (
+                  <section className="card">
+                    <h2>Receive Stock</h2>
+                    <div className="note">You don’t have permission to receive stock.</div>
+                  </section>
+                )}
+
+                {canRecordDamages ? (
+                  <section className="card">
+                    <h2>Record Damage</h2>
+                    <form
+                      className="form"
+                      onSubmit={async (event) => {
+                        event.preventDefault();
+                        if (!auth) {
+                          return;
+                        }
+                        setError(null);
+                        setSuccess(null);
+                        setInventoryBusy(true);
+                        try {
+                          const qty = Number(newDamageForm.quantity);
+                          if (!Number.isFinite(qty) || qty <= 0) {
+                            throw new Error("Quantity must be greater than 0");
+                          }
+
+                          await createDamageEvent(auth.token, {
+                            shopId: newDamageForm.shopId ? newDamageForm.shopId : undefined,
+                            productId: newDamageForm.productId,
+                            damageDate: newDamageForm.damageDate ? newDamageForm.damageDate : undefined,
+                            quantity: qty,
+                            reason: newDamageForm.reason ? newDamageForm.reason : null,
+                            notes: newDamageForm.notes ? newDamageForm.notes : null
+                          });
+
+                          setNewDamageForm((prev) => ({ ...prev, quantity: "", reason: "", notes: "" }));
+                          setSuccess("Damage recorded.");
+                          await refreshInventoryStockData();
+                        } catch (caught: unknown) {
+                          setError(caught instanceof Error ? caught.message : "Failed to record damage");
+                        } finally {
+                          setInventoryBusy(false);
+                        }
+                      }}
+                    >
+                      <label>
+                        Shop
+                        <select
+                          value={newDamageForm.shopId || inventoryFilters.shopId}
+                          onChange={(event) => setNewDamageForm((prev) => ({ ...prev, shopId: event.target.value }))}
+                          disabled={authUser?.role === "SALES"}
+                        >
+                          {shops.map((shop) => (
+                            <option key={shop.id} value={shop.id}>
+                              {shop.code} — {shop.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label>
+                        Product
+                        <select
+                          value={newDamageForm.productId}
+                          onChange={(event) => setNewDamageForm((prev) => ({ ...prev, productId: event.target.value }))}
+                          required
+                        >
+                          {products
+                            .filter((p) => p.isActive)
+                            .map((product) => (
+                              <option key={product.id} value={product.id}>
+                                {product.skuCode} — {product.name}
+                              </option>
+                            ))}
+                        </select>
+                      </label>
+                      <label>
+                        Quantity
+                        <input
+                          type="number"
+                          min={1}
+                          value={newDamageForm.quantity}
+                          onChange={(event) => setNewDamageForm((prev) => ({ ...prev, quantity: event.target.value }))}
+                          required
+                        />
+                      </label>
+                      <label>
+                        Date
+                        <input
+                          type="date"
+                          value={newDamageForm.damageDate}
+                          onChange={(event) => setNewDamageForm((prev) => ({ ...prev, damageDate: event.target.value }))}
+                        />
+                      </label>
+                      <label>
+                        Reason (optional)
+                        <input
+                          value={newDamageForm.reason}
+                          onChange={(event) => setNewDamageForm((prev) => ({ ...prev, reason: event.target.value }))}
+                        />
+                      </label>
+                      <label>
+                        Notes (optional)
+                        <input
+                          value={newDamageForm.notes}
+                          onChange={(event) => setNewDamageForm((prev) => ({ ...prev, notes: event.target.value }))}
+                        />
+                      </label>
+                      <button type="submit" disabled={inventoryBusy}>
+                        {inventoryBusy ? "Saving..." : "Record Damage"}
+                      </button>
+                    </form>
+                  </section>
+                ) : (
+                  <section className="card">
+                    <h2>Record Damage</h2>
+                    <div className="note">You don’t have permission to record damages.</div>
+                  </section>
+                )}
+
+                <section className="card" style={{ gridColumn: "1 / -1" }}>
+                  <h2>Damage Events</h2>
+                  <div className="tableWrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Date</th>
+                          <th>Shop</th>
+                          <th>SKU</th>
+                          <th>Product</th>
+                          <th>Qty</th>
+                          <th>Reason</th>
+                          <th>Notes</th>
+                          <th>Recorded by</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {damageEvents.length ? (
+                          damageEvents.map((d) => (
+                            <tr key={d.id}>
+                              <td>{d.damageDate}</td>
+                              <td>
+                                {d.shopCode} — {d.shopName}
+                              </td>
+                              <td>{d.skuCode}</td>
+                              <td>{d.productName}</td>
+                              <td>{d.quantity}</td>
+                              <td>{d.reason ?? "-"}</td>
+                              <td>{d.notes ?? "-"}</td>
+                              <td>{d.recordedByFullName ?? d.recordedByUserId ?? "-"}</td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan={8}>No damage events for this range.</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              </>
+            ) : inventorySection === "transfers" ? (
+              <>
+                <section className="card" style={{ gridColumn: "1 / -1" }}>
+                  <h2>Transfer Filters</h2>
+                  <form
+                    className="form form--three"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void refreshInventoryTransfersData();
+                    }}
+                  >
+                    <label>
+                      Shop
+                      <select
+                        value={inventoryFilters.shopId}
+                        onChange={(event) => {
+                          const shopId = event.target.value;
+                          setInventoryFilters((prev) => ({ ...prev, shopId }));
+                          setNewInvTransferForm((prev) => ({ ...prev, toShopId: shopId }));
+                        }}
+                        disabled={authUser?.role === "SALES"}
+                      >
+                        {shops.map((shop) => (
+                          <option key={shop.id} value={shop.id}>
+                            {shop.code} — {shop.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Status
+                      <select
+                        value={inventoryFilters.transferStatus}
+                        onChange={(event) =>
+                          setInventoryFilters((prev) => ({
+                            ...prev,
+                            transferStatus:
+                              event.target.value === "DRAFT"
+                                ? "DRAFT"
+                                : event.target.value === "SHIPPED"
+                                  ? "SHIPPED"
+                                  : event.target.value === "RECEIVED"
+                                    ? "RECEIVED"
+                                    : ""
+                          }))
+                        }
+                      >
+                        <option value="">All</option>
+                        <option value="DRAFT">Draft</option>
+                        <option value="SHIPPED">Shipped</option>
+                        <option value="RECEIVED">Received</option>
+                      </select>
+                    </label>
+                    <button type="submit" disabled={inventoryBusy}>
+                      {inventoryBusy ? "Loading..." : "Refresh"}
+                    </button>
+                  </form>
+                </section>
+
+                {canManageInventoryTransfers ? (
+                  <section className="card">
+                    <h2>Create Transfer (Workshop → Shop)</h2>
+                    <p className="hint">Boards only. Create in Draft, then Ship, then Receive at the shop.</p>
+
+                    {products.some((p) => p.isActive && p.productType === "BOARD") ? (
+                      <form
+                        className="form"
+                        onSubmit={async (event) => {
+                          event.preventDefault();
+                          if (!auth) {
+                            return;
+                          }
+                          setError(null);
+                          setSuccess(null);
+                          setInventoryBusy(true);
+                          try {
+                            const lines = newInvTransferForm.lines
+                              .map((l) => ({ productId: l.productId, quantity: Number(l.quantity) }))
+                              .filter((l) => l.productId && Number.isFinite(l.quantity) && l.quantity > 0);
+
+                            if (!newInvTransferForm.toShopId) {
+                              throw new Error("Please select a shop");
+                            }
+                            if (!lines.length) {
+                              throw new Error("Add at least one line item");
+                            }
+
+                            await createInventoryTransfer(auth.token, {
+                              toShopId: newInvTransferForm.toShopId,
+                              notes: newInvTransferForm.notes ? newInvTransferForm.notes : null,
+                              lines
+                            });
+
+                            const firstBoard = products.find((p) => p.isActive && p.productType === "BOARD") ?? null;
+                            setNewInvTransferForm((prev) => ({
+                              ...prev,
+                              notes: "",
+                              lines: [{ productId: firstBoard?.id ?? "", quantity: "1" }]
+                            }));
+                            setSuccess("Transfer created.");
+                            await refreshInventoryTransfersData();
+                          } catch (caught: unknown) {
+                            setError(caught instanceof Error ? caught.message : "Failed to create transfer");
+                          } finally {
+                            setInventoryBusy(false);
+                          }
+                        }}
+                      >
+                        <label>
+                          To shop
+                          <select
+                            value={newInvTransferForm.toShopId}
+                            onChange={(event) => setNewInvTransferForm((prev) => ({ ...prev, toShopId: event.target.value }))}
+                            required
+                          >
+                            {shops.map((shop) => (
+                              <option key={shop.id} value={shop.id}>
+                                {shop.code} — {shop.name}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          Notes (optional)
+                          <input
+                            value={newInvTransferForm.notes}
+                            onChange={(event) => setNewInvTransferForm((prev) => ({ ...prev, notes: event.target.value }))}
+                          />
+                        </label>
+
+                        <div className="divider" />
+                        <p className="subhead">Lines</p>
+
+                        {newInvTransferForm.lines.map((line, idx) => (
+                          <div key={idx} className="lineRow">
+                            <select
+                              value={line.productId}
+                              onChange={(event) => {
+                                const value = event.target.value;
+                                setNewInvTransferForm((prev) => {
+                                  const nextLines = [...prev.lines];
+                                  nextLines[idx] = { ...nextLines[idx], productId: value };
+                                  return { ...prev, lines: nextLines };
+                                });
+                              }}
+                              required
+                            >
+                              {products
+                                .filter((p) => p.isActive && p.productType === "BOARD")
+                                .map((p) => (
+                                  <option key={p.id} value={p.id}>
+                                    {p.skuCode} — {p.name}
+                                  </option>
+                                ))}
+                            </select>
+                            <input
+                              type="number"
+                              min={1}
+                              value={line.quantity}
+                              onChange={(event) => {
+                                const value = event.target.value;
+                                setNewInvTransferForm((prev) => {
+                                  const nextLines = [...prev.lines];
+                                  nextLines[idx] = { ...nextLines[idx], quantity: value };
+                                  return { ...prev, lines: nextLines };
+                                });
+                              }}
+                              required
+                            />
+                            <button
+                              data-variant="ghost"
+                              type="button"
+                              onClick={() => {
+                                setNewInvTransferForm((prev) => {
+                                  if (prev.lines.length <= 1) {
+                                    return prev;
+                                  }
+                                  const nextLines = prev.lines.filter((_, i) => i !== idx);
+                                  return { ...prev, lines: nextLines };
+                                });
+                              }}
+                              disabled={newInvTransferForm.lines.length <= 1}
+                              title="Remove line"
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        ))}
+
+                        <div className="approvalActions" style={{ marginTop: "0.8rem" }}>
+                          <button
+                            data-variant="ghost"
+                            type="button"
+                            onClick={() => {
+                              const firstBoard = products.find((p) => p.isActive && p.productType === "BOARD") ?? null;
+                              setNewInvTransferForm((prev) => ({
+                                ...prev,
+                                lines: [...prev.lines, { productId: firstBoard?.id ?? "", quantity: "1" }]
+                              }));
+                            }}
+                          >
+                            + Add line
+                          </button>
+                          <button type="submit" disabled={inventoryBusy}>
+                            {inventoryBusy ? "Saving..." : "Create Transfer"}
+                          </button>
+                        </div>
+                      </form>
+                    ) : (
+                      <div className="note">No active board products found. Create board products in Master Data first.</div>
+                    )}
+                  </section>
+                ) : (
+                  <section className="card">
+                    <h2>Create Transfer</h2>
+                    <div className="note">You don’t have permission to create transfers.</div>
+                  </section>
+                )}
+
+                <section className="card" style={{ gridColumn: "1 / -1" }}>
+                  <h2>Transfers</h2>
+                  {inventoryTransfers.length ? (
+                    inventoryTransfers.map((t, idx) => (
+                      <div key={t.id} style={{ marginTop: idx === 0 ? 0 : "1.2rem" }}>
+                        <div className="note" style={{ marginBottom: "0.75rem" }}>
+                          <div>
+                            <strong>
+                              {t.toShopCode} — {t.toShopName}
+                            </strong>
+                          </div>
+                          <div className="hint">
+                            Status: {t.status} • Created: {t.createdAt ?? "-"} • Shipped: {t.shippedAt ?? "-"} • Received: {t.receivedAt ?? "-"}
+                          </div>
+                          {t.notes ? <div className="hint">Notes: {t.notes}</div> : null}
+                        </div>
+
+                        <div className="tableWrap">
+                          <table>
+                            <thead>
+                              <tr>
+                                <th>Product</th>
+                                <th>Shipped</th>
+                                <th>Damaged</th>
+                                <th>Good received</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {t.lines.map((line) => {
+                                const draftDamagedRaw = transferReceiveDrafts[t.id]?.[line.id];
+                                const draftDamaged = draftDamagedRaw ? Number(draftDamagedRaw) : line.quantityDamaged ?? 0;
+                                const safeDamaged = Number.isFinite(draftDamaged) ? draftDamaged : 0;
+                                const good = Math.max(0, (line.quantityShipped ?? 0) - safeDamaged);
+                                return (
+                                  <tr key={line.id}>
+                                    <td>
+                                      {line.skuCode} — {line.productName}
+                                    </td>
+                                    <td>{line.quantityShipped}</td>
+                                    <td>
+                                      {t.status === "SHIPPED" && canReceiveInventoryTransfers ? (
+                                        <input
+                                          type="number"
+                                          min={0}
+                                          max={line.quantityShipped}
+                                          value={draftDamagedRaw ?? String(line.quantityDamaged ?? 0)}
+                                          onChange={(event) => {
+                                            const value = event.target.value;
+                                            setTransferReceiveDrafts((prev) => ({
+                                              ...prev,
+                                              [t.id]: { ...(prev[t.id] ?? {}), [line.id]: value }
+                                            }));
+                                          }}
+                                        />
+                                      ) : (
+                                        line.quantityDamaged
+                                      )}
+                                    </td>
+                                    <td>{t.status === "RECEIVED" ? line.quantityReceivedGood : good}</td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+
+                        <div className="approvalActions" style={{ marginTop: "0.8rem" }}>
+                          {t.status === "DRAFT" && canManageInventoryTransfers ? (
+                            <button
+                              data-variant="ghost"
+                              type="button"
+                              disabled={inventoryBusy}
+                              onClick={async () => {
+                                if (!auth) {
+                                  return;
+                                }
+                                const ok = window.confirm("Ship this transfer? This will deduct stock from the workshop.");
+                                if (!ok) {
+                                  return;
+                                }
+                                setError(null);
+                                setSuccess(null);
+                                setInventoryBusy(true);
+                                try {
+                                  await shipInventoryTransfer(auth.token, t.id);
+                                  setSuccess("Transfer shipped.");
+                                  await refreshInventoryTransfersData();
+                                } catch (caught: unknown) {
+                                  setError(caught instanceof Error ? caught.message : "Failed to ship transfer");
+                                } finally {
+                                  setInventoryBusy(false);
+                                }
+                              }}
+                            >
+                              Ship
+                            </button>
+                          ) : null}
+
+                          {t.status === "SHIPPED" && canReceiveInventoryTransfers ? (
+                            <>
+                              <input
+                                placeholder="Receive notes (optional)"
+                                value={transferReceiveNotesDrafts[t.id] ?? ""}
+                                onChange={(event) =>
+                                  setTransferReceiveNotesDrafts((prev) => ({ ...prev, [t.id]: event.target.value }))
+                                }
+                              />
+                              <button
+                                type="button"
+                                disabled={inventoryBusy}
+                                onClick={async () => {
+                                  if (!auth) {
+                                    return;
+                                  }
+                                  setError(null);
+                                  setSuccess(null);
+                                  setInventoryBusy(true);
+                                  try {
+                                    const lineDrafts = transferReceiveDrafts[t.id] ?? {};
+                                    const lines = t.lines.map((line) => {
+                                      const raw = lineDrafts[line.id];
+                                      const parsed = raw === undefined || raw === "" ? 0 : Number(raw);
+                                      const safe = Number.isFinite(parsed) ? Math.max(0, Math.min(parsed, line.quantityShipped)) : 0;
+                                      return { lineId: line.id, quantityDamaged: safe };
+                                    });
+
+                                    await receiveInventoryTransfer(auth.token, t.id, {
+                                      receiveNotes: transferReceiveNotesDrafts[t.id] ? transferReceiveNotesDrafts[t.id] : null,
+                                      lines
+                                    });
+
+                                    setTransferReceiveDrafts((prev) => {
+                                      const next = { ...prev };
+                                      delete next[t.id];
+                                      return next;
+                                    });
+                                    setTransferReceiveNotesDrafts((prev) => {
+                                      const next = { ...prev };
+                                      delete next[t.id];
+                                      return next;
+                                    });
+                                    setSuccess("Transfer received.");
+                                    await Promise.all([refreshInventoryTransfersData(), refreshInventoryStockData()]);
+                                  } catch (caught: unknown) {
+                                    setError(caught instanceof Error ? caught.message : "Failed to receive transfer");
+                                  } finally {
+                                    setInventoryBusy(false);
+                                  }
+                                }}
+                              >
+                                Receive
+                              </button>
+                            </>
+                          ) : null}
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="note">No transfers found.</div>
+                  )}
+                </section>
+              </>
+            ) : inventorySection === "workshop" ? (
+              <>
+                <section className="card" style={{ gridColumn: "1 / -1" }}>
+                  <h2>Workshop Filters</h2>
+                  <form
+                    className="form form--three"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void refreshWorkshopData();
+                    }}
+                  >
+                    <label>
+                      Date from
+                      <input
+                        type="date"
+                        value={inventoryDateRange.dateFrom}
+                        onChange={(event) => setInventoryDateRange((prev) => ({ ...prev, dateFrom: event.target.value }))}
+                      />
+                    </label>
+                    <label>
+                      Date to
+                      <input
+                        type="date"
+                        value={inventoryDateRange.dateTo}
+                        onChange={(event) => setInventoryDateRange((prev) => ({ ...prev, dateTo: event.target.value }))}
+                      />
+                    </label>
+                    <button type="submit" disabled={inventoryBusy}>
+                      {inventoryBusy ? "Loading..." : "Refresh"}
+                    </button>
+                  </form>
+                </section>
+
+                <section className="card" style={{ gridColumn: "1 / -1" }}>
+                  <h2>Full Sheets Summary</h2>
+                  {workshopSheetSummary ? (
+                    <div className="tableWrap">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>Available</th>
+                            <th>Total received</th>
+                            <th>Total used</th>
+                            <th>Updated</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr>
+                            <td>{workshopSheetSummary.availableSheets}</td>
+                            <td>{workshopSheetSummary.totalReceivedSheets}</td>
+                            <td>{workshopSheetSummary.totalUsedSheets}</td>
+                            <td>{workshopSheetSummary.updatedAt ?? "-"}</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div className="note">No workshop summary loaded.</div>
+                  )}
+                </section>
+
+                {canManageWorkshop ? (
+                  <section className="card">
+                    <h2>Receive Full Sheets</h2>
+                    <form
+                      className="form"
+                      onSubmit={async (event) => {
+                        event.preventDefault();
+                        if (!auth) {
+                          return;
+                        }
+                        setError(null);
+                        setSuccess(null);
+                        setInventoryBusy(true);
+                        try {
+                          const qtySheets = Number(newSheetReceiptForm.quantitySheets);
+                          if (!Number.isFinite(qtySheets) || qtySheets <= 0) {
+                            throw new Error("Quantity must be greater than 0");
+                          }
+                          const cost = newSheetReceiptForm.costPerSheet ? Number(newSheetReceiptForm.costPerSheet) : null;
+                          if (newSheetReceiptForm.costPerSheet && (!Number.isFinite(cost) || (cost ?? 0) < 0)) {
+                            throw new Error("Cost per sheet must be 0 or greater");
+                          }
+
+                          await createWorkshopSheetReceipt(auth.token, {
+                            receiptDate: newSheetReceiptForm.receiptDate ? newSheetReceiptForm.receiptDate : undefined,
+                            quantitySheets: qtySheets,
+                            supplier: newSheetReceiptForm.supplier ? newSheetReceiptForm.supplier : null,
+                            costPerSheet: cost === null ? null : cost,
+                            notes: newSheetReceiptForm.notes ? newSheetReceiptForm.notes : null
+                          });
+
+                          setNewSheetReceiptForm({ receiptDate: todayLocalYmd(), quantitySheets: "", supplier: "", costPerSheet: "", notes: "" });
+                          setSuccess("Sheet receipt recorded.");
+                          await refreshWorkshopData();
+                        } catch (caught: unknown) {
+                          setError(caught instanceof Error ? caught.message : "Failed to record sheet receipt");
+                        } finally {
+                          setInventoryBusy(false);
+                        }
+                      }}
+                    >
+                      <label>
+                        Date
+                        <input
+                          type="date"
+                          value={newSheetReceiptForm.receiptDate}
+                          onChange={(event) => setNewSheetReceiptForm((prev) => ({ ...prev, receiptDate: event.target.value }))}
+                        />
+                      </label>
+                      <label>
+                        Quantity (sheets)
+                        <input
+                          type="number"
+                          min={1}
+                          value={newSheetReceiptForm.quantitySheets}
+                          onChange={(event) => setNewSheetReceiptForm((prev) => ({ ...prev, quantitySheets: event.target.value }))}
+                          required
+                        />
+                      </label>
+                      <label>
+                        Supplier (optional)
+                        <input
+                          value={newSheetReceiptForm.supplier}
+                          onChange={(event) => setNewSheetReceiptForm((prev) => ({ ...prev, supplier: event.target.value }))}
+                        />
+                      </label>
+                      <label>
+                        Cost per sheet (optional)
+                        <input
+                          type="number"
+                          min={0}
+                          value={newSheetReceiptForm.costPerSheet}
+                          onChange={(event) => setNewSheetReceiptForm((prev) => ({ ...prev, costPerSheet: event.target.value }))}
+                        />
+                      </label>
+                      <label>
+                        Notes (optional)
+                        <input
+                          value={newSheetReceiptForm.notes}
+                          onChange={(event) => setNewSheetReceiptForm((prev) => ({ ...prev, notes: event.target.value }))}
+                        />
+                      </label>
+                      <button type="submit" disabled={inventoryBusy}>
+                        {inventoryBusy ? "Saving..." : "Receive Sheets"}
+                      </button>
+                    </form>
+                  </section>
+                ) : (
+                  <section className="card">
+                    <h2>Receive Full Sheets</h2>
+                    <div className="note">You don’t have permission to manage workshop receipts.</div>
+                  </section>
+                )}
+
+                {canManageWorkshop ? (
+                  <section className="card">
+                    <h2>Create Production Batch</h2>
+                    <p className="hint">Consumes full sheets and adds good output into workshop stock.</p>
+                    {products.some((p) => p.isActive && p.productType === "BOARD") ? (
+                      <form
+                        className="form"
+                        onSubmit={async (event) => {
+                          event.preventDefault();
+                          if (!auth) {
+                            return;
+                          }
+                          setError(null);
+                          setSuccess(null);
+                          setInventoryBusy(true);
+                          try {
+                            const lines = newWorkshopBatchForm.lines
+                              .map((l) => ({
+                                productId: l.productId,
+                                sheetsUsed: Number(l.sheetsUsed),
+                                actualGood: Number(l.actualGood),
+                                actualDamaged: Number(l.actualDamaged),
+                                actualWaste: Number(l.actualWaste),
+                                notes: l.notes ? l.notes : null
+                              }))
+                              .filter((l) => l.productId);
+
+                            if (!lines.length) {
+                              throw new Error("Add at least one batch line");
+                            }
+
+                            for (const line of lines) {
+                              if (!Number.isFinite(line.sheetsUsed) || line.sheetsUsed <= 0) {
+                                throw new Error("Sheets used must be greater than 0");
+                              }
+                              if (!Number.isFinite(line.actualGood) || line.actualGood < 0) {
+                                throw new Error("Actual good must be 0 or greater");
+                              }
+                              if (!Number.isFinite(line.actualDamaged) || line.actualDamaged < 0) {
+                                throw new Error("Actual damaged must be 0 or greater");
+                              }
+                              if (!Number.isFinite(line.actualWaste) || line.actualWaste < 0) {
+                                throw new Error("Actual waste must be 0 or greater");
+                              }
+                            }
+
+                            await createWorkshopBatch(auth.token, {
+                              batchDate: newWorkshopBatchForm.batchDate ? newWorkshopBatchForm.batchDate : undefined,
+                              notes: newWorkshopBatchForm.notes ? newWorkshopBatchForm.notes : null,
+                              lines
+                            });
+
+                            const firstBoard = products.find((p) => p.isActive && p.productType === "BOARD") ?? null;
+                            setNewWorkshopBatchForm({
+                              batchDate: todayLocalYmd(),
+                              notes: "",
+                              lines: [{ productId: firstBoard?.id ?? "", sheetsUsed: "1", actualGood: "", actualDamaged: "0", actualWaste: "0", notes: "" }]
+                            });
+                            setSuccess("Batch created.");
+                            await refreshWorkshopData();
+                          } catch (caught: unknown) {
+                            setError(caught instanceof Error ? caught.message : "Failed to create batch");
+                          } finally {
+                            setInventoryBusy(false);
+                          }
+                        }}
+                      >
+                        <label>
+                          Batch date
+                          <input
+                            type="date"
+                            value={newWorkshopBatchForm.batchDate}
+                            onChange={(event) => setNewWorkshopBatchForm((prev) => ({ ...prev, batchDate: event.target.value }))}
+                          />
+                        </label>
+                        <label>
+                          Notes (optional)
+                          <input
+                            value={newWorkshopBatchForm.notes}
+                            onChange={(event) => setNewWorkshopBatchForm((prev) => ({ ...prev, notes: event.target.value }))}
+                          />
+                        </label>
+
+                        <div className="divider" />
+                        <p className="subhead">Lines</p>
+
+                        {newWorkshopBatchForm.lines.map((line, idx) => {
+                          const picked = products.find((p) => p.id === line.productId) ?? null;
+                          const sheetsUsed = Number(line.sheetsUsed);
+                          const expected = picked?.yieldPerSheet && Number.isFinite(sheetsUsed) ? picked.yieldPerSheet * Math.max(0, sheetsUsed) : null;
+                          const actualTotal =
+                            (Number(line.actualGood) || 0) + (Number(line.actualDamaged) || 0) + (Number(line.actualWaste) || 0);
+                          const variance = expected === null ? null : actualTotal - expected;
+
+                          return (
+                            <div key={idx} className="lineRow">
+                              <select
+                                value={line.productId}
+                                onChange={(event) => {
+                                  const value = event.target.value;
+                                  setNewWorkshopBatchForm((prev) => {
+                                    const nextLines = [...prev.lines];
+                                    nextLines[idx] = { ...nextLines[idx], productId: value };
+                                    return { ...prev, lines: nextLines };
+                                  });
+                                }}
+                                required
+                              >
+                                {products
+                                  .filter((p) => p.isActive && p.productType === "BOARD")
+                                  .map((p) => (
+                                    <option key={p.id} value={p.id}>
+                                      {p.skuCode} — {p.name} ({p.yieldPerSheet ?? "?"}/sheet)
+                                    </option>
+                                  ))}
+                              </select>
+                              <input
+                                type="number"
+                                min={1}
+                                value={line.sheetsUsed}
+                                onChange={(event) => {
+                                  const value = event.target.value;
+                                  setNewWorkshopBatchForm((prev) => {
+                                    const nextLines = [...prev.lines];
+                                    nextLines[idx] = { ...nextLines[idx], sheetsUsed: value };
+                                    return { ...prev, lines: nextLines };
+                                  });
+                                }}
+                                title="Sheets used"
+                                required
+                              />
+                              <input
+                                type="number"
+                                min={0}
+                                value={line.actualGood}
+                                onChange={(event) => {
+                                  const value = event.target.value;
+                                  setNewWorkshopBatchForm((prev) => {
+                                    const nextLines = [...prev.lines];
+                                    nextLines[idx] = { ...nextLines[idx], actualGood: value };
+                                    return { ...prev, lines: nextLines };
+                                  });
+                                }}
+                                title="Actual good"
+                                required
+                              />
+                              <input
+                                type="number"
+                                min={0}
+                                value={line.actualDamaged}
+                                onChange={(event) => {
+                                  const value = event.target.value;
+                                  setNewWorkshopBatchForm((prev) => {
+                                    const nextLines = [...prev.lines];
+                                    nextLines[idx] = { ...nextLines[idx], actualDamaged: value };
+                                    return { ...prev, lines: nextLines };
+                                  });
+                                }}
+                                title="Actual damaged"
+                                required
+                              />
+                              <input
+                                type="number"
+                                min={0}
+                                value={line.actualWaste}
+                                onChange={(event) => {
+                                  const value = event.target.value;
+                                  setNewWorkshopBatchForm((prev) => {
+                                    const nextLines = [...prev.lines];
+                                    nextLines[idx] = { ...nextLines[idx], actualWaste: value };
+                                    return { ...prev, lines: nextLines };
+                                  });
+                                }}
+                                title="Actual waste"
+                                required
+                              />
+                              <span className="hint" style={{ alignSelf: "center" }}>
+                                Expected: {expected ?? "-"} • Var: {variance ?? "-"}
+                              </span>
+                              <button
+                                data-variant="ghost"
+                                type="button"
+                                onClick={() => {
+                                  setNewWorkshopBatchForm((prev) => {
+                                    if (prev.lines.length <= 1) {
+                                      return prev;
+                                    }
+                                    const nextLines = prev.lines.filter((_, i) => i !== idx);
+                                    return { ...prev, lines: nextLines };
+                                  });
+                                }}
+                                disabled={newWorkshopBatchForm.lines.length <= 1}
+                                title="Remove line"
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          );
+                        })}
+
+                        <div className="approvalActions" style={{ marginTop: "0.8rem" }}>
+                          <button
+                            data-variant="ghost"
+                            type="button"
+                            onClick={() => {
+                              const firstBoard = products.find((p) => p.isActive && p.productType === "BOARD") ?? null;
+                              setNewWorkshopBatchForm((prev) => ({
+                                ...prev,
+                                lines: [
+                                  ...prev.lines,
+                                  { productId: firstBoard?.id ?? "", sheetsUsed: "1", actualGood: "", actualDamaged: "0", actualWaste: "0", notes: "" }
+                                ]
+                              }));
+                            }}
+                          >
+                            + Add line
+                          </button>
+                          <button type="submit" disabled={inventoryBusy}>
+                            {inventoryBusy ? "Saving..." : "Create Batch"}
+                          </button>
+                        </div>
+                      </form>
+                    ) : (
+                      <div className="note">No active board products found. Create board products in Master Data first.</div>
+                    )}
+                  </section>
+                ) : (
+                  <section className="card">
+                    <h2>Create Production Batch</h2>
+                    <div className="note">You don’t have permission to create batches.</div>
+                  </section>
+                )}
+
+                <section className="card" style={{ gridColumn: "1 / -1" }}>
+                  <h2>Workshop Stock</h2>
+                  <div className="tableWrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>SKU</th>
+                          <th>Product</th>
+                          <th>Qty</th>
+                          <th>Updated</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {workshopStockRows.length ? (
+                          workshopStockRows.map((row) => (
+                            <tr key={row.productId}>
+                              <td>{row.skuCode}</td>
+                              <td>{row.productName}</td>
+                              <td>{row.quantity}</td>
+                              <td>{row.updatedAt}</td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan={4}>No workshop stock yet.</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+
+                <section className="card" style={{ gridColumn: "1 / -1" }}>
+                  <h2>Sheet Receipts</h2>
+                  <div className="tableWrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Date</th>
+                          <th>Qty</th>
+                          <th>Supplier</th>
+                          <th>Cost/sheet</th>
+                          <th>Notes</th>
+                          <th>By</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {workshopSheetReceipts.length ? (
+                          workshopSheetReceipts.map((r) => (
+                            <tr key={r.id}>
+                              <td>{r.receiptDate}</td>
+                              <td>{r.quantitySheets}</td>
+                              <td>{r.supplier ?? "-"}</td>
+                              <td>{r.costPerSheet ?? "-"}</td>
+                              <td>{r.notes ?? "-"}</td>
+                              <td>{r.createdByFullName ?? r.createdByUserId ?? "-"}</td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan={6}>No sheet receipts in this range.</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+
+                <section className="card" style={{ gridColumn: "1 / -1" }}>
+                  <h2>Batches</h2>
+                  {workshopBatches.length ? (
+                    workshopBatches.map((b, idx) => (
+                      <div key={b.id} style={{ marginTop: idx === 0 ? 0 : "1.2rem" }}>
+                        <div className="note" style={{ marginBottom: "0.75rem" }}>
+                          <div>
+                            <strong>{b.batchDate}</strong>
+                          </div>
+                          <div className="hint">
+                            Sheets used: {b.totalSheetsUsed} • Created: {b.createdAt ?? "-"} • By: {b.createdByFullName ?? b.createdByUserId ?? "-"}
+                          </div>
+                          {b.notes ? <div className="hint">Notes: {b.notes}</div> : null}
+                        </div>
+
+                        <div className="tableWrap">
+                          <table>
+                            <thead>
+                              <tr>
+                                <th>Product</th>
+                                <th>Yield/sheet</th>
+                                <th>Sheets used</th>
+                                <th>Expected</th>
+                                <th>Good</th>
+                                <th>Damaged</th>
+                                <th>Waste</th>
+                                <th>Variance</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {b.lines.map((l) => (
+                                <tr key={l.id}>
+                                  <td>
+                                    {l.skuCode} — {l.productName}
+                                  </td>
+                                  <td>{l.yieldPerSheet}</td>
+                                  <td>{l.sheetsUsed}</td>
+                                  <td>{l.expectedOutput}</td>
+                                  <td>{l.actualGood}</td>
+                                  <td>{l.actualDamaged}</td>
+                                  <td>{l.actualWaste}</td>
+                                  <td>{l.variance}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="note">No batches in this range.</div>
+                  )}
+                </section>
+              </>
+            ) : (
+              <section className="card" style={{ gridColumn: "1 / -1" }}>
+                <h2>Inventory</h2>
+                <div className="note">Select a section above.</div>
+              </section>
+            )}
           </>
         ) : activeView === "sales" ? (
           <>

@@ -1275,3 +1275,281 @@ export function exportPlReport(
     token
   );
 }
+
+// Phase 8 — Workshop + Inventory
+export interface WorkshopSheetSummary {
+  availableSheets: number;
+  totalReceivedSheets: number;
+  totalUsedSheets: number;
+  updatedAt?: string | null;
+}
+
+export interface WorkshopSheetReceipt {
+  id: string;
+  receiptDate: string;
+  quantitySheets: number;
+  supplier?: string | null;
+  costPerSheet?: number | null;
+  notes?: string | null;
+  createdByUserId?: string | null;
+  createdByFullName?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkshopStockRow {
+  productId: string;
+  skuCode: string;
+  productName: string;
+  productType: ProductType;
+  boardSizeCode?: BoardSizeCode | null;
+  yieldPerSheet?: number | null;
+  quantity: number;
+  updatedAt: string;
+}
+
+export interface WorkshopBatchLine {
+  id: string;
+  batchId: string;
+  sortOrder: number;
+  productId: string;
+  skuCode: string;
+  productName: string;
+  yieldPerSheet: number;
+  sheetsUsed: number;
+  expectedOutput: number;
+  actualGood: number;
+  actualDamaged: number;
+  actualWaste: number;
+  variance: number;
+  notes?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkshopBatch {
+  id: string;
+  batchDate: string;
+  totalSheetsUsed: number;
+  notes?: string | null;
+  createdByUserId?: string | null;
+  createdByFullName?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
+  lines: WorkshopBatchLine[];
+}
+
+export interface InventoryStockRow {
+  shopId: string;
+  shopCode: string;
+  shopName: string;
+  productId: string;
+  skuCode: string;
+  productName: string;
+  productType: ProductType;
+  boardSizeCode?: BoardSizeCode | null;
+  yieldPerSheet?: number | null;
+  quantity: number;
+  updatedAt: string;
+}
+
+export interface StockReceipt {
+  id: string;
+  shopId: string;
+  shopCode: string;
+  shopName: string;
+  productId: string;
+  skuCode: string;
+  productName: string;
+  receiptDate: string;
+  quantity: number;
+  notes?: string | null;
+  recordedByUserId?: string | null;
+  inventoryAdjustment: { beforeQty: number; afterQty: number; delta: number };
+}
+
+export interface ShopDamageEvent {
+  id: string;
+  shopId: string;
+  shopCode: string;
+  shopName: string;
+  productId: string;
+  skuCode: string;
+  productName: string;
+  damageDate: string;
+  quantity: number;
+  reason?: string | null;
+  notes?: string | null;
+  recordedByUserId?: string | null;
+  recordedByFullName?: string | null;
+  inventoryAdjustment?: { beforeQty: number; afterQty: number; delta: number };
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type InventoryTransferStatus = "DRAFT" | "SHIPPED" | "RECEIVED";
+
+export interface InventoryTransferLine {
+  id: string;
+  transferId: string;
+  sortOrder: number;
+  productId: string;
+  skuCode: string;
+  productName: string;
+  quantityShipped: number;
+  quantityDamaged: number;
+  quantityReceivedGood: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface InventoryTransfer {
+  id: string;
+  toShopId: string;
+  toShopCode: string;
+  toShopName: string;
+  status: InventoryTransferStatus;
+  notes?: string | null;
+  receiveNotes?: string | null;
+  createdByUserId?: string | null;
+  createdByFullName?: string | null;
+  shippedAt?: string | null;
+  shippedByUserId?: string | null;
+  shippedByFullName?: string | null;
+  receivedAt?: string | null;
+  receivedByUserId?: string | null;
+  receivedByFullName?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
+  lines: InventoryTransferLine[];
+}
+
+export function getWorkshopSheetSummary(token: string): Promise<WorkshopSheetSummary> {
+  return request<WorkshopSheetSummary>("api/workshop/sheets/summary", undefined, token);
+}
+
+export function listWorkshopSheetReceipts(
+  token: string,
+  params: { dateFrom?: string; dateTo?: string }
+): Promise<{ items: WorkshopSheetReceipt[]; dateFrom: string; dateTo: string }> {
+  return request<{ items: WorkshopSheetReceipt[]; dateFrom: string; dateTo: string }>(
+    withQuery("api/workshop/sheets/receipts", { dateFrom: params.dateFrom, dateTo: params.dateTo }),
+    undefined,
+    token
+  );
+}
+
+export function createWorkshopSheetReceipt(
+  token: string,
+  input: { receiptDate?: string; quantitySheets: number; supplier?: string | null; costPerSheet?: number | null; notes?: string | null }
+): Promise<{ receipt: WorkshopSheetReceipt; sheetBalance: { availableSheets: number } }> {
+  return request<{ receipt: WorkshopSheetReceipt; sheetBalance: { availableSheets: number } }>(
+    "api/workshop/sheets/receipts",
+    { method: "POST", body: JSON.stringify(input) },
+    token
+  );
+}
+
+export function listWorkshopStock(token: string): Promise<WorkshopStockRow[]> {
+  return request<WorkshopStockRow[]>("api/workshop/stock", undefined, token);
+}
+
+export function listWorkshopBatches(
+  token: string,
+  params: { dateFrom?: string; dateTo?: string }
+): Promise<{ items: WorkshopBatch[]; dateFrom: string; dateTo: string }> {
+  return request<{ items: WorkshopBatch[]; dateFrom: string; dateTo: string }>(
+    withQuery("api/workshop/batches", { dateFrom: params.dateFrom, dateTo: params.dateTo }),
+    undefined,
+    token
+  );
+}
+
+export function createWorkshopBatch(
+  token: string,
+  input: {
+    batchDate?: string;
+    notes?: string | null;
+    lines: Array<{
+      productId: string;
+      sheetsUsed: number;
+      actualGood: number;
+      actualDamaged: number;
+      actualWaste: number;
+      notes?: string | null;
+    }>;
+  }
+): Promise<{ batch: WorkshopBatch; sheetBalance: { availableSheets: number } }> {
+  return request<{ batch: WorkshopBatch; sheetBalance: { availableSheets: number } }>(
+    "api/workshop/batches",
+    { method: "POST", body: JSON.stringify(input) },
+    token
+  );
+}
+
+export function listInventoryStock(token: string, params: { shopId?: string }): Promise<InventoryStockRow[]> {
+  return request<InventoryStockRow[]>(withQuery("api/inventory/stock", { shopId: params.shopId }), undefined, token);
+}
+
+export function createStockReceipt(
+  token: string,
+  input: { shopId: string; productId: string; receiptDate?: string; quantity: number; notes?: string | null }
+): Promise<StockReceipt> {
+  return request<StockReceipt>("api/inventory/receipts", { method: "POST", body: JSON.stringify(input) }, token);
+}
+
+export function listDamageEvents(
+  token: string,
+  params: { shopId?: string; dateFrom?: string; dateTo?: string }
+): Promise<{ items: ShopDamageEvent[]; dateFrom: string; dateTo: string }> {
+  return request<{ items: ShopDamageEvent[]; dateFrom: string; dateTo: string }>(
+    withQuery("api/inventory/damages", { shopId: params.shopId, dateFrom: params.dateFrom, dateTo: params.dateTo }),
+    undefined,
+    token
+  );
+}
+
+export function createDamageEvent(
+  token: string,
+  input: { shopId?: string; productId: string; damageDate?: string; quantity: number; reason?: string | null; notes?: string | null }
+): Promise<ShopDamageEvent> {
+  return request<ShopDamageEvent>("api/inventory/damages", { method: "POST", body: JSON.stringify(input) }, token);
+}
+
+export function listInventoryTransfers(
+  token: string,
+  params: { shopId?: string; status?: InventoryTransferStatus }
+): Promise<InventoryTransfer[]> {
+  return request<InventoryTransfer[]>(
+    withQuery("api/inventory/transfers", { shopId: params.shopId, status: params.status }),
+    undefined,
+    token
+  );
+}
+
+export function createInventoryTransfer(
+  token: string,
+  input: { toShopId: string; notes?: string | null; lines: Array<{ productId: string; quantity: number }> }
+): Promise<InventoryTransfer> {
+  return request<InventoryTransfer>("api/inventory/transfers", { method: "POST", body: JSON.stringify(input) }, token);
+}
+
+export function shipInventoryTransfer(token: string, transferId: string): Promise<{ id: string; status: "SHIPPED" }> {
+  return request<{ id: string; status: "SHIPPED" }>(
+    `api/inventory/transfers/${transferId}/ship`,
+    { method: "PATCH", body: JSON.stringify({}) },
+    token
+  );
+}
+
+export function receiveInventoryTransfer(
+  token: string,
+  transferId: string,
+  input: { receiveNotes?: string | null; lines: Array<{ lineId: string; quantityDamaged: number }> }
+): Promise<{ id: string; status: "RECEIVED" }> {
+  return request<{ id: string; status: "RECEIVED" }>(
+    `api/inventory/transfers/${transferId}/receive`,
+    { method: "PATCH", body: JSON.stringify(input) },
+    token
+  );
+}

@@ -753,6 +753,111 @@ function phase1_is_shop_date_locked(PDO $pdo, string $shopId, string $lockDateYm
   return $row !== null;
 }
 
+function phase1_workshop_sheet_balance_adjust(PDO $pdo, int $delta, bool $allowNegative): array {
+  $stmtInit = $pdo->prepare(
+    "INSERT INTO workshop_sheet_balance (id, quantity_available) VALUES (1, 0) " .
+    "ON DUPLICATE KEY UPDATE id = id"
+  );
+  $stmtInit->execute();
+
+  $row = phase1_db_fetch_one(
+    $pdo,
+    "SELECT quantity_available FROM workshop_sheet_balance WHERE id = 1 FOR UPDATE",
+    []
+  );
+  if (!$row) {
+    json_response(500, ["error" => "InternalServerError", "message" => "Failed to lock workshop sheet balance"]);
+  }
+
+  $before = (int)($row["quantity_available"] ?? 0);
+  $after = $before + $delta;
+  if (!$allowNegative && $after < 0) {
+    json_response(400, ["error" => "BadRequest", "message" => "Insufficient workshop sheets. Available: " . $before . ", required: " . abs($delta)]);
+  }
+
+  phase1_db_execute(
+    $pdo,
+    "UPDATE workshop_sheet_balance SET quantity_available = :qty, updated_at = NOW() WHERE id = 1",
+    [":qty" => $after]
+  );
+
+  return ["before" => $before, "after" => $after];
+}
+
+function phase1_workshop_inventory_adjust(PDO $pdo, string $productId, int $delta, bool $allowNegative): array {
+  if ($productId === "") {
+    json_response(400, ["error" => "ValidationError", "message" => "productId is required"]);
+  }
+
+  $stmtInit = $pdo->prepare(
+    "INSERT INTO workshop_inventory_levels (product_id, quantity) VALUES (:product_id, 0) " .
+    "ON DUPLICATE KEY UPDATE product_id = product_id"
+  );
+  $stmtInit->execute([":product_id" => $productId]);
+
+  $row = phase1_db_fetch_one(
+    $pdo,
+    "SELECT quantity FROM workshop_inventory_levels WHERE product_id = :product_id FOR UPDATE",
+    [":product_id" => $productId]
+  );
+  if (!$row) {
+    json_response(500, ["error" => "InternalServerError", "message" => "Failed to lock workshop inventory row"]);
+  }
+
+  $before = (int)($row["quantity"] ?? 0);
+  $after = $before + $delta;
+  if (!$allowNegative && $after < 0) {
+    json_response(400, ["error" => "BadRequest", "message" => "Insufficient workshop stock. Available: " . $before . ", required: " . abs($delta)]);
+  }
+
+  phase1_db_execute(
+    $pdo,
+    "UPDATE workshop_inventory_levels SET quantity = :qty, updated_at = NOW() WHERE product_id = :product_id",
+    [":qty" => $after, ":product_id" => $productId]
+  );
+
+  return ["before" => $before, "after" => $after];
+}
+
+function phase1_shop_inventory_adjust(PDO $pdo, string $shopId, string $productId, int $delta, bool $allowNegative, string $errorPrefix): array {
+  if ($shopId === "" || $productId === "") {
+    json_response(400, ["error" => "ValidationError", "message" => "shopId and productId are required"]);
+  }
+
+  $stmtInit = $pdo->prepare(
+    "INSERT INTO shop_inventory_levels (shop_id, product_id, quantity) VALUES (:shop_id, :product_id, 0) " .
+    "ON DUPLICATE KEY UPDATE shop_id = shop_id"
+  );
+  $stmtInit->execute([":shop_id" => $shopId, ":product_id" => $productId]);
+
+  $row = phase1_db_fetch_one(
+    $pdo,
+    "SELECT quantity FROM shop_inventory_levels WHERE shop_id = :shop_id AND product_id = :product_id FOR UPDATE",
+    [":shop_id" => $shopId, ":product_id" => $productId]
+  );
+  if (!$row) {
+    json_response(500, ["error" => "InternalServerError", "message" => "Failed to lock shop inventory row"]);
+  }
+
+  $before = (int)($row["quantity"] ?? 0);
+  $after = $before + $delta;
+  if (!$allowNegative && $after < 0) {
+    $required = abs($delta);
+    $prefix = trim($errorPrefix);
+    $message = ($prefix !== "" ? ($prefix . ". ") : "") .
+      "Insufficient stock. Available: " . $before . ", required: " . $required;
+    json_response(400, ["error" => "BadRequest", "message" => $message]);
+  }
+
+  phase1_db_execute(
+    $pdo,
+    "UPDATE shop_inventory_levels SET quantity = :qty, updated_at = NOW() WHERE shop_id = :shop_id AND product_id = :product_id",
+    [":qty" => $after, ":shop_id" => $shopId, ":product_id" => $productId]
+  );
+
+  return ["before" => $before, "after" => $after];
+}
+
 function phase1_cash_summary(PDO $pdo, string $userId): array {
   $cashSalesRow = phase1_db_fetch_one(
     $pdo,
@@ -2126,6 +2231,1225 @@ function phase1_handle(string $method, string $route): void {
 
     phase1_audit_log($pdo, (string)($authUser["id"] ?? null), "UPDATE", "product", (string)$row["id"], $beforePublic, $afterPublic);
     json_response(200, ["data" => $afterPublic]);
+  }
+
+  // Phase 8 — Workshop + Inventory Lifecycle (Boards)
+  if ($method === "GET" && $route === "workshop/sheets/summary") {
+    phase1_require_role($roleName, ["ADMIN", "MANAGER"]);
+
+    // Ensure a balance row exists.
+    $stmtInit = $pdo->prepare(
+      "INSERT INTO workshop_sheet_balance (id, quantity_available) VALUES (1, 0) " .
+      "ON DUPLICATE KEY UPDATE id = id"
+    );
+    $stmtInit->execute();
+
+    $balRow = phase1_db_fetch_one($pdo, "SELECT quantity_available, updated_at FROM workshop_sheet_balance WHERE id = 1 LIMIT 1", []);
+    $available = $balRow ? (int)($balRow["quantity_available"] ?? 0) : 0;
+    $updatedAt = $balRow ? (string)($balRow["updated_at"] ?? "") : null;
+
+    $receivedRow = phase1_db_fetch_one($pdo, "SELECT COALESCE(SUM(quantity_sheets), 0) AS total FROM workshop_sheet_receipts", []);
+    $usedRow = phase1_db_fetch_one($pdo, "SELECT COALESCE(SUM(total_sheets_used), 0) AS total FROM workshop_batches", []);
+    $totalReceived = $receivedRow ? (int)($receivedRow["total"] ?? 0) : 0;
+    $totalUsed = $usedRow ? (int)($usedRow["total"] ?? 0) : 0;
+
+    json_response(200, ["data" => [
+      "availableSheets" => $available,
+      "totalReceivedSheets" => $totalReceived,
+      "totalUsedSheets" => $totalUsed,
+      "updatedAt" => $updatedAt,
+    ]]);
+  }
+
+  if ($method === "GET" && $route === "workshop/sheets/receipts") {
+    phase1_require_role($roleName, ["ADMIN", "MANAGER"]);
+
+    $range = phase1_resolve_date_range(
+      isset($_GET["dateFrom"]) && is_string($_GET["dateFrom"]) ? $_GET["dateFrom"] : null,
+      isset($_GET["dateTo"]) && is_string($_GET["dateTo"]) ? $_GET["dateTo"] : null,
+      30
+    );
+    $dateFrom = (string)$range["dateFrom"];
+    $dateTo = (string)$range["dateTo"];
+
+    $rows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT r.id, r.receipt_date, r.quantity_sheets, r.supplier, r.cost_per_sheet, r.notes, r.created_by_user_id, u.full_name AS created_by_full_name, r.created_at, r.updated_at " .
+      "FROM workshop_sheet_receipts r " .
+      "LEFT JOIN users u ON u.id = r.created_by_user_id " .
+      "WHERE r.receipt_date BETWEEN :date_from AND :date_to " .
+      "ORDER BY r.receipt_date DESC, r.created_at DESC " .
+      "LIMIT 200",
+      [":date_from" => $dateFrom, ":date_to" => $dateTo]
+    );
+
+    $out = array_map(function ($row) {
+      return [
+        "id" => (string)($row["id"] ?? ""),
+        "receiptDate" => (string)($row["receipt_date"] ?? ""),
+        "quantitySheets" => (int)($row["quantity_sheets"] ?? 0),
+        "supplier" => $row["supplier"] ?? null,
+        "costPerSheet" => $row["cost_per_sheet"] === null ? null : (int)$row["cost_per_sheet"],
+        "notes" => $row["notes"] ?? null,
+        "createdByUserId" => $row["created_by_user_id"] ?? null,
+        "createdByFullName" => $row["created_by_full_name"] ?? null,
+        "createdAt" => (string)($row["created_at"] ?? ""),
+        "updatedAt" => (string)($row["updated_at"] ?? ""),
+      ];
+    }, $rows);
+
+    json_response(200, ["data" => ["items" => $out, "dateFrom" => $dateFrom, "dateTo" => $dateTo]]);
+  }
+
+  if ($method === "POST" && $route === "workshop/sheets/receipts") {
+    phase1_require_role($roleName, ["ADMIN"]);
+    $body = read_json_body();
+
+    $receiptDate = isset($body["receiptDate"]) && is_string($body["receiptDate"]) ? trim($body["receiptDate"]) : "";
+    $quantitySheets = isset($body["quantitySheets"]) ? (int)$body["quantitySheets"] : 0;
+    $supplier = array_key_exists("supplier", $body) && is_string($body["supplier"]) ? trim($body["supplier"]) : null;
+    $costPerSheet = array_key_exists("costPerSheet", $body) ? ($body["costPerSheet"] === null ? null : (int)$body["costPerSheet"]) : null;
+    $notes = array_key_exists("notes", $body) ? $body["notes"] : null;
+
+    if ($receiptDate === "") {
+      $receiptDate = phase1_business_today_ymd();
+    }
+    if (!is_valid_ymd_date($receiptDate)) {
+      json_response(400, ["error" => "ValidationError", "message" => "receiptDate must be YYYY-MM-DD"]);
+    }
+    if ($quantitySheets <= 0) {
+      json_response(400, ["error" => "ValidationError", "message" => "quantitySheets must be > 0"]);
+    }
+    if ($costPerSheet !== null && $costPerSheet < 0) {
+      json_response(400, ["error" => "ValidationError", "message" => "costPerSheet must be >= 0"]);
+    }
+    if ($notes !== null && !is_string($notes)) {
+      json_response(400, ["error" => "ValidationError", "message" => "notes must be a string or null"]);
+    }
+
+    $actorUserId = (string)($authUser["id"] ?? "");
+    $receiptId = create_id("wsr");
+
+    try {
+      $pdo->beginTransaction();
+
+      $bal = phase1_workshop_sheet_balance_adjust($pdo, $quantitySheets, true);
+
+      $stmt = $pdo->prepare(
+        "INSERT INTO workshop_sheet_receipts (id, receipt_date, quantity_sheets, supplier, cost_per_sheet, notes, created_by_user_id) " .
+        "VALUES (:id, :receipt_date, :quantity_sheets, :supplier, :cost_per_sheet, :notes, :created_by_user_id)"
+      );
+      $stmt->execute([
+        ":id" => $receiptId,
+        ":receipt_date" => $receiptDate,
+        ":quantity_sheets" => $quantitySheets,
+        ":supplier" => is_string($supplier) && $supplier !== "" ? $supplier : null,
+        ":cost_per_sheet" => $costPerSheet,
+        ":notes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+        ":created_by_user_id" => $actorUserId !== "" ? $actorUserId : null,
+      ]);
+
+      $row = phase1_db_fetch_one(
+        $pdo,
+        "SELECT r.id, r.receipt_date, r.quantity_sheets, r.supplier, r.cost_per_sheet, r.notes, r.created_by_user_id, u.full_name AS created_by_full_name, r.created_at, r.updated_at " .
+        "FROM workshop_sheet_receipts r LEFT JOIN users u ON u.id = r.created_by_user_id WHERE r.id = :id LIMIT 1",
+        [":id" => $receiptId]
+      );
+
+      $public = $row ? [
+        "id" => (string)$row["id"],
+        "receiptDate" => (string)$row["receipt_date"],
+        "quantitySheets" => (int)$row["quantity_sheets"],
+        "supplier" => $row["supplier"] ?? null,
+        "costPerSheet" => $row["cost_per_sheet"] === null ? null : (int)$row["cost_per_sheet"],
+        "notes" => $row["notes"] ?? null,
+        "createdByUserId" => $row["created_by_user_id"] ?? null,
+        "createdByFullName" => $row["created_by_full_name"] ?? null,
+        "createdAt" => (string)$row["created_at"],
+        "updatedAt" => (string)$row["updated_at"],
+      ] : ["id" => $receiptId];
+
+      phase1_audit_log($pdo, $actorUserId !== "" ? $actorUserId : null, "CREATE", "workshop_sheet_receipt", $receiptId, null, [
+        "receipt" => $public,
+        "sheetBalance" => ["before" => (int)($bal["before"] ?? 0), "after" => (int)($bal["after"] ?? 0)],
+      ]);
+
+      $pdo->commit();
+      json_response(201, ["data" => ["receipt" => $public, "sheetBalance" => ["availableSheets" => (int)($bal["after"] ?? 0)]]]);
+    } catch (Throwable $error) {
+      if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+      }
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to record workshop sheet receipt"]);
+    }
+  }
+
+  if ($method === "GET" && $route === "workshop/stock") {
+    phase1_require_role($roleName, ["ADMIN", "MANAGER"]);
+    $rows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT w.product_id, p.sku_code, p.name AS product_name, p.product_type, p.board_size_code, p.yield_per_sheet, w.quantity, w.updated_at " .
+      "FROM workshop_inventory_levels w JOIN products p ON p.id = w.product_id " .
+      "ORDER BY p.name ASC",
+      []
+    );
+    $out = array_map(function ($row) {
+      return [
+        "productId" => (string)($row["product_id"] ?? ""),
+        "skuCode" => (string)($row["sku_code"] ?? ""),
+        "productName" => (string)($row["product_name"] ?? ""),
+        "productType" => (string)($row["product_type"] ?? ""),
+        "boardSizeCode" => $row["board_size_code"] === null ? null : (string)$row["board_size_code"],
+        "yieldPerSheet" => $row["yield_per_sheet"] === null ? null : (int)$row["yield_per_sheet"],
+        "quantity" => (int)($row["quantity"] ?? 0),
+        "updatedAt" => (string)($row["updated_at"] ?? ""),
+      ];
+    }, $rows);
+    json_response(200, ["data" => $out]);
+  }
+
+  if ($method === "GET" && $route === "workshop/batches") {
+    phase1_require_role($roleName, ["ADMIN", "MANAGER"]);
+
+    $range = phase1_resolve_date_range(
+      isset($_GET["dateFrom"]) && is_string($_GET["dateFrom"]) ? $_GET["dateFrom"] : null,
+      isset($_GET["dateTo"]) && is_string($_GET["dateTo"]) ? $_GET["dateTo"] : null,
+      30
+    );
+    $dateFrom = (string)$range["dateFrom"];
+    $dateTo = (string)$range["dateTo"];
+
+    $batchRows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT b.id, b.batch_date, b.total_sheets_used, b.notes, b.created_by_user_id, u.full_name AS created_by_full_name, b.created_at, b.updated_at " .
+      "FROM workshop_batches b " .
+      "LEFT JOIN users u ON u.id = b.created_by_user_id " .
+      "WHERE b.batch_date BETWEEN :date_from AND :date_to " .
+      "ORDER BY b.batch_date DESC, b.created_at DESC " .
+      "LIMIT 100",
+      [":date_from" => $dateFrom, ":date_to" => $dateTo]
+    );
+
+    $batches = [];
+    foreach ($batchRows as $row) {
+      if (!is_array($row)) {
+        continue;
+      }
+      $batchId = (string)($row["id"] ?? "");
+      if ($batchId === "") {
+        continue;
+      }
+      $lineRows = phase1_db_fetch_all(
+        $pdo,
+        "SELECT l.id, l.batch_id, l.sort_order, l.product_id, p.sku_code, p.name AS product_name, " .
+          "l.yield_per_sheet, l.sheets_used, l.expected_output, l.actual_good, l.actual_damaged, l.actual_waste, l.notes, l.created_at, l.updated_at " .
+        "FROM workshop_batch_lines l JOIN products p ON p.id = l.product_id " .
+        "WHERE l.batch_id = :batch_id ORDER BY l.sort_order ASC, l.created_at ASC",
+        [":batch_id" => $batchId]
+      );
+      $lines = array_map(function ($line) {
+        $expected = (int)($line["expected_output"] ?? 0);
+        $actualTotal = (int)($line["actual_good"] ?? 0) + (int)($line["actual_damaged"] ?? 0) + (int)($line["actual_waste"] ?? 0);
+        return [
+          "id" => (string)($line["id"] ?? ""),
+          "batchId" => (string)($line["batch_id"] ?? ""),
+          "sortOrder" => (int)($line["sort_order"] ?? 0),
+          "productId" => (string)($line["product_id"] ?? ""),
+          "skuCode" => (string)($line["sku_code"] ?? ""),
+          "productName" => (string)($line["product_name"] ?? ""),
+          "yieldPerSheet" => (int)($line["yield_per_sheet"] ?? 0),
+          "sheetsUsed" => (int)($line["sheets_used"] ?? 0),
+          "expectedOutput" => $expected,
+          "actualGood" => (int)($line["actual_good"] ?? 0),
+          "actualDamaged" => (int)($line["actual_damaged"] ?? 0),
+          "actualWaste" => (int)($line["actual_waste"] ?? 0),
+          "variance" => $actualTotal - $expected,
+          "notes" => $line["notes"] ?? null,
+          "createdAt" => (string)($line["created_at"] ?? ""),
+          "updatedAt" => (string)($line["updated_at"] ?? ""),
+        ];
+      }, $lineRows);
+
+      $batches[] = [
+        "id" => $batchId,
+        "batchDate" => (string)($row["batch_date"] ?? ""),
+        "totalSheetsUsed" => (int)($row["total_sheets_used"] ?? 0),
+        "notes" => $row["notes"] ?? null,
+        "createdByUserId" => $row["created_by_user_id"] ?? null,
+        "createdByFullName" => $row["created_by_full_name"] ?? null,
+        "createdAt" => (string)($row["created_at"] ?? ""),
+        "updatedAt" => (string)($row["updated_at"] ?? ""),
+        "lines" => $lines,
+      ];
+    }
+
+    json_response(200, ["data" => ["items" => $batches, "dateFrom" => $dateFrom, "dateTo" => $dateTo]]);
+  }
+
+  if ($method === "POST" && $route === "workshop/batches") {
+    phase1_require_role($roleName, ["ADMIN"]);
+    $body = read_json_body();
+
+    $batchDate = isset($body["batchDate"]) && is_string($body["batchDate"]) ? trim($body["batchDate"]) : "";
+    $notes = array_key_exists("notes", $body) ? $body["notes"] : null;
+    $linesPayload = array_key_exists("lines", $body) ? $body["lines"] : null;
+
+    if ($batchDate === "") {
+      $batchDate = phase1_business_today_ymd();
+    }
+    if (!is_valid_ymd_date($batchDate)) {
+      json_response(400, ["error" => "ValidationError", "message" => "batchDate must be YYYY-MM-DD"]);
+    }
+    if ($notes !== null && !is_string($notes)) {
+      json_response(400, ["error" => "ValidationError", "message" => "notes must be a string or null"]);
+    }
+    if (!is_array($linesPayload) || count($linesPayload) < 1) {
+      json_response(400, ["error" => "ValidationError", "message" => "lines (non-empty array) is required"]);
+    }
+
+    $materializedLines = [];
+    $totalSheetsUsed = 0;
+    foreach ($linesPayload as $idx => $rawLine) {
+      if (!is_array($rawLine)) {
+        json_response(400, ["error" => "ValidationError", "message" => "Each line must be an object"]);
+      }
+      $productId = isset($rawLine["productId"]) && is_string($rawLine["productId"]) ? trim($rawLine["productId"]) : "";
+      $sheetsUsed = isset($rawLine["sheetsUsed"]) ? (int)$rawLine["sheetsUsed"] : 0;
+      $actualGood = isset($rawLine["actualGood"]) ? (int)$rawLine["actualGood"] : 0;
+      $actualDamaged = isset($rawLine["actualDamaged"]) ? (int)$rawLine["actualDamaged"] : 0;
+      $actualWaste = isset($rawLine["actualWaste"]) ? (int)$rawLine["actualWaste"] : 0;
+      $lineNotes = array_key_exists("notes", $rawLine) ? $rawLine["notes"] : null;
+
+      if ($productId === "" || $sheetsUsed < 1) {
+        json_response(400, ["error" => "ValidationError", "message" => "Line requires productId and sheetsUsed (>=1)"]);
+      }
+      if ($actualGood < 0 || $actualDamaged < 0 || $actualWaste < 0) {
+        json_response(400, ["error" => "ValidationError", "message" => "Actual outputs must be >= 0"]);
+      }
+      if ($lineNotes !== null && !is_string($lineNotes)) {
+        json_response(400, ["error" => "ValidationError", "message" => "Line notes must be a string or null"]);
+      }
+
+      $productRow = phase1_db_fetch_one(
+        $pdo,
+        "SELECT id, sku_code, name, product_type, yield_per_sheet, is_active FROM products WHERE id = :id LIMIT 1",
+        [":id" => $productId]
+      );
+      if (!$productRow) {
+        json_response(400, ["error" => "ValidationError", "message" => "Invalid productId"]);
+      }
+      if ((int)($productRow["is_active"] ?? 0) !== 1) {
+        json_response(400, ["error" => "ValidationError", "message" => "Product is inactive"]);
+      }
+      if ((string)($productRow["product_type"] ?? "") !== "BOARD") {
+        json_response(400, ["error" => "ValidationError", "message" => "Workshop batches can only produce BOARD products"]);
+      }
+      $yieldPerSheet = (int)($productRow["yield_per_sheet"] ?? 0);
+      if ($yieldPerSheet < 1) {
+        json_response(400, ["error" => "ValidationError", "message" => "Board yieldPerSheet is not configured for this product"]);
+      }
+
+      $expectedOutput = $yieldPerSheet * $sheetsUsed;
+      if ($expectedOutput < 0 || $expectedOutput > 2000000000) {
+        json_response(400, ["error" => "ValidationError", "message" => "Expected output is too large"]);
+      }
+
+      $totalSheetsUsed += $sheetsUsed;
+      if ($totalSheetsUsed > 2000000000) {
+        json_response(400, ["error" => "ValidationError", "message" => "Total sheets used is too large"]);
+      }
+
+      $materializedLines[] = [
+        "sortOrder" => (int)$idx + 1,
+        "productId" => (string)$productRow["id"],
+        "skuCode" => (string)$productRow["sku_code"],
+        "productName" => (string)$productRow["name"],
+        "yieldPerSheet" => $yieldPerSheet,
+        "sheetsUsed" => $sheetsUsed,
+        "expectedOutput" => $expectedOutput,
+        "actualGood" => $actualGood,
+        "actualDamaged" => $actualDamaged,
+        "actualWaste" => $actualWaste,
+        "notes" => is_string($lineNotes) && trim($lineNotes) !== "" ? trim($lineNotes) : null,
+      ];
+    }
+
+    $actorUserId = (string)($authUser["id"] ?? "");
+    $batchId = create_id("wb");
+
+    try {
+      $pdo->beginTransaction();
+
+      $bal = phase1_workshop_sheet_balance_adjust($pdo, -$totalSheetsUsed, false);
+
+      $stmtBatch = $pdo->prepare(
+        "INSERT INTO workshop_batches (id, batch_date, total_sheets_used, notes, created_by_user_id) " .
+        "VALUES (:id, :batch_date, :total_sheets_used, :notes, :created_by_user_id)"
+      );
+      $stmtBatch->execute([
+        ":id" => $batchId,
+        ":batch_date" => $batchDate,
+        ":total_sheets_used" => $totalSheetsUsed,
+        ":notes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+        ":created_by_user_id" => $actorUserId !== "" ? $actorUserId : null,
+      ]);
+
+      $stmtLine = $pdo->prepare(
+        "INSERT INTO workshop_batch_lines (id, batch_id, sort_order, product_id, yield_per_sheet, sheets_used, expected_output, actual_good, actual_damaged, actual_waste, notes) " .
+        "VALUES (:id, :batch_id, :sort_order, :product_id, :yield_per_sheet, :sheets_used, :expected_output, :actual_good, :actual_damaged, :actual_waste, :notes)"
+      );
+
+      $inventoryAdjustments = [];
+      // Lock and adjust workshop inventory in deterministic order (sum good output by product).
+      $goodByProduct = [];
+      $metaByProduct = [];
+      foreach ($materializedLines as $line) {
+        $pid = isset($line["productId"]) && is_string($line["productId"]) ? $line["productId"] : "";
+        $good = isset($line["actualGood"]) ? (int)$line["actualGood"] : 0;
+        if ($pid === "" || $good <= 0) {
+          continue;
+        }
+        $goodByProduct[$pid] = isset($goodByProduct[$pid]) ? ((int)$goodByProduct[$pid] + $good) : $good;
+        if (!isset($metaByProduct[$pid])) {
+          $metaByProduct[$pid] = [
+            "skuCode" => isset($line["skuCode"]) ? (string)$line["skuCode"] : "",
+            "productName" => isset($line["productName"]) ? (string)$line["productName"] : "",
+          ];
+        }
+      }
+      $prodIds = array_keys($goodByProduct);
+      sort($prodIds, SORT_STRING);
+      foreach ($prodIds as $pid) {
+        $delta = (int)($goodByProduct[$pid] ?? 0);
+        if ($pid === "" || $delta <= 0) {
+          continue;
+        }
+        $adj = phase1_workshop_inventory_adjust($pdo, $pid, $delta, true);
+        $inventoryAdjustments[] = [
+          "productId" => $pid,
+          "skuCode" => isset($metaByProduct[$pid]) ? (string)($metaByProduct[$pid]["skuCode"] ?? "") : "",
+          "productName" => isset($metaByProduct[$pid]) ? (string)($metaByProduct[$pid]["productName"] ?? "") : "",
+          "delta" => $delta,
+          "beforeQty" => (int)($adj["before"] ?? 0),
+          "afterQty" => (int)($adj["after"] ?? 0),
+        ];
+      }
+
+      $publicLines = [];
+      foreach ($materializedLines as $line) {
+        $lineId = create_id("wbl");
+        $stmtLine->execute([
+          ":id" => $lineId,
+          ":batch_id" => $batchId,
+          ":sort_order" => (int)$line["sortOrder"],
+          ":product_id" => (string)$line["productId"],
+          ":yield_per_sheet" => (int)$line["yieldPerSheet"],
+          ":sheets_used" => (int)$line["sheetsUsed"],
+          ":expected_output" => (int)$line["expectedOutput"],
+          ":actual_good" => (int)$line["actualGood"],
+          ":actual_damaged" => (int)$line["actualDamaged"],
+          ":actual_waste" => (int)$line["actualWaste"],
+          ":notes" => $line["notes"] ?? null,
+        ]);
+
+        $expected = (int)$line["expectedOutput"];
+        $actualTotal = (int)$line["actualGood"] + (int)$line["actualDamaged"] + (int)$line["actualWaste"];
+        $publicLines[] = [
+          "id" => $lineId,
+          "batchId" => $batchId,
+          "sortOrder" => (int)$line["sortOrder"],
+          "productId" => (string)$line["productId"],
+          "skuCode" => (string)$line["skuCode"],
+          "productName" => (string)$line["productName"],
+          "yieldPerSheet" => (int)$line["yieldPerSheet"],
+          "sheetsUsed" => (int)$line["sheetsUsed"],
+          "expectedOutput" => $expected,
+          "actualGood" => (int)$line["actualGood"],
+          "actualDamaged" => (int)$line["actualDamaged"],
+          "actualWaste" => (int)$line["actualWaste"],
+          "variance" => $actualTotal - $expected,
+          "notes" => $line["notes"] ?? null,
+        ];
+      }
+
+      $publicBatch = [
+        "id" => $batchId,
+        "batchDate" => $batchDate,
+        "totalSheetsUsed" => $totalSheetsUsed,
+        "notes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+        "lines" => $publicLines,
+      ];
+
+      phase1_audit_log($pdo, $actorUserId !== "" ? $actorUserId : null, "CREATE", "workshop_batch", $batchId, null, [
+        "batch" => $publicBatch,
+        "sheetBalance" => ["before" => (int)($bal["before"] ?? 0), "after" => (int)($bal["after"] ?? 0)],
+        "workshopInventoryAdjustments" => $inventoryAdjustments,
+      ]);
+
+      $pdo->commit();
+      json_response(201, ["data" => [
+        "batch" => $publicBatch,
+        "sheetBalance" => ["availableSheets" => (int)($bal["after"] ?? 0)],
+      ]]);
+    } catch (Throwable $error) {
+      if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+      }
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to create workshop batch"]);
+    }
+  }
+
+  if ($method === "GET" && $route === "inventory/stock") {
+    phase1_require_role($roleName, ["ADMIN", "MANAGER", "SALES"]);
+
+    $requestedShopId = isset($_GET["shopId"]) && is_string($_GET["shopId"]) ? trim($_GET["shopId"]) : "";
+    $params = [];
+    $shopSql = phase1_shop_scope_sql($roleName, $assignments, $requestedShopId, "si.shop_id", $params);
+
+    $rows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT si.shop_id, sh.code AS shop_code, sh.name AS shop_name, si.product_id, p.sku_code, p.name AS product_name, " .
+        "p.product_type, p.board_size_code, p.yield_per_sheet, si.quantity, si.updated_at " .
+      "FROM shop_inventory_levels si " .
+      "JOIN shops sh ON sh.id = si.shop_id " .
+      "JOIN products p ON p.id = si.product_id " .
+      "WHERE 1=1" . $shopSql . " " .
+      "ORDER BY sh.name ASC, p.name ASC",
+      $params
+    );
+
+    $out = array_map(function ($row) {
+      return [
+        "shopId" => (string)($row["shop_id"] ?? ""),
+        "shopCode" => (string)($row["shop_code"] ?? ""),
+        "shopName" => (string)($row["shop_name"] ?? ""),
+        "productId" => (string)($row["product_id"] ?? ""),
+        "skuCode" => (string)($row["sku_code"] ?? ""),
+        "productName" => (string)($row["product_name"] ?? ""),
+        "productType" => (string)($row["product_type"] ?? ""),
+        "boardSizeCode" => $row["board_size_code"] === null ? null : (string)$row["board_size_code"],
+        "yieldPerSheet" => $row["yield_per_sheet"] === null ? null : (int)$row["yield_per_sheet"],
+        "quantity" => (int)($row["quantity"] ?? 0),
+        "updatedAt" => (string)($row["updated_at"] ?? ""),
+      ];
+    }, $rows);
+
+    json_response(200, ["data" => $out]);
+  }
+
+  if ($method === "POST" && $route === "inventory/receipts") {
+    phase1_require_role($roleName, ["ADMIN"]);
+    $body = read_json_body();
+
+    $shopId = isset($body["shopId"]) && is_string($body["shopId"]) ? trim($body["shopId"]) : "";
+    $productId = isset($body["productId"]) && is_string($body["productId"]) ? trim($body["productId"]) : "";
+    $receiptDate = isset($body["receiptDate"]) && is_string($body["receiptDate"]) ? trim($body["receiptDate"]) : "";
+    $quantity = isset($body["quantity"]) ? (int)$body["quantity"] : 0;
+    $notes = array_key_exists("notes", $body) ? $body["notes"] : null;
+
+    if ($shopId === "" || $productId === "" || $quantity <= 0) {
+      json_response(400, ["error" => "ValidationError", "message" => "shopId, productId, and quantity (>0) are required"]);
+    }
+    if ($receiptDate === "") {
+      $receiptDate = phase1_business_today_ymd();
+    }
+    if (!is_valid_ymd_date($receiptDate)) {
+      json_response(400, ["error" => "ValidationError", "message" => "receiptDate must be YYYY-MM-DD"]);
+    }
+    if ($notes !== null && !is_string($notes)) {
+      json_response(400, ["error" => "ValidationError", "message" => "notes must be a string or null"]);
+    }
+
+    $shopRow = phase1_db_fetch_one($pdo, "SELECT id, code, name FROM shops WHERE id = :id LIMIT 1", [":id" => $shopId]);
+    if (!$shopRow) {
+      json_response(400, ["error" => "ValidationError", "message" => "Invalid shopId"]);
+    }
+    $productRow = phase1_db_fetch_one(
+      $pdo,
+      "SELECT id, sku_code, name, is_active FROM products WHERE id = :id LIMIT 1",
+      [":id" => $productId]
+    );
+    if (!$productRow) {
+      json_response(400, ["error" => "ValidationError", "message" => "Invalid productId"]);
+    }
+    if ((int)($productRow["is_active"] ?? 0) !== 1) {
+      json_response(400, ["error" => "ValidationError", "message" => "Product is inactive"]);
+    }
+
+    $actorUserId = (string)($authUser["id"] ?? "");
+    $receiptId = create_id("sr");
+
+    try {
+      $pdo->beginTransaction();
+
+      $adj = phase1_shop_inventory_adjust($pdo, $shopId, $productId, $quantity, true, "");
+
+      $stmt = $pdo->prepare(
+        "INSERT INTO stock_receipts (id, shop_id, product_id, receipt_date, quantity, notes, recorded_by_user_id) " .
+        "VALUES (:id, :shop_id, :product_id, :receipt_date, :quantity, :notes, :recorded_by_user_id)"
+      );
+      $stmt->execute([
+        ":id" => $receiptId,
+        ":shop_id" => $shopId,
+        ":product_id" => $productId,
+        ":receipt_date" => $receiptDate,
+        ":quantity" => $quantity,
+        ":notes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+        ":recorded_by_user_id" => $actorUserId !== "" ? $actorUserId : null,
+      ]);
+
+      $public = [
+        "id" => $receiptId,
+        "shopId" => $shopId,
+        "shopCode" => (string)($shopRow["code"] ?? ""),
+        "shopName" => (string)($shopRow["name"] ?? ""),
+        "productId" => $productId,
+        "skuCode" => (string)($productRow["sku_code"] ?? ""),
+        "productName" => (string)($productRow["name"] ?? ""),
+        "receiptDate" => $receiptDate,
+        "quantity" => $quantity,
+        "notes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+        "recordedByUserId" => $actorUserId !== "" ? $actorUserId : null,
+        "inventoryAdjustment" => ["beforeQty" => (int)($adj["before"] ?? 0), "afterQty" => (int)($adj["after"] ?? 0), "delta" => $quantity],
+      ];
+
+      phase1_audit_log($pdo, $actorUserId !== "" ? $actorUserId : null, "CREATE", "stock_receipt", $receiptId, null, $public);
+
+      $pdo->commit();
+      json_response(201, ["data" => $public]);
+    } catch (Throwable $error) {
+      if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+      }
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to receive stock"]);
+    }
+  }
+
+  if ($method === "GET" && $route === "inventory/damages") {
+    phase1_require_role($roleName, ["ADMIN", "MANAGER", "SALES"]);
+
+    $requestedShopId = isset($_GET["shopId"]) && is_string($_GET["shopId"]) ? trim($_GET["shopId"]) : "";
+    $range = phase1_resolve_date_range(
+      isset($_GET["dateFrom"]) && is_string($_GET["dateFrom"]) ? $_GET["dateFrom"] : null,
+      isset($_GET["dateTo"]) && is_string($_GET["dateTo"]) ? $_GET["dateTo"] : null,
+      30
+    );
+    $dateFrom = (string)$range["dateFrom"];
+    $dateTo = (string)$range["dateTo"];
+
+    $params = [":date_from" => $dateFrom, ":date_to" => $dateTo];
+    $shopSql = phase1_shop_scope_sql($roleName, $assignments, $requestedShopId, "d.shop_id", $params);
+
+    $rows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT d.id, d.shop_id, sh.code AS shop_code, sh.name AS shop_name, d.product_id, p.sku_code, p.name AS product_name, " .
+        "d.damage_date, d.quantity, d.reason, d.notes, d.recorded_by_user_id, u.full_name AS recorded_by_full_name, d.created_at, d.updated_at " .
+      "FROM shop_damage_events d " .
+      "JOIN shops sh ON sh.id = d.shop_id " .
+      "JOIN products p ON p.id = d.product_id " .
+      "LEFT JOIN users u ON u.id = d.recorded_by_user_id " .
+      "WHERE d.damage_date BETWEEN :date_from AND :date_to" . $shopSql . " " .
+      "ORDER BY d.damage_date DESC, d.created_at DESC " .
+      "LIMIT 300",
+      $params
+    );
+
+    $out = array_map(function ($row) {
+      return [
+        "id" => (string)($row["id"] ?? ""),
+        "shopId" => (string)($row["shop_id"] ?? ""),
+        "shopCode" => (string)($row["shop_code"] ?? ""),
+        "shopName" => (string)($row["shop_name"] ?? ""),
+        "productId" => (string)($row["product_id"] ?? ""),
+        "skuCode" => (string)($row["sku_code"] ?? ""),
+        "productName" => (string)($row["product_name"] ?? ""),
+        "damageDate" => (string)($row["damage_date"] ?? ""),
+        "quantity" => (int)($row["quantity"] ?? 0),
+        "reason" => $row["reason"] ?? null,
+        "notes" => $row["notes"] ?? null,
+        "recordedByUserId" => $row["recorded_by_user_id"] ?? null,
+        "recordedByFullName" => $row["recorded_by_full_name"] ?? null,
+        "createdAt" => (string)($row["created_at"] ?? ""),
+        "updatedAt" => (string)($row["updated_at"] ?? ""),
+      ];
+    }, $rows);
+
+    json_response(200, ["data" => ["items" => $out, "dateFrom" => $dateFrom, "dateTo" => $dateTo]]);
+  }
+
+  if ($method === "POST" && $route === "inventory/damages") {
+    phase1_require_role($roleName, ["ADMIN", "SALES"]);
+    $body = read_json_body();
+
+    $shopId = isset($body["shopId"]) && is_string($body["shopId"]) ? trim($body["shopId"]) : "";
+    $productId = isset($body["productId"]) && is_string($body["productId"]) ? trim($body["productId"]) : "";
+    $damageDate = isset($body["damageDate"]) && is_string($body["damageDate"]) ? trim($body["damageDate"]) : "";
+    $quantity = isset($body["quantity"]) ? (int)$body["quantity"] : 0;
+    $reason = array_key_exists("reason", $body) && is_string($body["reason"]) ? trim($body["reason"]) : null;
+    $notes = array_key_exists("notes", $body) ? $body["notes"] : null;
+    $allowNegativeStock = $roleName === "ADMIN" && array_key_exists("allowNegativeStock", $body) ? (bool)$body["allowNegativeStock"] : false;
+
+    if ($roleName !== "ADMIN") {
+      $shopId = phase1_primary_shop_id($assignments);
+      if ($shopId === "") {
+        json_response(400, ["error" => "ValidationError", "message" => "Sales user is not assigned to a shop"]);
+      }
+    }
+    if ($shopId === "" || $productId === "" || $quantity <= 0) {
+      json_response(400, ["error" => "ValidationError", "message" => "shopId, productId, and quantity (>0) are required"]);
+    }
+    if ($damageDate === "") {
+      $damageDate = phase1_business_today_ymd();
+    }
+    if (!is_valid_ymd_date($damageDate)) {
+      json_response(400, ["error" => "ValidationError", "message" => "damageDate must be YYYY-MM-DD"]);
+    }
+    if ($notes !== null && !is_string($notes)) {
+      json_response(400, ["error" => "ValidationError", "message" => "notes must be a string or null"]);
+    }
+
+    phase1_require_shop_access($roleName, $assignments, $shopId);
+
+    $shopRow = phase1_db_fetch_one($pdo, "SELECT id, code, name FROM shops WHERE id = :id LIMIT 1", [":id" => $shopId]);
+    if (!$shopRow) {
+      json_response(400, ["error" => "ValidationError", "message" => "Invalid shopId"]);
+    }
+    $productRow = phase1_db_fetch_one(
+      $pdo,
+      "SELECT id, sku_code, name, is_active FROM products WHERE id = :id LIMIT 1",
+      [":id" => $productId]
+    );
+    if (!$productRow) {
+      json_response(400, ["error" => "ValidationError", "message" => "Invalid productId"]);
+    }
+    if ((int)($productRow["is_active"] ?? 0) !== 1) {
+      json_response(400, ["error" => "ValidationError", "message" => "Product is inactive"]);
+    }
+
+    $actorUserId = (string)($authUser["id"] ?? "");
+    $damageId = create_id("dmg");
+
+    try {
+      $pdo->beginTransaction();
+
+      $prefix = "Insufficient stock for SKU " . (string)($productRow["sku_code"] ?? $productId);
+      $adj = phase1_shop_inventory_adjust($pdo, $shopId, $productId, -$quantity, $allowNegativeStock, $prefix);
+
+      $stmt = $pdo->prepare(
+        "INSERT INTO shop_damage_events (id, shop_id, product_id, damage_date, quantity, reason, notes, recorded_by_user_id) " .
+        "VALUES (:id, :shop_id, :product_id, :damage_date, :quantity, :reason, :notes, :recorded_by_user_id)"
+      );
+      $stmt->execute([
+        ":id" => $damageId,
+        ":shop_id" => $shopId,
+        ":product_id" => $productId,
+        ":damage_date" => $damageDate,
+        ":quantity" => $quantity,
+        ":reason" => is_string($reason) && $reason !== "" ? $reason : null,
+        ":notes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+        ":recorded_by_user_id" => $actorUserId !== "" ? $actorUserId : null,
+      ]);
+
+      $public = [
+        "id" => $damageId,
+        "shopId" => $shopId,
+        "shopCode" => (string)($shopRow["code"] ?? ""),
+        "shopName" => (string)($shopRow["name"] ?? ""),
+        "productId" => $productId,
+        "skuCode" => (string)($productRow["sku_code"] ?? ""),
+        "productName" => (string)($productRow["name"] ?? ""),
+        "damageDate" => $damageDate,
+        "quantity" => $quantity,
+        "reason" => is_string($reason) && $reason !== "" ? $reason : null,
+        "notes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+        "recordedByUserId" => $actorUserId !== "" ? $actorUserId : null,
+        "inventoryAdjustment" => ["beforeQty" => (int)($adj["before"] ?? 0), "afterQty" => (int)($adj["after"] ?? 0), "delta" => -$quantity],
+      ];
+
+      phase1_audit_log($pdo, $actorUserId !== "" ? $actorUserId : null, "CREATE", "shop_damage_event", $damageId, null, $public);
+
+      $pdo->commit();
+      json_response(201, ["data" => $public]);
+    } catch (Throwable $error) {
+      if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+      }
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to record damage"]);
+    }
+  }
+
+  if ($method === "GET" && $route === "inventory/transfers") {
+    phase1_require_role($roleName, ["ADMIN", "MANAGER", "SALES"]);
+
+    $requestedShopId = isset($_GET["shopId"]) && is_string($_GET["shopId"]) ? trim($_GET["shopId"]) : "";
+    $status = isset($_GET["status"]) && is_string($_GET["status"]) ? strtoupper(trim($_GET["status"])) : "";
+    if ($status !== "" && !in_array($status, ["DRAFT", "SHIPPED", "RECEIVED"], true)) {
+      json_response(400, ["error" => "ValidationError", "message" => "status must be DRAFT, SHIPPED, or RECEIVED"]);
+    }
+
+    $params = [];
+    $shopSql = phase1_shop_scope_sql($roleName, $assignments, $requestedShopId, "t.to_shop_id", $params);
+    $where = ["1=1" . $shopSql];
+    if ($status !== "") {
+      $where[] = "t.status = :status";
+      $params[":status"] = $status;
+    }
+
+    $transferRows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT t.id, t.to_shop_id, sh.code AS shop_code, sh.name AS shop_name, t.status, t.notes, t.receive_notes, " .
+        "t.created_by_user_id, cu.full_name AS created_by_full_name, " .
+        "t.shipped_at, t.shipped_by_user_id, su.full_name AS shipped_by_full_name, " .
+        "t.received_at, t.received_by_user_id, ru.full_name AS received_by_full_name, " .
+        "t.created_at, t.updated_at " .
+      "FROM inventory_transfers t " .
+      "JOIN shops sh ON sh.id = t.to_shop_id " .
+      "LEFT JOIN users cu ON cu.id = t.created_by_user_id " .
+      "LEFT JOIN users su ON su.id = t.shipped_by_user_id " .
+      "LEFT JOIN users ru ON ru.id = t.received_by_user_id " .
+      "WHERE " . implode(" AND ", $where) . " " .
+      "ORDER BY t.created_at DESC " .
+      "LIMIT 200",
+      $params
+    );
+
+    $items = [];
+    foreach ($transferRows as $row) {
+      if (!is_array($row)) {
+        continue;
+      }
+      $transferId = (string)($row["id"] ?? "");
+      if ($transferId === "") {
+        continue;
+      }
+      $lineRows = phase1_db_fetch_all(
+        $pdo,
+        "SELECT id, transfer_id, sort_order, product_id, sku_code, product_name, quantity_shipped, quantity_damaged, created_at, updated_at " .
+        "FROM inventory_transfer_lines WHERE transfer_id = :transfer_id ORDER BY sort_order ASC, created_at ASC",
+        [":transfer_id" => $transferId]
+      );
+      $lines = array_map(function ($line) {
+        $shipped = (int)($line["quantity_shipped"] ?? 0);
+        $damaged = (int)($line["quantity_damaged"] ?? 0);
+        if ($damaged < 0) {
+          $damaged = 0;
+        }
+        if ($damaged > $shipped) {
+          $damaged = $shipped;
+        }
+        return [
+          "id" => (string)($line["id"] ?? ""),
+          "transferId" => (string)($line["transfer_id"] ?? ""),
+          "sortOrder" => (int)($line["sort_order"] ?? 0),
+          "productId" => (string)($line["product_id"] ?? ""),
+          "skuCode" => (string)($line["sku_code"] ?? ""),
+          "productName" => (string)($line["product_name"] ?? ""),
+          "quantityShipped" => $shipped,
+          "quantityDamaged" => $damaged,
+          "quantityReceivedGood" => $shipped - $damaged,
+          "createdAt" => (string)($line["created_at"] ?? ""),
+          "updatedAt" => (string)($line["updated_at"] ?? ""),
+        ];
+      }, $lineRows);
+
+      $items[] = [
+        "id" => $transferId,
+        "toShopId" => (string)($row["to_shop_id"] ?? ""),
+        "toShopCode" => (string)($row["shop_code"] ?? ""),
+        "toShopName" => (string)($row["shop_name"] ?? ""),
+        "status" => (string)($row["status"] ?? ""),
+        "notes" => $row["notes"] ?? null,
+        "receiveNotes" => $row["receive_notes"] ?? null,
+        "createdByUserId" => $row["created_by_user_id"] ?? null,
+        "createdByFullName" => $row["created_by_full_name"] ?? null,
+        "shippedAt" => $row["shipped_at"] ?? null,
+        "shippedByUserId" => $row["shipped_by_user_id"] ?? null,
+        "shippedByFullName" => $row["shipped_by_full_name"] ?? null,
+        "receivedAt" => $row["received_at"] ?? null,
+        "receivedByUserId" => $row["received_by_user_id"] ?? null,
+        "receivedByFullName" => $row["received_by_full_name"] ?? null,
+        "createdAt" => (string)($row["created_at"] ?? ""),
+        "updatedAt" => (string)($row["updated_at"] ?? ""),
+        "lines" => $lines,
+      ];
+    }
+
+    json_response(200, ["data" => $items]);
+  }
+
+  if ($method === "POST" && $route === "inventory/transfers") {
+    phase1_require_role($roleName, ["ADMIN"]);
+    $body = read_json_body();
+
+    $toShopId = isset($body["toShopId"]) && is_string($body["toShopId"]) ? trim($body["toShopId"]) : "";
+    $notes = array_key_exists("notes", $body) ? $body["notes"] : null;
+    $linesPayload = array_key_exists("lines", $body) ? $body["lines"] : null;
+
+    if ($toShopId === "") {
+      json_response(400, ["error" => "ValidationError", "message" => "toShopId is required"]);
+    }
+    if ($notes !== null && !is_string($notes)) {
+      json_response(400, ["error" => "ValidationError", "message" => "notes must be a string or null"]);
+    }
+    if (!is_array($linesPayload) || count($linesPayload) < 1) {
+      json_response(400, ["error" => "ValidationError", "message" => "lines (non-empty array) is required"]);
+    }
+
+    $shopRow = phase1_db_fetch_one($pdo, "SELECT id, code, name FROM shops WHERE id = :id LIMIT 1", [":id" => $toShopId]);
+    if (!$shopRow) {
+      json_response(400, ["error" => "ValidationError", "message" => "Invalid toShopId"]);
+    }
+
+    $materializedLines = [];
+    foreach ($linesPayload as $idx => $rawLine) {
+      if (!is_array($rawLine)) {
+        json_response(400, ["error" => "ValidationError", "message" => "Each line must be an object"]);
+      }
+      $productId = isset($rawLine["productId"]) && is_string($rawLine["productId"]) ? trim($rawLine["productId"]) : "";
+      $quantity = isset($rawLine["quantity"]) ? (int)$rawLine["quantity"] : 0;
+      if ($productId === "" || $quantity <= 0) {
+        json_response(400, ["error" => "ValidationError", "message" => "Line requires productId and quantity (>0)"]);
+      }
+
+      $productRow = phase1_db_fetch_one(
+        $pdo,
+        "SELECT id, sku_code, name, product_type, is_active FROM products WHERE id = :id LIMIT 1",
+        [":id" => $productId]
+      );
+      if (!$productRow) {
+        json_response(400, ["error" => "ValidationError", "message" => "Invalid productId"]);
+      }
+      if ((int)($productRow["is_active"] ?? 0) !== 1) {
+        json_response(400, ["error" => "ValidationError", "message" => "Product is inactive"]);
+      }
+      if ((string)($productRow["product_type"] ?? "") !== "BOARD") {
+        json_response(400, ["error" => "ValidationError", "message" => "Transfers from workshop can only include BOARD products"]);
+      }
+
+      $materializedLines[] = [
+        "sortOrder" => (int)$idx + 1,
+        "productId" => (string)$productRow["id"],
+        "skuCode" => (string)$productRow["sku_code"],
+        "productName" => (string)$productRow["name"],
+        "quantityShipped" => $quantity,
+      ];
+    }
+
+    $actorUserId = (string)($authUser["id"] ?? "");
+    $transferId = create_id("tr");
+
+    try {
+      $pdo->beginTransaction();
+
+      $stmt = $pdo->prepare(
+        "INSERT INTO inventory_transfers (id, to_shop_id, status, notes, created_by_user_id) " .
+        "VALUES (:id, :to_shop_id, 'DRAFT', :notes, :created_by_user_id)"
+      );
+      $stmt->execute([
+        ":id" => $transferId,
+        ":to_shop_id" => $toShopId,
+        ":notes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+        ":created_by_user_id" => $actorUserId !== "" ? $actorUserId : null,
+      ]);
+
+      $stmtLine = $pdo->prepare(
+        "INSERT INTO inventory_transfer_lines (id, transfer_id, sort_order, product_id, sku_code, product_name, quantity_shipped, quantity_damaged) " .
+        "VALUES (:id, :transfer_id, :sort_order, :product_id, :sku_code, :product_name, :quantity_shipped, 0)"
+      );
+      $publicLines = [];
+      foreach ($materializedLines as $line) {
+        $lineId = create_id("trl");
+        $stmtLine->execute([
+          ":id" => $lineId,
+          ":transfer_id" => $transferId,
+          ":sort_order" => (int)$line["sortOrder"],
+          ":product_id" => (string)$line["productId"],
+          ":sku_code" => (string)$line["skuCode"],
+          ":product_name" => (string)$line["productName"],
+          ":quantity_shipped" => (int)$line["quantityShipped"],
+        ]);
+        $publicLines[] = [
+          "id" => $lineId,
+          "transferId" => $transferId,
+          "sortOrder" => (int)$line["sortOrder"],
+          "productId" => (string)$line["productId"],
+          "skuCode" => (string)$line["skuCode"],
+          "productName" => (string)$line["productName"],
+          "quantityShipped" => (int)$line["quantityShipped"],
+          "quantityDamaged" => 0,
+          "quantityReceivedGood" => (int)$line["quantityShipped"],
+        ];
+      }
+
+      $public = [
+        "id" => $transferId,
+        "toShopId" => $toShopId,
+        "toShopCode" => (string)($shopRow["code"] ?? ""),
+        "toShopName" => (string)($shopRow["name"] ?? ""),
+        "status" => "DRAFT",
+        "notes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+        "createdByUserId" => $actorUserId !== "" ? $actorUserId : null,
+        "lines" => $publicLines,
+      ];
+
+      phase1_audit_log($pdo, $actorUserId !== "" ? $actorUserId : null, "CREATE", "inventory_transfer", $transferId, null, $public);
+
+      $pdo->commit();
+      json_response(201, ["data" => $public]);
+    } catch (Throwable $error) {
+      if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+      }
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to create transfer"]);
+    }
+  }
+
+  if ($method === "PATCH" && preg_match('/^inventory\\/transfers\\/([^\\/]+)\\/ship$/', $route, $matches) === 1) {
+    phase1_require_role($roleName, ["ADMIN"]);
+    $transferId = (string)$matches[1];
+    $body = read_json_body();
+    $allowNegativeStock = array_key_exists("allowNegativeStock", $body) ? (bool)$body["allowNegativeStock"] : false;
+
+    $actorUserId = (string)($authUser["id"] ?? "");
+
+    try {
+      $pdo->beginTransaction();
+
+      $existing = phase1_db_fetch_one(
+        $pdo,
+        "SELECT id, to_shop_id, status, notes, created_by_user_id, shipped_at, shipped_by_user_id, received_at, received_by_user_id, receive_notes, created_at, updated_at " .
+        "FROM inventory_transfers WHERE id = :id FOR UPDATE",
+        [":id" => $transferId]
+      );
+      if (!$existing) {
+        $pdo->rollBack();
+        json_response(404, ["error" => "HttpError", "message" => "Transfer not found"]);
+      }
+      if ((string)($existing["status"] ?? "") !== "DRAFT") {
+        $pdo->rollBack();
+        json_response(400, ["error" => "BadRequest", "message" => "Only DRAFT transfers can be shipped"]);
+      }
+
+      $lineRows = phase1_db_fetch_all(
+        $pdo,
+        "SELECT id, transfer_id, sort_order, product_id, sku_code, product_name, quantity_shipped, quantity_damaged " .
+        "FROM inventory_transfer_lines WHERE transfer_id = :transfer_id ORDER BY sort_order ASC, created_at ASC FOR UPDATE",
+        [":transfer_id" => $transferId]
+      );
+      if (count($lineRows) < 1) {
+        $pdo->rollBack();
+        json_response(400, ["error" => "BadRequest", "message" => "Transfer has no lines"]);
+      }
+
+      $qtyByProduct = [];
+      $metaByProduct = [];
+      foreach ($lineRows as $row) {
+        if (!is_array($row)) {
+          continue;
+        }
+        $pid = (string)($row["product_id"] ?? "");
+        $qty = (int)($row["quantity_shipped"] ?? 0);
+        if ($pid === "" || $qty <= 0) {
+          continue;
+        }
+        $qtyByProduct[$pid] = isset($qtyByProduct[$pid]) ? ((int)$qtyByProduct[$pid] + $qty) : $qty;
+        $metaByProduct[$pid] = [
+          "skuCode" => (string)($row["sku_code"] ?? ""),
+          "productName" => (string)($row["product_name"] ?? ""),
+        ];
+      }
+      $productIds = array_keys($qtyByProduct);
+      sort($productIds, SORT_STRING);
+      $inventoryAdjustments = [];
+      foreach ($productIds as $pid) {
+        $qty = (int)($qtyByProduct[$pid] ?? 0);
+        if ($qty <= 0) {
+          continue;
+        }
+        $skuCode = isset($metaByProduct[$pid]) ? (string)($metaByProduct[$pid]["skuCode"] ?? "") : "";
+        $prefix = $skuCode !== "" ? ("Insufficient workshop stock for SKU " . $skuCode) : ("Insufficient workshop stock for product " . $pid);
+        $adj = phase1_workshop_inventory_adjust($pdo, $pid, -$qty, $allowNegativeStock);
+        $inventoryAdjustments[] = [
+          "productId" => $pid,
+          "skuCode" => $skuCode !== "" ? $skuCode : null,
+          "productName" => isset($metaByProduct[$pid]) ? (string)($metaByProduct[$pid]["productName"] ?? "") : null,
+          "delta" => -$qty,
+          "beforeQty" => (int)($adj["before"] ?? 0),
+          "afterQty" => (int)($adj["after"] ?? 0),
+        ];
+      }
+
+      phase1_db_execute(
+        $pdo,
+        "UPDATE inventory_transfers SET status = 'SHIPPED', shipped_at = NOW(), shipped_by_user_id = :actor, updated_at = NOW() WHERE id = :id",
+        [":actor" => $actorUserId !== "" ? $actorUserId : null, ":id" => $transferId]
+      );
+
+      $pdo->commit();
+      phase1_audit_log($pdo, $actorUserId !== "" ? $actorUserId : null, "UPDATE", "inventory_transfer", $transferId, null, [
+        "id" => $transferId,
+        "status" => "SHIPPED",
+        "workshopInventoryAdjustments" => $inventoryAdjustments,
+      ]);
+      json_response(200, ["data" => ["id" => $transferId, "status" => "SHIPPED"]]);
+    } catch (Throwable $error) {
+      if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+      }
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to ship transfer"]);
+    }
+  }
+
+  if ($method === "PATCH" && preg_match('/^inventory\\/transfers\\/([^\\/]+)\\/receive$/', $route, $matches) === 1) {
+    phase1_require_role($roleName, ["ADMIN", "SALES"]);
+    $transferId = (string)$matches[1];
+    $body = read_json_body();
+
+    $linesPayload = array_key_exists("lines", $body) ? $body["lines"] : null;
+    $receiveNotes = array_key_exists("receiveNotes", $body) ? $body["receiveNotes"] : null;
+    if ($receiveNotes !== null && !is_string($receiveNotes)) {
+      json_response(400, ["error" => "ValidationError", "message" => "receiveNotes must be a string or null"]);
+    }
+    if ($linesPayload !== null && !is_array($linesPayload)) {
+      json_response(400, ["error" => "ValidationError", "message" => "lines must be an array when provided"]);
+    }
+
+    $actorUserId = (string)($authUser["id"] ?? "");
+
+    try {
+      $pdo->beginTransaction();
+
+      $existing = phase1_db_fetch_one(
+        $pdo,
+        "SELECT id, to_shop_id, status, notes, created_by_user_id, shipped_at, shipped_by_user_id, received_at, received_by_user_id, receive_notes, created_at, updated_at " .
+        "FROM inventory_transfers WHERE id = :id FOR UPDATE",
+        [":id" => $transferId]
+      );
+      if (!$existing) {
+        $pdo->rollBack();
+        json_response(404, ["error" => "HttpError", "message" => "Transfer not found"]);
+      }
+      if ((string)($existing["status"] ?? "") !== "SHIPPED") {
+        $pdo->rollBack();
+        json_response(400, ["error" => "BadRequest", "message" => "Only SHIPPED transfers can be received"]);
+      }
+
+      $toShopId = (string)($existing["to_shop_id"] ?? "");
+      phase1_require_shop_access($roleName, $assignments, $toShopId);
+
+      $shopRow = phase1_db_fetch_one($pdo, "SELECT id, code, name FROM shops WHERE id = :id LIMIT 1", [":id" => $toShopId]);
+      if (!$shopRow) {
+        $pdo->rollBack();
+        json_response(400, ["error" => "ValidationError", "message" => "Invalid destination shop"]);
+      }
+
+      $lineRows = phase1_db_fetch_all(
+        $pdo,
+        "SELECT id, transfer_id, sort_order, product_id, sku_code, product_name, quantity_shipped, quantity_damaged " .
+        "FROM inventory_transfer_lines WHERE transfer_id = :transfer_id ORDER BY sort_order ASC, created_at ASC FOR UPDATE",
+        [":transfer_id" => $transferId]
+      );
+      if (count($lineRows) < 1) {
+        $pdo->rollBack();
+        json_response(400, ["error" => "BadRequest", "message" => "Transfer has no lines"]);
+      }
+
+      $damagedByLineId = [];
+      if (is_array($linesPayload)) {
+        foreach ($linesPayload as $raw) {
+          if (!is_array($raw)) {
+            $pdo->rollBack();
+            json_response(400, ["error" => "ValidationError", "message" => "Each line decision must be an object"]);
+          }
+          $lineId = isset($raw["lineId"]) && is_string($raw["lineId"]) ? trim($raw["lineId"]) : "";
+          $damaged = isset($raw["quantityDamaged"]) ? (int)$raw["quantityDamaged"] : 0;
+          if ($lineId === "" || $damaged < 0) {
+            $pdo->rollBack();
+            json_response(400, ["error" => "ValidationError", "message" => "Each decision requires lineId and quantityDamaged (>=0)"]);
+          }
+          $damagedByLineId[$lineId] = $damaged;
+        }
+      }
+
+      // Apply line damages and update shop inventory.
+      $inventoryAdjustments = [];
+      $productQtyToAdd = [];
+      $productMeta = [];
+      foreach ($lineRows as $row) {
+        if (!is_array($row)) {
+          continue;
+        }
+        $lineId = (string)($row["id"] ?? "");
+        $pid = (string)($row["product_id"] ?? "");
+        $shipped = (int)($row["quantity_shipped"] ?? 0);
+        $damaged = isset($damagedByLineId[$lineId]) ? (int)$damagedByLineId[$lineId] : 0;
+        if ($damaged > $shipped) {
+          $pdo->rollBack();
+          json_response(400, ["error" => "ValidationError", "message" => "Damaged quantity cannot exceed shipped quantity"]);
+        }
+        $good = $shipped - $damaged;
+
+        phase1_db_execute(
+          $pdo,
+          "UPDATE inventory_transfer_lines SET quantity_damaged = :quantity_damaged, updated_at = NOW() WHERE id = :id",
+          [":quantity_damaged" => $damaged, ":id" => $lineId]
+        );
+
+        if ($pid !== "" && $good > 0) {
+          $productQtyToAdd[$pid] = isset($productQtyToAdd[$pid]) ? ((int)$productQtyToAdd[$pid] + $good) : $good;
+          $productMeta[$pid] = [
+            "skuCode" => (string)($row["sku_code"] ?? ""),
+            "productName" => (string)($row["product_name"] ?? ""),
+          ];
+        }
+      }
+
+      $productIds = array_keys($productQtyToAdd);
+      sort($productIds, SORT_STRING);
+      foreach ($productIds as $pid) {
+        $good = (int)($productQtyToAdd[$pid] ?? 0);
+        if ($good <= 0) {
+          continue;
+        }
+        $adj = phase1_shop_inventory_adjust($pdo, $toShopId, $pid, $good, true, "");
+        $inventoryAdjustments[] = [
+          "shopId" => $toShopId,
+          "productId" => $pid,
+          "skuCode" => isset($productMeta[$pid]) ? (string)($productMeta[$pid]["skuCode"] ?? "") : null,
+          "productName" => isset($productMeta[$pid]) ? (string)($productMeta[$pid]["productName"] ?? "") : null,
+          "delta" => $good,
+          "beforeQty" => (int)($adj["before"] ?? 0),
+          "afterQty" => (int)($adj["after"] ?? 0),
+        ];
+      }
+
+      phase1_db_execute(
+        $pdo,
+        "UPDATE inventory_transfers SET status = 'RECEIVED', received_at = NOW(), received_by_user_id = :actor, receive_notes = :receive_notes, updated_at = NOW() WHERE id = :id",
+        [
+          ":actor" => $actorUserId !== "" ? $actorUserId : null,
+          ":receive_notes" => is_string($receiveNotes) && trim($receiveNotes) !== "" ? trim($receiveNotes) : null,
+          ":id" => $transferId,
+        ]
+      );
+
+      $pdo->commit();
+      phase1_audit_log($pdo, $actorUserId !== "" ? $actorUserId : null, "UPDATE", "inventory_transfer", $transferId, null, [
+        "id" => $transferId,
+        "status" => "RECEIVED",
+        "toShopId" => $toShopId,
+        "toShopCode" => (string)($shopRow["code"] ?? ""),
+        "toShopName" => (string)($shopRow["name"] ?? ""),
+        "inventoryAdjustments" => $inventoryAdjustments,
+      ]);
+
+      json_response(200, ["data" => ["id" => $transferId, "status" => "RECEIVED"]]);
+    } catch (Throwable $error) {
+      if ($pdo->inTransaction()) {
+        $pdo->rollBack();
+      }
+      json_response(500, ["error" => "InternalServerError", "message" => "Failed to receive transfer"]);
+    }
   }
 
   if ($method === "GET" && $route === "customers") {
@@ -3608,6 +4932,7 @@ function phase1_handle(string $method, string $route): void {
     $customerId = isset($body["customerId"]) && is_string($body["customerId"]) ? trim($body["customerId"]) : "";
     $notes = array_key_exists("notes", $body) ? $body["notes"] : null;
     $linesPayload = array_key_exists("lines", $body) ? $body["lines"] : null;
+    $allowNegativeStock = $roleName === "ADMIN" && array_key_exists("allowNegativeStock", $body) ? (bool)$body["allowNegativeStock"] : false;
 
     if (!in_array($paymentMethod, ["CASH", "MOBILE_MONEY", "CARD", "CREDIT"], true)) {
       json_response(400, ["error" => "ValidationError", "message" => "paymentMethod must be CASH, MOBILE_MONEY, CARD, or CREDIT"]);
@@ -3732,6 +5057,7 @@ function phase1_handle(string $method, string $route): void {
     $invoiceNumber = null;
     $invoicePublic = null;
     $invoiceLinesPublic = [];
+    $inventoryAdjustments = [];
 
     try {
       $pdo->beginTransaction();
@@ -3841,9 +5167,47 @@ function phase1_handle(string $method, string $route): void {
         ]);
       }
 
+      // Deduct inventory for this sale (once), blocking negative stock unless admin override is set.
+      $qtyByProduct = [];
+      $metaByProduct = [];
+      foreach ($materializedLines as $line) {
+        $pid = isset($line["productId"]) && is_string($line["productId"]) ? $line["productId"] : "";
+        $qty = isset($line["quantity"]) ? (int)$line["quantity"] : 0;
+        if ($pid === "" || $qty <= 0) {
+          continue;
+        }
+        $qtyByProduct[$pid] = isset($qtyByProduct[$pid]) ? ((int)$qtyByProduct[$pid] + $qty) : $qty;
+        $metaByProduct[$pid] = [
+          "skuCode" => isset($line["skuCode"]) ? (string)$line["skuCode"] : "",
+          "productName" => isset($line["productName"]) ? (string)$line["productName"] : "",
+        ];
+      }
+
+      $productIds = array_keys($qtyByProduct);
+      sort($productIds, SORT_STRING);
+      foreach ($productIds as $pid) {
+        $requiredQty = (int)($qtyByProduct[$pid] ?? 0);
+        if ($requiredQty <= 0) {
+          continue;
+        }
+        $skuCode = isset($metaByProduct[$pid]) ? (string)($metaByProduct[$pid]["skuCode"] ?? "") : "";
+        $productName = isset($metaByProduct[$pid]) ? (string)($metaByProduct[$pid]["productName"] ?? "") : "";
+        $prefix = $skuCode !== "" ? ("Insufficient stock for SKU " . $skuCode) : ("Insufficient stock for product " . $pid);
+        $adj = phase1_shop_inventory_adjust($pdo, $shopId, $pid, -$requiredQty, $allowNegativeStock, $prefix);
+        $inventoryAdjustments[] = [
+          "shopId" => $shopId,
+          "productId" => $pid,
+          "skuCode" => $skuCode !== "" ? $skuCode : null,
+          "productName" => $productName !== "" ? $productName : null,
+          "delta" => -$requiredQty,
+          "beforeQty" => (int)($adj["before"] ?? 0),
+          "afterQty" => (int)($adj["after"] ?? 0),
+        ];
+      }
+
       $stmtSale = $pdo->prepare(
-        "INSERT INTO sales (id, shop_id, user_id, customer_id, invoice_id, sale_date, payment_method, total_amount, notes) " .
-        "VALUES (:id, :shop_id, :user_id, :customer_id, :invoice_id, :sale_date, :payment_method, :total_amount, :notes)"
+        "INSERT INTO sales (id, shop_id, user_id, customer_id, invoice_id, sale_date, payment_method, total_amount, inventory_posted, notes) " .
+        "VALUES (:id, :shop_id, :user_id, :customer_id, :invoice_id, :sale_date, :payment_method, :total_amount, :inventory_posted, :notes)"
       );
       $stmtSale->execute([
         ":id" => $saleId,
@@ -3854,6 +5218,7 @@ function phase1_handle(string $method, string $route): void {
         ":sale_date" => $saleDate,
         ":payment_method" => $paymentMethod,
         ":total_amount" => $totalAmount,
+        ":inventory_posted" => 1,
         ":notes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
       ]);
 
@@ -3901,6 +5266,7 @@ function phase1_handle(string $method, string $route): void {
         "paymentMethod" => $paymentMethod,
         "totalAmount" => $totalAmount,
         "notes" => is_string($notes) && trim($notes) !== "" ? trim($notes) : null,
+        "inventoryAdjustments" => $inventoryAdjustments,
       ];
 
       phase1_audit_log($pdo, $actorUserId !== "" ? $actorUserId : null, "CREATE", "sale", $saleId, null, [
@@ -3991,6 +5357,7 @@ function phase1_handle(string $method, string $route): void {
 
     $notes = array_key_exists("notes", $body) ? $body["notes"] : null;
     $linesPayload = array_key_exists("lines", $body) ? $body["lines"] : null;
+    $allowNegativeStock = $roleName === "ADMIN" && array_key_exists("allowNegativeStock", $body) ? (bool)$body["allowNegativeStock"] : false;
 
     if ($notes !== null && !is_string($notes)) {
       json_response(400, ["error" => "ValidationError", "message" => "notes must be a string or null"]);
@@ -4010,7 +5377,7 @@ function phase1_handle(string $method, string $route): void {
 
       $existing = phase1_db_fetch_one(
         $pdo,
-        "SELECT id, shop_id, user_id, invoice_id, payment_method, sale_date, total_amount, notes, is_void, created_at, updated_at " .
+        "SELECT id, shop_id, user_id, invoice_id, payment_method, sale_date, total_amount, inventory_posted, notes, is_void, created_at, updated_at " .
         "FROM sales WHERE id = :id FOR UPDATE",
         [":id" => $saleId]
       );
@@ -4047,6 +5414,12 @@ function phase1_handle(string $method, string $route): void {
       if ($linesPayload !== null && ($paymentMethod === "CREDIT" || $invoiceId !== "")) {
         $pdo->rollBack();
         json_response(400, ["error" => "BadRequest", "message" => "Credit sales cannot edit line items (manage via invoices)"]);
+      }
+
+      $inventoryPosted = (int)($existing["inventory_posted"] ?? 0) === 1;
+      if ($linesPayload !== null && !$inventoryPosted) {
+        $pdo->rollBack();
+        json_response(400, ["error" => "BadRequest", "message" => "Cannot edit line items for sales recorded before inventory tracking"]);
       }
 
       $beforeLinesRows = phase1_db_fetch_all(
@@ -4088,6 +5461,7 @@ function phase1_handle(string $method, string $route): void {
 
       $newTotalAmount = (int)$existing["total_amount"];
       $newNotesValue = $notes !== null ? (is_string($notes) && trim($notes) !== "" ? trim($notes) : null) : ($existing["notes"] ?? null);
+      $inventoryAdjustments = [];
 
       if ($linesPayload !== null) {
         $materializedLines = [];
@@ -4151,6 +5525,65 @@ function phase1_handle(string $method, string $route): void {
         if ($newTotalAmount <= 0) {
           $pdo->rollBack();
           json_response(400, ["error" => "ValidationError", "message" => "Sale total must be > 0"]);
+        }
+
+        if ($inventoryPosted) {
+          $oldQtyByProduct = [];
+          $oldMetaByProduct = [];
+          foreach ($beforeLinesRows as $row) {
+            if (!is_array($row)) {
+              continue;
+            }
+            $pid = isset($row["product_id"]) && is_string($row["product_id"]) ? (string)$row["product_id"] : "";
+            $qty = isset($row["quantity"]) ? (int)$row["quantity"] : 0;
+            if ($pid === "" || $qty <= 0) {
+              continue;
+            }
+            $oldQtyByProduct[$pid] = isset($oldQtyByProduct[$pid]) ? ((int)$oldQtyByProduct[$pid] + $qty) : $qty;
+            $oldMetaByProduct[$pid] = [
+              "skuCode" => isset($row["sku_code"]) ? (string)$row["sku_code"] : "",
+              "productName" => isset($row["product_name"]) ? (string)$row["product_name"] : "",
+            ];
+          }
+
+          $newQtyByProduct = [];
+          $newMetaByProduct = [];
+          foreach ($materializedLines as $line) {
+            $pid = isset($line["productId"]) && is_string($line["productId"]) ? $line["productId"] : "";
+            $qty = isset($line["quantity"]) ? (int)$line["quantity"] : 0;
+            if ($pid === "" || $qty <= 0) {
+              continue;
+            }
+            $newQtyByProduct[$pid] = isset($newQtyByProduct[$pid]) ? ((int)$newQtyByProduct[$pid] + $qty) : $qty;
+            $newMetaByProduct[$pid] = [
+              "skuCode" => isset($line["skuCode"]) ? (string)$line["skuCode"] : "",
+              "productName" => isset($line["productName"]) ? (string)$line["productName"] : "",
+            ];
+          }
+
+          $productIds = array_values(array_unique(array_merge(array_keys($oldQtyByProduct), array_keys($newQtyByProduct))));
+          sort($productIds, SORT_STRING);
+          foreach ($productIds as $pid) {
+            $oldQty = (int)($oldQtyByProduct[$pid] ?? 0);
+            $newQty = (int)($newQtyByProduct[$pid] ?? 0);
+            $delta = $oldQty - $newQty; // + => restock, - => consume more
+            if ($delta === 0) {
+              continue;
+            }
+            $skuCode = isset($newMetaByProduct[$pid]) ? (string)($newMetaByProduct[$pid]["skuCode"] ?? "") : (isset($oldMetaByProduct[$pid]) ? (string)($oldMetaByProduct[$pid]["skuCode"] ?? "") : "");
+            $productName = isset($newMetaByProduct[$pid]) ? (string)($newMetaByProduct[$pid]["productName"] ?? "") : (isset($oldMetaByProduct[$pid]) ? (string)($oldMetaByProduct[$pid]["productName"] ?? "") : "");
+            $prefix = $skuCode !== "" ? ("Insufficient stock for SKU " . $skuCode) : ("Insufficient stock for product " . $pid);
+            $adj = phase1_shop_inventory_adjust($pdo, $shopId, $pid, $delta, $allowNegativeStock, $prefix);
+            $inventoryAdjustments[] = [
+              "shopId" => $shopId,
+              "productId" => $pid,
+              "skuCode" => $skuCode !== "" ? $skuCode : null,
+              "productName" => $productName !== "" ? $productName : null,
+              "delta" => $delta,
+              "beforeQty" => (int)($adj["before"] ?? 0),
+              "afterQty" => (int)($adj["after"] ?? 0),
+            ];
+          }
         }
 
         phase1_db_execute($pdo, "DELETE FROM sale_lines WHERE sale_id = :sale_id", [":sale_id" => $saleId]);
@@ -4251,6 +5684,7 @@ function phase1_handle(string $method, string $route): void {
       ], [
         "sale" => $afterSale,
         "lines" => $afterLines,
+        "inventoryAdjustments" => $inventoryAdjustments,
       ]);
 
       $pdo->commit();
@@ -4276,7 +5710,7 @@ function phase1_handle(string $method, string $route): void {
 
       $existing = phase1_db_fetch_one(
         $pdo,
-        "SELECT id, shop_id, user_id, invoice_id, payment_method, sale_date, total_amount, notes, is_void, created_at, updated_at " .
+        "SELECT id, shop_id, user_id, invoice_id, payment_method, sale_date, total_amount, inventory_posted, notes, is_void, created_at, updated_at " .
         "FROM sales WHERE id = :id FOR UPDATE",
         [":id" => $saleId]
       );
@@ -4295,6 +5729,8 @@ function phase1_handle(string $method, string $route): void {
 
       $paymentMethod = (string)($existing["payment_method"] ?? "");
       $invoiceId = $existing["invoice_id"] === null ? "" : (string)$existing["invoice_id"];
+      $inventoryPosted = (int)($existing["inventory_posted"] ?? 0) === 1;
+      $inventoryAdjustments = [];
 
       if ($roleName === "SALES") {
         if ((string)($existing["user_id"] ?? "") !== $actorUserId) {
@@ -4382,6 +5818,46 @@ function phase1_handle(string $method, string $route): void {
         }
       }
 
+      if ($inventoryPosted) {
+        $qtyByProduct = [];
+        $metaByProduct = [];
+        foreach ($beforeLinesRows as $row) {
+          if (!is_array($row)) {
+            continue;
+          }
+          $pid = isset($row["product_id"]) && is_string($row["product_id"]) ? (string)$row["product_id"] : "";
+          $qty = isset($row["quantity"]) ? (int)$row["quantity"] : 0;
+          if ($pid === "" || $qty <= 0) {
+            continue;
+          }
+          $qtyByProduct[$pid] = isset($qtyByProduct[$pid]) ? ((int)$qtyByProduct[$pid] + $qty) : $qty;
+          $metaByProduct[$pid] = [
+            "skuCode" => isset($row["sku_code"]) ? (string)$row["sku_code"] : "",
+            "productName" => isset($row["product_name"]) ? (string)$row["product_name"] : "",
+          ];
+        }
+        $productIds = array_keys($qtyByProduct);
+        sort($productIds, SORT_STRING);
+        foreach ($productIds as $pid) {
+          $qty = (int)($qtyByProduct[$pid] ?? 0);
+          if ($qty <= 0) {
+            continue;
+          }
+          $skuCode = isset($metaByProduct[$pid]) ? (string)($metaByProduct[$pid]["skuCode"] ?? "") : "";
+          $productName = isset($metaByProduct[$pid]) ? (string)($metaByProduct[$pid]["productName"] ?? "") : "";
+          $adj = phase1_shop_inventory_adjust($pdo, $shopId, $pid, $qty, true, "");
+          $inventoryAdjustments[] = [
+            "shopId" => $shopId,
+            "productId" => $pid,
+            "skuCode" => $skuCode !== "" ? $skuCode : null,
+            "productName" => $productName !== "" ? $productName : null,
+            "delta" => $qty,
+            "beforeQty" => (int)($adj["before"] ?? 0),
+            "afterQty" => (int)($adj["after"] ?? 0),
+          ];
+        }
+      }
+
       $updatedRow = phase1_db_fetch_one(
         $pdo,
         "SELECT id, shop_id, user_id, invoice_id, payment_method, sale_date, total_amount, notes, is_void, voided_at, voided_by_user_id, created_at, updated_at " .
@@ -4411,6 +5887,7 @@ function phase1_handle(string $method, string $route): void {
       ], [
         "sale" => $afterSale,
         "lines" => $beforeLines,
+        "inventoryAdjustments" => $inventoryAdjustments,
       ]);
 
       $pdo->commit();
