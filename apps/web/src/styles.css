@@ -354,6 +354,10 @@ th {
   color: var(--muted);
 }
 
+.right {
+  text-align: right;
+}
+
 .tabs {
   display: flex;
   flex-wrap: wrap;

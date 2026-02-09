@@ -1205,7 +1205,7 @@ function phase9_enqueue_message(PDO $pdo, array $params): array {
 function phase1_handle(string $method, string $route): void {
   $pdo = mysql_pdo();
 
-  if ($method === "GET" && $route === "health") {
+  if (($method === "GET" || $method === "HEAD") && $route === "health") {
     json_response(200, ["status" => "ok", "service" => "bdk-api", "timestamp" => now_iso(), "mode" => "phase1"]);
   }
 
@@ -8453,6 +8453,452 @@ function phase1_handle(string $method, string $route): void {
       $pdfLines[] = (string)($r[0] ?? "") . (isset($r[1]) && (string)$r[1] !== "" ? (": " . (string)$r[1]) : "");
     }
     file_response("application/pdf", $baseName . ".pdf", pdf_build("P&L Report " . $dateFrom . " to " . $dateTo, $pdfLines));
+  }
+
+  if ($method === "GET" && $route === "reports/capital") {
+    // SRD v1.1: Business capital = total cash at hand + cash in bank + inventory value.
+    // Inventory valuation is v1-simplified:
+    // - NON_BOARD: qty * product.cost_price (last known cost)
+    // - BOARD: if workshop sheet cost exists (as of date), derive unit cost = sheetCost / yield_per_sheet
+    phase1_require_role($roleName, ["ADMIN"]);
+
+    $requestedShopId = isset($_GET["shopId"]) && is_string($_GET["shopId"]) ? trim($_GET["shopId"]) : "";
+    $asOf = isset($_GET["asOf"]) && is_string($_GET["asOf"]) ? trim($_GET["asOf"]) : "";
+    if ($asOf === "") {
+      $asOf = phase1_business_today_ymd();
+    }
+    if (!is_valid_ymd_date($asOf)) {
+      json_response(400, ["error" => "ValidationError", "message" => "asOf must be YYYY-MM-DD"]);
+    }
+
+    $format = isset($_GET["format"]) && is_string($_GET["format"]) ? strtolower(trim($_GET["format"])) : "";
+    if ($format !== "" && !in_array($format, ["csv", "xlsx", "pdf"], true)) {
+      json_response(400, ["error" => "ValidationError", "message" => "format must be csv, xlsx, or pdf"]);
+    }
+
+    $shopCode = null;
+    $shopName = null;
+    if ($requestedShopId !== "") {
+      $shopRow = phase1_db_fetch_one(
+        $pdo,
+        "SELECT id, code, name FROM shops WHERE id = :id LIMIT 1",
+        [":id" => $requestedShopId]
+      );
+      if (!$shopRow) {
+        json_response(400, ["error" => "ValidationError", "message" => "Invalid shopId"]);
+      }
+      $shopCode = (string)($shopRow["code"] ?? "");
+      $shopName = (string)($shopRow["name"] ?? "");
+    }
+
+    $warnings = [];
+
+    // Cash at hand (derived) as of date.
+    $userWhere = ["u.is_active = 1"];
+    $userParams = [];
+    if ($requestedShopId !== "") {
+      $userWhere[] = "EXISTS (" .
+        "SELECT 1 FROM user_shop_assignment a " .
+        "WHERE a.user_id = u.id AND a.unassigned_at IS NULL AND a.is_primary = 1 AND a.shop_id = :shop_id" .
+      ")";
+      $userParams[":shop_id"] = $requestedShopId;
+    }
+    $userRows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT u.id FROM users u WHERE " . implode(" AND ", $userWhere),
+      $userParams
+    );
+
+    $totalCashAtHand = 0;
+    foreach ($userRows as $row) {
+      if (!is_array($row)) {
+        continue;
+      }
+      $userId = (string)($row["id"] ?? "");
+      if ($userId === "") {
+        continue;
+      }
+      $summary = phase1_cash_summary_as_of($pdo, $userId, $asOf);
+      $totalCashAtHand += (int)($summary["cashAtHand"] ?? 0);
+    }
+
+    // Cash in bank (derived) as of date.
+    $bankParams = [":as_of" => $asOf];
+    $bankShopSql = "";
+    if ($requestedShopId !== "") {
+      $bankShopSql = " AND shop_id = :shop_id";
+      $bankParams[":shop_id"] = $requestedShopId;
+    }
+
+    $bankedRow = phase1_db_fetch_one(
+      $pdo,
+      "SELECT COALESCE(SUM(amount_ugx), 0) AS total " .
+      "FROM banking_requests WHERE status = 'APPROVED' AND decided_at IS NOT NULL AND DATE(decided_at) <= :as_of" . $bankShopSql,
+      $bankParams
+    );
+    $bankedApproved = $bankedRow ? (int)($bankedRow["total"] ?? 0) : 0;
+
+    $bankExpenseRow = phase1_db_fetch_one(
+      $pdo,
+      "SELECT COALESCE(SUM(amount_ugx), 0) AS total " .
+      "FROM expenses WHERE is_void = 0 AND payment_source = 'ADMIN_BANK' AND expense_date <= :as_of" . $bankShopSql,
+      $bankParams
+    );
+    $adminBankExpenses = $bankExpenseRow ? (int)($bankExpenseRow["total"] ?? 0) : 0;
+
+    $cashInBank = $bankedApproved - $adminBankExpenses;
+    if ($cashInBank < 0) {
+      $warnings[] = "Bank cash is negative as of " . $asOf . " (banked: " . $bankedApproved . ", admin/bank expenses: " . $adminBankExpenses . ").";
+    }
+
+    // Inventory valuation inputs.
+    $sheetCostRow = phase1_db_fetch_one(
+      $pdo,
+      "SELECT cost_per_sheet " .
+      "FROM workshop_sheet_receipts " .
+      "WHERE cost_per_sheet IS NOT NULL AND receipt_date <= :as_of " .
+      "ORDER BY receipt_date DESC, created_at DESC " .
+      "LIMIT 1",
+      [":as_of" => $asOf]
+    );
+    $sheetCostPerFullSheet = $sheetCostRow ? (int)($sheetCostRow["cost_per_sheet"] ?? 0) : null;
+
+    if ($sheetCostPerFullSheet === null) {
+      $warnings[] = "No workshop sheet cost found on/before " . $asOf . ". Board inventory value will be treated as 0.";
+    } elseif ($sheetCostPerFullSheet <= 0) {
+      $warnings[] = "Latest workshop sheet cost on/before " . $asOf . " is not positive. Board inventory value will be treated as 0.";
+      $sheetCostPerFullSheet = null;
+    }
+
+    $products = phase1_db_fetch_all(
+      $pdo,
+      "SELECT id, sku_code, name, product_type, yield_per_sheet, cost_price " .
+      "FROM products ORDER BY name ASC",
+      []
+    );
+
+    $asOfParams = [":as_of" => $asOf];
+    if ($requestedShopId !== "") {
+      $asOfParams[":shop_id"] = $requestedShopId;
+    }
+
+    $mapFromRows = function (array $rows): array {
+      $map = [];
+      foreach ($rows as $row) {
+        if (!is_array($row)) {
+          continue;
+        }
+        $productId = (string)($row["product_id"] ?? "");
+        if ($productId === "") {
+          continue;
+        }
+        $map[$productId] = (int)($row["qty"] ?? 0);
+      }
+      return $map;
+    };
+
+    // Shop stock as-of = receipts + received transfers - posted sales - damages.
+    $receiptRows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT product_id, COALESCE(SUM(quantity), 0) AS qty " .
+      "FROM stock_receipts " .
+      "WHERE receipt_date <= :as_of" . ($requestedShopId !== "" ? " AND shop_id = :shop_id" : "") . " " .
+      "GROUP BY product_id",
+      $asOfParams
+    );
+    $receiptsByProduct = $mapFromRows($receiptRows);
+
+    $receivedTransferRows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT l.product_id, COALESCE(SUM(l.quantity_shipped - l.quantity_damaged), 0) AS qty " .
+      "FROM inventory_transfers t " .
+      "JOIN inventory_transfer_lines l ON l.transfer_id = t.id " .
+      "WHERE t.status = 'RECEIVED' AND t.received_at IS NOT NULL AND DATE(t.received_at) <= :as_of" .
+        ($requestedShopId !== "" ? " AND t.to_shop_id = :shop_id" : "") . " " .
+      "GROUP BY l.product_id",
+      $asOfParams
+    );
+    $receivedTransfersByProduct = $mapFromRows($receivedTransferRows);
+
+    $salesRows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT l.product_id, COALESCE(SUM(l.quantity), 0) AS qty " .
+      "FROM sales s " .
+      "JOIN sale_lines l ON l.sale_id = s.id " .
+      "WHERE s.inventory_posted = 1 " .
+        "AND s.sale_date <= :as_of " .
+        "AND (s.is_void = 0 OR (s.is_void = 1 AND s.voided_at IS NOT NULL AND DATE(s.voided_at) > :as_of))" .
+        ($requestedShopId !== "" ? " AND s.shop_id = :shop_id" : "") . " " .
+      "GROUP BY l.product_id",
+      $asOfParams
+    );
+    $salesByProduct = $mapFromRows($salesRows);
+
+    $damageRows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT product_id, COALESCE(SUM(quantity), 0) AS qty " .
+      "FROM shop_damage_events " .
+      "WHERE damage_date <= :as_of" . ($requestedShopId !== "" ? " AND shop_id = :shop_id" : "") . " " .
+      "GROUP BY product_id",
+      $asOfParams
+    );
+    $damagesByProduct = $mapFromRows($damageRows);
+
+    // In-transit to shop (shipped but not yet received as of date).
+    $transitRows = phase1_db_fetch_all(
+      $pdo,
+      "SELECT l.product_id, COALESCE(SUM(l.quantity_shipped), 0) AS qty " .
+      "FROM inventory_transfers t " .
+      "JOIN inventory_transfer_lines l ON l.transfer_id = t.id " .
+      "WHERE t.status = 'SHIPPED' AND t.shipped_at IS NOT NULL AND DATE(t.shipped_at) <= :as_of " .
+        "AND (t.received_at IS NULL OR DATE(t.received_at) > :as_of)" .
+        ($requestedShopId !== "" ? " AND t.to_shop_id = :shop_id" : "") . " " .
+      "GROUP BY l.product_id",
+      $asOfParams
+    );
+    $transitByProduct = $mapFromRows($transitRows);
+
+    $workshopByProduct = [];
+    if ($requestedShopId === "") {
+      $productionRows = phase1_db_fetch_all(
+        $pdo,
+        "SELECT l.product_id, COALESCE(SUM(l.actual_good), 0) AS qty " .
+        "FROM workshop_batches b " .
+        "JOIN workshop_batch_lines l ON l.batch_id = b.id " .
+        "WHERE b.batch_date <= :as_of " .
+        "GROUP BY l.product_id",
+        [":as_of" => $asOf]
+      );
+      $producedByProduct = $mapFromRows($productionRows);
+
+      $shippedRows = phase1_db_fetch_all(
+        $pdo,
+        "SELECT l.product_id, COALESCE(SUM(l.quantity_shipped), 0) AS qty " .
+        "FROM inventory_transfers t " .
+        "JOIN inventory_transfer_lines l ON l.transfer_id = t.id " .
+        "WHERE t.status IN ('SHIPPED', 'RECEIVED') AND t.shipped_at IS NOT NULL AND DATE(t.shipped_at) <= :as_of " .
+        "GROUP BY l.product_id",
+        [":as_of" => $asOf]
+      );
+      $shippedByProduct = $mapFromRows($shippedRows);
+
+      foreach ($producedByProduct as $productId => $qty) {
+        $shippedQty = isset($shippedByProduct[$productId]) ? (int)$shippedByProduct[$productId] : 0;
+        $workshopByProduct[$productId] = $qty - $shippedQty;
+      }
+      // Include products that only appear in shipped map (negative / zero after).
+      foreach ($shippedByProduct as $productId => $qty) {
+        if (!isset($workshopByProduct[$productId])) {
+          $workshopByProduct[$productId] = 0 - (int)$qty;
+        }
+      }
+    }
+
+    $inventoryItems = [];
+    $totalInventoryValue = 0;
+
+    foreach ($products as $p) {
+      if (!is_array($p)) {
+        continue;
+      }
+      $productId = (string)($p["id"] ?? "");
+      if ($productId === "") {
+        continue;
+      }
+
+      $shopQty = (int)($receiptsByProduct[$productId] ?? 0)
+        + (int)($receivedTransfersByProduct[$productId] ?? 0)
+        - (int)($salesByProduct[$productId] ?? 0)
+        - (int)($damagesByProduct[$productId] ?? 0);
+
+      $transitQty = (int)($transitByProduct[$productId] ?? 0);
+      $workshopQty = $requestedShopId === "" ? (int)($workshopByProduct[$productId] ?? 0) : 0;
+
+      // Capital snapshot should never be negative; clamp to 0 and warn.
+      if ($shopQty < 0) {
+        $warnings[] = "Computed negative shop stock for product " . ((string)($p["sku_code"] ?? $productId)) . " as of " . $asOf . ". Treated as 0.";
+        $shopQty = 0;
+      }
+      if ($workshopQty < 0) {
+        $warnings[] = "Computed negative workshop stock for product " . ((string)($p["sku_code"] ?? $productId)) . " as of " . $asOf . ". Treated as 0.";
+        $workshopQty = 0;
+      }
+      if ($transitQty < 0) {
+        $warnings[] = "Computed negative in-transit stock for product " . ((string)($p["sku_code"] ?? $productId)) . " as of " . $asOf . ". Treated as 0.";
+        $transitQty = 0;
+      }
+
+      $totalQty = $shopQty + $transitQty + $workshopQty;
+      if ($totalQty === 0) {
+        continue;
+      }
+
+      $skuCode = (string)($p["sku_code"] ?? "");
+      $name = (string)($p["name"] ?? "");
+      $type = (string)($p["product_type"] ?? "");
+
+      $unitCost = null;
+      $costSource = "";
+
+      if ($type === "NON_BOARD") {
+        $cost = $p["cost_price"] ?? null;
+        if ($cost === null) {
+          $unitCost = null;
+          $costSource = "missing_cost_price";
+          $warnings[] = "Non-board SKU " . ($skuCode !== "" ? $skuCode : $productId) . " has no cost price configured. Value treated as 0.";
+        } else {
+          $unitCost = (int)$cost;
+          $costSource = "product_cost_price";
+          if ($unitCost < 0) {
+            $warnings[] = "Non-board SKU " . ($skuCode !== "" ? $skuCode : $productId) . " has a negative cost price. Value treated as 0.";
+            $unitCost = null;
+            $costSource = "invalid_cost_price";
+          }
+        }
+      } elseif ($type === "BOARD") {
+        $yieldPerSheet = isset($p["yield_per_sheet"]) ? (int)$p["yield_per_sheet"] : 0;
+        if ($yieldPerSheet <= 0) {
+          $unitCost = null;
+          $costSource = "missing_yield_per_sheet";
+          $warnings[] = "Board SKU " . ($skuCode !== "" ? $skuCode : $productId) . " has no yield_per_sheet configured. Value treated as 0.";
+        } elseif ($sheetCostPerFullSheet === null) {
+          $unitCost = null;
+          $costSource = "missing_sheet_cost";
+        } else {
+          $unitCost = (int)round($sheetCostPerFullSheet / $yieldPerSheet);
+          $costSource = "sheet_cost/" . (string)$yieldPerSheet;
+        }
+      } else {
+        $unitCost = null;
+        $costSource = "unknown_product_type";
+        $warnings[] = "Unknown product type for SKU " . ($skuCode !== "" ? $skuCode : $productId) . ". Value treated as 0.";
+      }
+
+      $value = ($unitCost !== null && $unitCost > 0) ? ($totalQty * $unitCost) : 0;
+      $totalInventoryValue += $value;
+
+      $inventoryItems[] = [
+        "productId" => $productId,
+        "skuCode" => $skuCode,
+        "name" => $name,
+        "productType" => $type,
+        "shopQty" => $shopQty,
+        "workshopQty" => $workshopQty,
+        "transitQty" => $transitQty,
+        "quantity" => $totalQty,
+        "unitCostUGX" => $unitCost,
+        "valueUGX" => $value,
+        "costSource" => $costSource,
+      ];
+    }
+
+    usort($inventoryItems, function ($a, $b) {
+      $av = is_array($a) ? (int)($a["valueUGX"] ?? 0) : 0;
+      $bv = is_array($b) ? (int)($b["valueUGX"] ?? 0) : 0;
+      return $bv <=> $av;
+    });
+
+    $businessCapital = $totalCashAtHand + $cashInBank + $totalInventoryValue;
+
+    $payload = [
+      "asOf" => $asOf,
+      "shopId" => $requestedShopId !== "" ? $requestedShopId : null,
+      "shopCode" => $requestedShopId !== "" ? $shopCode : null,
+      "shopName" => $requestedShopId !== "" ? $shopName : null,
+      "sheetCostPerFullSheet" => $sheetCostPerFullSheet,
+      "bank" => [
+        "bankedApproved" => $bankedApproved,
+        "adminBankExpenses" => $adminBankExpenses,
+        "cashInBank" => $cashInBank,
+      ],
+      "totals" => [
+        "cashAtHand" => $totalCashAtHand,
+        "cashInBank" => $cashInBank,
+        "inventoryValue" => $totalInventoryValue,
+        "businessCapital" => $businessCapital,
+      ],
+      "inventory" => $inventoryItems,
+      "warnings" => $warnings,
+    ];
+
+    if ($format === "") {
+      json_response(200, ["data" => $payload]);
+    }
+
+    $shopSuffix = $requestedShopId !== "" ? ("_" . ($shopCode ? $shopCode : $requestedShopId)) : "_all_shops";
+    $baseName = safe_filename("bdk_capital_report_asof_" . $asOf . $shopSuffix);
+
+    $exportRows = [];
+    $exportRows[] = ["As of", $asOf];
+    $exportRows[] = ["Shop", $requestedShopId !== "" ? (($shopCode ?: $requestedShopId) . ($shopName ? (" - " . $shopName) : "")) : "ALL"];
+    $exportRows[] = ["Total cash at hand (UGX)", $totalCashAtHand];
+    $exportRows[] = ["Cash in bank (UGX)", $cashInBank];
+    $exportRows[] = ["Inventory value (UGX)", $totalInventoryValue];
+    $exportRows[] = ["Business capital (UGX)", $businessCapital];
+    $exportRows[] = ["", ""];
+    if (!empty($warnings)) {
+      $exportRows[] = ["Warnings", ""];
+      foreach ($warnings as $w) {
+        $exportRows[] = ["- " . (string)$w, ""];
+      }
+      $exportRows[] = ["", ""];
+    }
+    $exportRows[] = ["SKU", "Product", "Type", "Qty", "Unit cost (UGX)", "Value (UGX)", "Cost source"];
+    foreach ($inventoryItems as $item) {
+      if (!is_array($item)) {
+        continue;
+      }
+      $exportRows[] = [
+        (string)($item["skuCode"] ?? ""),
+        (string)($item["name"] ?? ""),
+        (string)($item["productType"] ?? ""),
+        (int)($item["quantity"] ?? 0),
+        $item["unitCostUGX"] === null ? "" : (int)$item["unitCostUGX"],
+        (int)($item["valueUGX"] ?? 0),
+        (string)($item["costSource"] ?? ""),
+      ];
+    }
+    $exportRows[] = ["TOTAL", "", "", "", "", $totalInventoryValue, ""];
+
+    if ($format === "csv") {
+      file_response("text/csv; charset=utf-8", $baseName . ".csv", csv_bytes($exportRows));
+    }
+    if ($format === "xlsx") {
+      file_response("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", $baseName . ".xlsx", xlsx_bytes("Capital Report", $exportRows));
+    }
+
+    $pdfLines = [];
+    $pdfLines[] = "As of: " . $asOf;
+    $pdfLines[] = "Shop: " . ($requestedShopId !== "" ? (($shopCode ?: $requestedShopId) . ($shopName ? (" - " . $shopName) : "")) : "ALL");
+    $pdfLines[] = "Total cash at hand: " . (string)$totalCashAtHand;
+    $pdfLines[] = "Cash in bank: " . (string)$cashInBank;
+    $pdfLines[] = "Inventory value: " . (string)$totalInventoryValue;
+    $pdfLines[] = "Business capital: " . (string)$businessCapital;
+    $pdfLines[] = "";
+    if (!empty($warnings)) {
+      $pdfLines[] = "Warnings:";
+      foreach ($warnings as $w) {
+        $pdfLines[] = "- " . (string)$w;
+      }
+      $pdfLines[] = "";
+    }
+    $tableRows = [];
+    foreach ($inventoryItems as $item) {
+      if (!is_array($item)) {
+        continue;
+      }
+      $tableRows[] = [
+        (string)($item["skuCode"] ?? ""),
+        (string)($item["name"] ?? ""),
+        (string)($item["productType"] ?? ""),
+        (int)($item["quantity"] ?? 0),
+        $item["unitCostUGX"] === null ? "" : (int)$item["unitCostUGX"],
+        (int)($item["valueUGX"] ?? 0),
+      ];
+    }
+    $tableLines = text_table_lines(["SKU", "Product", "Type", "Qty", "Unit", "Value"], $tableRows, [3, 4, 5]);
+    $pdfLines = array_merge($pdfLines, $tableLines);
+    file_response("application/pdf", $baseName . ".pdf", pdf_build("Business Capital Report", $pdfLines));
   }
 
   json_response(404, ["error" => "NotFound", "message" => "Route not found"]);

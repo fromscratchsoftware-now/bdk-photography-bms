@@ -26,6 +26,7 @@ bdk-photography-bms/
 - Expenses with payment source logic
 - Cash tracking (derived cash-at-hand, transfers approvals, banking approvals, in-app notifications)
 - Reports + exports (CSV/XLSX/PDF)
+- Business capital report (cash at hand + cash in bank + inventory valuation)
 - Workshop + inventory lifecycle:
   - full sheet receiving, batches (yield/waste), workshop stock
   - transfers workshop → shop (Draft → Shipped → Received)
@@ -116,6 +117,13 @@ npm run dev
 - Expenses:
   - `GET /api/expenses`
   - `POST /api/expenses`
+- Reports:
+  - `GET /api/reports/sales`
+  - `GET /api/reports/invoices`
+  - `GET /api/reports/expenses`
+  - `GET /api/reports/cash`
+  - `GET /api/reports/pl`
+  - `GET /api/reports/capital`
 - Cash:
   - `GET /api/cash/me`
   - `POST /api/cash/transfers`

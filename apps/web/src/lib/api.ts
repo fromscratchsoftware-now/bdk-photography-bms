@@ -1119,6 +1119,41 @@ export interface PlReport {
   expensesByPaymentSource: Array<{ paymentSource: ExpensePaymentSource; totalAmount: number }>;
 }
 
+export interface CapitalInventoryItem {
+  productId: string;
+  skuCode: string;
+  name: string;
+  productType: ProductType;
+  shopQty: number;
+  workshopQty: number;
+  transitQty: number;
+  quantity: number;
+  unitCostUGX: number | null;
+  valueUGX: number;
+  costSource: string;
+}
+
+export interface CapitalReport {
+  asOf: string;
+  shopId?: string | null;
+  shopCode?: string | null;
+  shopName?: string | null;
+  sheetCostPerFullSheet?: number | null;
+  bank: {
+    bankedApproved: number;
+    adminBankExpenses: number;
+    cashInBank: number;
+  };
+  totals: {
+    cashAtHand: number;
+    cashInBank: number;
+    inventoryValue: number;
+    businessCapital: number;
+  };
+  inventory: CapitalInventoryItem[];
+  warnings: string[];
+}
+
 export function getSalesReport(
   token: string,
   params: { period?: SalesReportPeriod; shopId?: string; dateFrom?: string; dateTo?: string }
@@ -1185,6 +1220,17 @@ export function getPlReport(token: string, params: { shopId?: string; dateFrom?:
       shopId: params.shopId,
       dateFrom: params.dateFrom,
       dateTo: params.dateTo
+    }),
+    undefined,
+    token
+  );
+}
+
+export function getCapitalReport(token: string, params: { shopId?: string; asOf?: string }): Promise<CapitalReport> {
+  return request<CapitalReport>(
+    withQuery("api/reports/capital", {
+      shopId: params.shopId,
+      asOf: params.asOf
     }),
     undefined,
     token
@@ -1270,6 +1316,21 @@ export function exportPlReport(
       shopId: params.shopId,
       dateFrom: params.dateFrom,
       dateTo: params.dateTo,
+      format
+    }),
+    token
+  );
+}
+
+export function exportCapitalReport(
+  token: string,
+  params: { shopId?: string; asOf?: string },
+  format: ReportExportFormat
+): Promise<{ blob: Blob; filename: string }> {
+  return downloadFile(
+    withQuery("api/reports/capital", {
+      shopId: params.shopId,
+      asOf: params.asOf,
       format
     }),
     token

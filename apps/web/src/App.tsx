@@ -19,12 +19,14 @@ import {
   createWorkshopSheetReceipt,
   decideBankingRequest,
   decideCashTransfer,
+  exportCapitalReport,
   exportCashReport,
   exportExpenseReport,
   exportInvoiceReport,
   exportPlReport,
   exportSalesReport,
   getAdminCashOverview,
+  getCapitalReport,
   getCashMe,
   getCashReport,
   getExpenseReport,
@@ -78,6 +80,7 @@ import {
   type AdminCashOverview,
   type AuthUser,
   type BankingRequest,
+  type CapitalReport,
   type CashRecipient,
   type CashSummary,
   type CashTransfer,
@@ -128,7 +131,7 @@ type AuthState = {
 
 type ActiveView = "overview" | "customers" | "invoices" | "inventory" | "sales" | "expenses" | "cash" | "reports" | "messaging" | "master-data";
 type MasterSection = "expense-categories" | "product-categories" | "products";
-type ReportSection = "sales" | "invoices" | "cash" | "expenses" | "pl";
+type ReportSection = "sales" | "invoices" | "cash" | "expenses" | "pl" | "capital";
 type InventorySection = "stock" | "transfers" | "workshop";
 type MessagingSection = "templates" | "queue" | "logs" | "jobs";
 
@@ -340,6 +343,7 @@ export default function App(): JSX.Element {
   const [cashReport, setCashReport] = useState<CashReport | null>(null);
   const [expenseReport, setExpenseReport] = useState<ExpenseReport | null>(null);
   const [plReport, setPlReport] = useState<PlReport | null>(null);
+  const [capitalReport, setCapitalReport] = useState<CapitalReport | null>(null);
 
   const [salesReportFilters, setSalesReportFilters] = useState<{
     shopId: string;
@@ -395,6 +399,14 @@ export default function App(): JSX.Element {
     shopId: "",
     dateFrom: daysAgoLocalYmd(29),
     dateTo: todayLocalYmd()
+  });
+
+  const [capitalReportFilters, setCapitalReportFilters] = useState<{
+    shopId: string;
+    asOf: string;
+  }>({
+    shopId: "",
+    asOf: todayLocalYmd()
   });
 
   const [inventorySection, setInventorySection] = useState<InventorySection>("stock");
@@ -621,6 +633,7 @@ export default function App(): JSX.Element {
   const canViewCash = authUser?.role === "ADMIN" || authUser?.role === "MANAGER" || authUser?.role === "SALES";
   const canApproveBanking = authUser?.role === "ADMIN";
   const canViewReports = authUser?.role === "ADMIN" || authUser?.role === "MANAGER";
+  const canViewCapitalReport = authUser?.role === "ADMIN";
   const canViewInventory = authUser?.role === "ADMIN" || authUser?.role === "MANAGER" || authUser?.role === "SALES";
   const canManageWorkshop = authUser?.role === "ADMIN";
   const canManageInventoryTransfers = authUser?.role === "ADMIN";
@@ -648,6 +661,7 @@ export default function App(): JSX.Element {
     setAuth(null);
     writeStoredAuth(null);
     setActiveView("overview");
+    setReportSection("sales");
     setShops([]);
     setUsers([]);
     setCustomers([]);
@@ -671,6 +685,7 @@ export default function App(): JSX.Element {
     setCashReport(null);
     setExpenseReport(null);
     setPlReport(null);
+    setCapitalReport(null);
     setInventorySection("stock");
     setInventoryFilters({ shopId: "", transferStatus: "" });
     setInventoryDateRange({ dateFrom: daysAgoLocalYmd(29), dateTo: todayLocalYmd() });
@@ -1524,6 +1539,12 @@ export default function App(): JSX.Element {
           dateTo: plReportFilters.dateTo || undefined
         });
         setPlReport(report);
+      } else if (reportSection === "capital") {
+        const report = await getCapitalReport(auth.token, {
+          shopId: capitalReportFilters.shopId || undefined,
+          asOf: capitalReportFilters.asOf || undefined
+        });
+        setCapitalReport(report);
       }
     } catch (caught: unknown) {
       setError(caught instanceof Error ? caught.message : "Failed to load report");
@@ -1597,6 +1618,16 @@ export default function App(): JSX.Element {
           format
         );
         triggerBrowserDownload(file.blob, file.filename);
+      } else if (reportSection === "capital") {
+        const file = await exportCapitalReport(
+          auth.token,
+          {
+            shopId: capitalReportFilters.shopId || undefined,
+            asOf: capitalReportFilters.asOf || undefined
+          },
+          format
+        );
+        triggerBrowserDownload(file.blob, file.filename);
       }
     } catch (caught: unknown) {
       setError(caught instanceof Error ? caught.message : "Failed to export report");
@@ -1636,7 +1667,9 @@ export default function App(): JSX.Element {
     expenseReportFilters.dateTo,
     plReportFilters.shopId,
     plReportFilters.dateFrom,
-    plReportFilters.dateTo
+    plReportFilters.dateTo,
+    capitalReportFilters.shopId,
+    capitalReportFilters.asOf
   ]);
 
   async function refreshInventoryStockData(): Promise<void> {
@@ -2261,9 +2294,12 @@ export default function App(): JSX.Element {
                 <li>Phase 5: Expenses (payment source: salesperson cash vs admin/bank)</li>
                 <li>Phase 6: Cash tracking (cash at hand, transfers, banking approvals, notifications)</li>
                 <li>Phase 7: Reports + exports (CSV / Excel / PDF)</li>
+                <li>Phase 8: Workshop + inventory lifecycle (boards, transfers, damages)</li>
+                <li>Phase 9: Messaging scaffolding (templates, queue, logs, jobs)</li>
+                <li>Business capital report (cash + bank + inventory valuation)</li>
               </ul>
               <div className="note">
-                Next phases will add workshop production, inventory/transfers, messaging, and the capital dashboard.
+                Next: messaging provider integration (SMS/WhatsApp/Email) + audit log viewer UI.
               </div>
             </section>
           </>
@@ -2355,11 +2391,11 @@ export default function App(): JSX.Element {
             <section className="card">
               <h2>Next Modules</h2>
               <ul className="stack">
-                <li>Messaging (SMS / WhatsApp / Email)</li>
-                <li>Admin daily summary notifications</li>
-                <li>Workshop yield + waste reporting</li>
-                <li>Inventory movement reports + exports</li>
+                <li>Messaging provider integration (SMS / WhatsApp / Email) + retries/cron</li>
                 <li>Audit log viewer UI</li>
+                <li>Inventory movement reports + exports</li>
+                <li>Workshop yield + waste reports + exports</li>
+                <li>Capital dashboard trend (historical snapshots)</li>
               </ul>
             </section>
           </>
@@ -5654,6 +5690,11 @@ export default function App(): JSX.Element {
                 <button className={`tab ${reportSection === "pl" ? "isActive" : ""}`} type="button" onClick={() => setReportSection("pl")}>
                   P&amp;L
                 </button>
+                {canViewCapitalReport ? (
+                  <button className={`tab ${reportSection === "capital" ? "isActive" : ""}`} type="button" onClick={() => setReportSection("capital")}>
+                    Capital
+                  </button>
+                ) : null}
               </div>
 
               <div style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap", marginTop: "1rem" }}>
@@ -6113,6 +6154,126 @@ export default function App(): JSX.Element {
                         ) : (
                           <tr>
                             <td colSpan={7}>No results.</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              </>
+            ) : reportSection === "capital" ? (
+              <>
+                <section className="card">
+                  <h2>Business Capital</h2>
+                  <p className="hint">Business Capital = cash at hand (all users) + cash in bank + inventory value.</p>
+                  <form
+                    className="form"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void refreshReportsData();
+                    }}
+                  >
+                    <label>
+                      Shop
+                      <select value={capitalReportFilters.shopId} onChange={(event) => setCapitalReportFilters((prev) => ({ ...prev, shopId: event.target.value }))}>
+                        <option value="">All shops (consolidated)</option>
+                        {shops.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.code} - {s.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      As of
+                      <input type="date" value={capitalReportFilters.asOf} onChange={(event) => setCapitalReportFilters((prev) => ({ ...prev, asOf: event.target.value }))} />
+                    </label>
+                    <button type="submit" disabled={reportsBusy}>
+                      {reportsBusy ? "Loading..." : "Run"}
+                    </button>
+                  </form>
+                  {capitalReport?.sheetCostPerFullSheet != null ? (
+                    <p className="hint">Sheet cost (as of): {formatUGX(capitalReport.sheetCostPerFullSheet)} per full sheet.</p>
+                  ) : null}
+                </section>
+
+                <section className="card">
+                  <h2>Totals</h2>
+                  {capitalReport ? (
+                    <ul className="stack">
+                      <li>
+                        <strong>Business capital:</strong> {formatUGX(capitalReport.totals.businessCapital)}
+                      </li>
+                      <li>
+                        <strong>Cash at hand:</strong> {formatUGX(capitalReport.totals.cashAtHand)}
+                      </li>
+                      <li>
+                        <strong>Cash in bank:</strong> {formatUGX(capitalReport.totals.cashInBank)}
+                      </li>
+                      <li>
+                        <strong>Inventory value:</strong> {formatUGX(capitalReport.totals.inventoryValue)}
+                      </li>
+                      <li>
+                        <strong>Banked (approved):</strong> {formatUGX(capitalReport.bank.bankedApproved)}
+                      </li>
+                      <li>
+                        <strong>Admin/bank expenses:</strong> {formatUGX(capitalReport.bank.adminBankExpenses)}
+                      </li>
+                    </ul>
+                  ) : (
+                    <p className="hint">Run the report to see totals.</p>
+                  )}
+                </section>
+
+                {capitalReport?.warnings?.length ? (
+                  <section className="card" style={{ gridColumn: "1 / -1" }}>
+                    <h2>Warnings</h2>
+                    <div className="note">
+                      <ul className="stack">
+                        {capitalReport.warnings.map((w, idx) => (
+                          <li key={`${idx}-${w.slice(0, 12)}`}>{w}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  </section>
+                ) : null}
+
+                <section className="card" style={{ gridColumn: "1 / -1" }}>
+                  <h2>Inventory Valuation</h2>
+                  <div className="tableWrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>SKU</th>
+                          <th>Product</th>
+                          <th>Type</th>
+                          <th className="right">Qty</th>
+                          <th className="right">Unit cost</th>
+                          <th className="right">Value</th>
+                          <th>Cost source</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {capitalReport?.inventory?.length ? (
+                          capitalReport.inventory.map((row) => (
+                            <tr key={row.productId}>
+                              <td>{row.skuCode}</td>
+                              <td>{row.name}</td>
+                              <td>{row.productType}</td>
+                              <td className="right">
+                                {row.quantity}
+                                <div className="hint">
+                                  {row.shopQty} shop • {row.workshopQty} workshop • {row.transitQty} transit
+                                </div>
+                              </td>
+                              <td className="right">{row.unitCostUGX != null ? formatUGX(row.unitCostUGX) : "-"}</td>
+                              <td className="right">{formatUGX(row.valueUGX)}</td>
+                              <td>{row.costSource}</td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan={7}>No inventory value rows.</td>
                           </tr>
                         )}
                       </tbody>
