@@ -2575,198 +2575,210 @@ export default function App(): JSX.Element {
               </IconButton>
             </div>
 
-            <nav aria-label="Primary">
-              <div className="navGroup">
-                <div className="navGroup__title">Core</div>
-                <button
-                  className={cx("navItem", activeView === "overview" && "isActive")}
-                  type="button"
-                  onClick={() => {
-                    setActiveView("overview");
-                    setSidebarOpen(false);
-                  }}
-                >
-                  <IconDashboard />
-                  Dashboard
-                </button>
-                <button
-                  className={cx("navItem", activeView === "inventory" && "isActive")}
-                  type="button"
-                  onClick={() => {
-                    setActiveView("inventory");
-                    setSidebarOpen(false);
-                  }}
-                >
-                  <IconProjects />
-                  Production
-                </button>
-                {canViewSales ? (
-                  <button
-                    className={cx("navItem", activeView === "sales" && "isActive")}
-                    type="button"
-                    onClick={() => {
-                      setActiveView("sales");
-                      setSidebarOpen(false);
-                    }}
-                  >
-                    <IconSales />
-                    Sales (POS)
-                  </button>
-                ) : null}
-                <button
-                  className={cx("navItem", activeView === "invoices" && "isActive")}
-                  type="button"
-                  onClick={() => {
-                    setActiveView("invoices");
-                    setSidebarOpen(false);
-                  }}
-                >
-                  <IconInvoices />
-                  Invoices
-                </button>
-                <button
-                  className={cx("navItem", activeView === "customers" && "isActive")}
-                  type="button"
-                  onClick={() => {
-                    setActiveView("customers");
-                    setSidebarOpen(false);
-                  }}
-                >
-                  <IconCustomers />
-                  Customers
-                </button>
-              </div>
-
-              <div className="navGroup">
-                <div className="navGroup__title">Finance</div>
-                {canViewCash ? (
-                  <button
-                    className={cx("navItem", activeView === "cash" && "isActive")}
-                    type="button"
-                    onClick={() => {
-                      setActiveView("cash");
-                      setSidebarOpen(false);
-                    }}
-                  >
-                    <IconCash />
-                    Cash
-                  </button>
-                ) : null}
-                {canViewExpenses ? (
-                  <button
-                    className={cx("navItem", activeView === "expenses" && "isActive")}
-                    type="button"
-                    onClick={() => {
-                      setActiveView("expenses");
-                      setSidebarOpen(false);
-                    }}
-                  >
-                    <IconExpenses />
-                    Expenses
-                  </button>
-                ) : null}
-                {canViewReports ? (
-                  <>
-                    <button
-                      className={cx("navItem", activeView === "reports" && reportSection === "sales" && "isActive")}
-                      type="button"
-                      onClick={() => {
-                        setActiveView("reports");
-                        setReportSection("sales");
-                        setSidebarOpen(false);
-                      }}
-                    >
-                      <IconReports />
-                      Reports
-                    </button>
-                    <button
-                      className={cx("navItem", activeView === "reports" && reportSection === "payments" && "isActive")}
-                      type="button"
-                      onClick={() => {
-                        setActiveView("reports");
-                        setReportSection("payments");
-                        setSidebarOpen(false);
-                      }}
-                    >
-                      <IconPayments />
-                      Payments
-                    </button>
-                    <button
-                      className={cx("navItem", activeView === "reports" && reportSection === "commissions" && "isActive")}
-                      type="button"
-                      onClick={() => {
-                        setActiveView("reports");
-                        setReportSection("commissions");
-                        setSidebarOpen(false);
-                      }}
-                    >
-                      <IconCommissions />
-                      Commissions
-                    </button>
-                  </>
-                ) : null}
-              </div>
-
-              {canViewUsers || canManageMasterData || canManageMessaging ? (
+            <div className="sidebarNav">
+              <nav aria-label="Primary">
                 <div className="navGroup">
-                  <div className="navGroup__title">Admin</div>
-                  {canViewUsers ? (
+                  <div className="navGroup__title">Core</div>
+                  <div className="navGroup__items">
                     <button
-                      className={cx("navItem", activeView === "users" && "isActive")}
+                      className={cx("navItem", activeView === "overview" && "isActive")}
                       type="button"
                       onClick={() => {
-                        setActiveView("users");
+                        setActiveView("overview");
                         setSidebarOpen(false);
                       }}
                     >
-                      <IconUsers />
-                      Users
+                      <IconDashboard />
+                      Dashboard
                     </button>
-                  ) : null}
-                  {canManageMasterData ? (
                     <button
-                      className={cx("navItem", activeView === "master-data" && "isActive")}
+                      className={cx("navItem", activeView === "inventory" && "isActive")}
                       type="button"
                       onClick={() => {
-                        setActiveView("master-data");
+                        setActiveView("inventory");
                         setSidebarOpen(false);
                       }}
                     >
-                      <IconMasterData />
-                      Configurations
+                      <IconProjects />
+                      Production
                     </button>
-                  ) : null}
-                  {canManageMessaging ? (
+                    {canViewSales ? (
+                      <button
+                        className={cx("navItem", activeView === "sales" && "isActive")}
+                        type="button"
+                        onClick={() => {
+                          setActiveView("sales");
+                          setSidebarOpen(false);
+                        }}
+                      >
+                        <IconSales />
+                        Sales (POS)
+                      </button>
+                    ) : null}
                     <button
-                      className={cx("navItem", activeView === "messaging" && "isActive")}
+                      className={cx("navItem", activeView === "invoices" && "isActive")}
                       type="button"
                       onClick={() => {
-                        setActiveView("messaging");
+                        setActiveView("invoices");
                         setSidebarOpen(false);
                       }}
                     >
-                      <IconMessaging />
-                      Messaging
+                      <IconInvoices />
+                      Invoices
                     </button>
-                  ) : null}
+                    <button
+                      className={cx("navItem", activeView === "customers" && "isActive")}
+                      type="button"
+                      onClick={() => {
+                        setActiveView("customers");
+                        setSidebarOpen(false);
+                      }}
+                    >
+                      <IconCustomers />
+                      Customers
+                    </button>
+                  </div>
                 </div>
-              ) : null}
 
-              <div className="navGroup">
-                <div className="navGroup__title">Support</div>
-                <button
-                  className={cx("navItem", activeView === "help" && "isActive")}
-                  type="button"
-                  onClick={() => {
-                    setActiveView("help");
-                    setSidebarOpen(false);
-                  }}
-                >
-                  <IconHelp />
-                  Help
-                </button>
-              </div>
-            </nav>
+                <div className="navGroup">
+                  <div className="navGroup__title">Finance</div>
+                  <div className="navGroup__items">
+                    {canViewCash ? (
+                      <button
+                        className={cx("navItem", activeView === "cash" && "isActive")}
+                        type="button"
+                        onClick={() => {
+                          setActiveView("cash");
+                          setSidebarOpen(false);
+                        }}
+                      >
+                        <IconCash />
+                        Cash
+                      </button>
+                    ) : null}
+                    {canViewExpenses ? (
+                      <button
+                        className={cx("navItem", activeView === "expenses" && "isActive")}
+                        type="button"
+                        onClick={() => {
+                          setActiveView("expenses");
+                          setSidebarOpen(false);
+                        }}
+                      >
+                        <IconExpenses />
+                        Expenses
+                      </button>
+                    ) : null}
+                    {canViewReports ? (
+                      <div className="navSubgroup">
+                        <button
+                          className={cx("navItem", activeView === "reports" && reportSection === "sales" && "isActive")}
+                          type="button"
+                          onClick={() => {
+                            setActiveView("reports");
+                            setReportSection("sales");
+                            setSidebarOpen(false);
+                          }}
+                        >
+                          <IconReports />
+                          Reports
+                        </button>
+                        <div className="navSubgroup__items">
+                          <button
+                            className={cx("navItem", activeView === "reports" && reportSection === "payments" && "isActive")}
+                            type="button"
+                            onClick={() => {
+                              setActiveView("reports");
+                              setReportSection("payments");
+                              setSidebarOpen(false);
+                            }}
+                          >
+                            <IconPayments />
+                            Payments
+                          </button>
+                          <button
+                            className={cx("navItem", activeView === "reports" && reportSection === "commissions" && "isActive")}
+                            type="button"
+                            onClick={() => {
+                              setActiveView("reports");
+                              setReportSection("commissions");
+                              setSidebarOpen(false);
+                            }}
+                          >
+                            <IconCommissions />
+                            Commissions
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+
+                {canViewUsers || canManageMasterData || canManageMessaging ? (
+                  <div className="navGroup">
+                    <div className="navGroup__title">Admin</div>
+                    <div className="navGroup__items">
+                      {canViewUsers ? (
+                        <button
+                          className={cx("navItem", activeView === "users" && "isActive")}
+                          type="button"
+                          onClick={() => {
+                            setActiveView("users");
+                            setSidebarOpen(false);
+                          }}
+                        >
+                          <IconUsers />
+                          Users
+                        </button>
+                      ) : null}
+                      {canManageMasterData ? (
+                        <button
+                          className={cx("navItem", activeView === "master-data" && "isActive")}
+                          type="button"
+                          onClick={() => {
+                            setActiveView("master-data");
+                            setSidebarOpen(false);
+                          }}
+                        >
+                          <IconMasterData />
+                          Configurations
+                        </button>
+                      ) : null}
+                      {canManageMessaging ? (
+                        <button
+                          className={cx("navItem", activeView === "messaging" && "isActive")}
+                          type="button"
+                          onClick={() => {
+                            setActiveView("messaging");
+                            setSidebarOpen(false);
+                          }}
+                        >
+                          <IconMessaging />
+                          Messaging
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
+
+                <div className="navGroup">
+                  <div className="navGroup__title">Support</div>
+                  <div className="navGroup__items">
+                    <button
+                      className={cx("navItem", activeView === "help" && "isActive")}
+                      type="button"
+                      onClick={() => {
+                        setActiveView("help");
+                        setSidebarOpen(false);
+                      }}
+                    >
+                      <IconHelp />
+                      Help
+                    </button>
+                  </div>
+                </div>
+              </nav>
+            </div>
 
             <div className="sidebarFooter">
               <div className="sidebarUser">
