@@ -1,14 +1,15 @@
 import { z } from "zod";
 
 export const createProductSchema = z.object({
-  skuCode: z.string().min(2),
-  name: z.string().min(2),
-  category: z.string().min(2),
+  productNameId: z.string().min(1),
+  categoryId: z.string().min(1),
   productType: z.enum(["BOARD", "NON_BOARD"]),
-  unitOfMeasure: z.string().min(1),
-  costPrice: z.number().nonnegative().optional(),
+  unitOfMeasureId: z.string().min(1),
+  costPrice: z.number().nonnegative().nullable().optional(),
   sellingPrice: z.number().nonnegative(),
-  active: z.boolean().default(true)
+  isActive: z.boolean().default(true),
+  boardSizeCodeId: z.string().nullable().optional(),
+  notes: z.string().nullable().optional()
 });
 
 export const addSaleSchema = z.object({

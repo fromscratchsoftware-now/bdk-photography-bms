@@ -185,6 +185,35 @@ export interface ProductCategory {
   updatedAt: string;
 }
 
+export interface UnitMeasure {
+  id: string;
+  name: string;
+  isActive: boolean;
+  notes?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BoardSizeConfig {
+  id: string;
+  code: string;
+  yieldPerSheet: number;
+  isActive: boolean;
+  notes?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProductNameConfig {
+  id: string;
+  name: string;
+  skuCode: string;
+  isActive: boolean;
+  notes?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export type ProductType = "BOARD" | "NON_BOARD";
 
 export type BoardSizeCode = "A4C" | "A3C" | "A2C";
@@ -656,6 +685,105 @@ export function listProductCategories(token: string): Promise<ProductCategory[]>
   return request<ProductCategory[]>("api/product-categories", undefined, token);
 }
 
+export function listUnitMeasures(token: string): Promise<UnitMeasure[]> {
+  return request<UnitMeasure[]>("api/unit-measures", undefined, token);
+}
+
+export function createUnitMeasure(
+  token: string,
+  payload: { name: string; notes?: string; isActive?: boolean }
+): Promise<UnitMeasure> {
+  return request<UnitMeasure>(
+    "api/unit-measures",
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function updateUnitMeasure(
+  token: string,
+  id: string,
+  payload: { name?: string; notes?: string | null; isActive?: boolean }
+): Promise<UnitMeasure> {
+  return request<UnitMeasure>(
+    `api/unit-measures/${id}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function listBoardSizeCodes(token: string): Promise<BoardSizeConfig[]> {
+  return request<BoardSizeConfig[]>("api/board-size-codes", undefined, token);
+}
+
+export function createBoardSizeCode(
+  token: string,
+  payload: { code: string; yieldPerSheet: number; notes?: string; isActive?: boolean }
+): Promise<BoardSizeConfig> {
+  return request<BoardSizeConfig>(
+    "api/board-size-codes",
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function updateBoardSizeCode(
+  token: string,
+  id: string,
+  payload: { code?: string; yieldPerSheet?: number; notes?: string | null; isActive?: boolean }
+): Promise<BoardSizeConfig> {
+  return request<BoardSizeConfig>(
+    `api/board-size-codes/${id}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function listProductNames(token: string): Promise<ProductNameConfig[]> {
+  return request<ProductNameConfig[]>("api/product-names", undefined, token);
+}
+
+export function createProductName(
+  token: string,
+  payload: { name: string; skuCode: string; notes?: string; isActive?: boolean }
+): Promise<ProductNameConfig> {
+  return request<ProductNameConfig>(
+    "api/product-names",
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function updateProductName(
+  token: string,
+  id: string,
+  payload: { name?: string; skuCode?: string; notes?: string | null; isActive?: boolean }
+): Promise<ProductNameConfig> {
+  return request<ProductNameConfig>(
+    `api/product-names/${id}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
 export function createProductCategory(
   token: string,
   payload: { name: string; notes?: string; isActive?: boolean }
@@ -692,14 +820,14 @@ export function listProducts(token: string): Promise<Product[]> {
 export function createProduct(
   token: string,
   payload: {
-    name: string;
+    productNameId: string;
     categoryId: string;
     productType: ProductType;
-    unitOfMeasure: string;
+    unitOfMeasureId: string;
     costPrice?: number | null;
     sellingPrice: number;
     isActive?: boolean;
-    boardSizeCode?: BoardSizeCode | null;
+    boardSizeCodeId?: string | null;
     notes?: string | null;
   }
 ): Promise<Product> {
@@ -717,14 +845,14 @@ export function updateProduct(
   token: string,
   id: string,
   payload: Partial<{
-    name: string;
+    productNameId: string;
     categoryId: string;
     productType: ProductType;
-    unitOfMeasure: string;
+    unitOfMeasureId: string;
     costPrice: number | null;
     sellingPrice: number;
     isActive: boolean;
-    boardSizeCode: BoardSizeCode | null;
+    boardSizeCodeId: string | null;
     notes: string | null;
   }>
 ): Promise<Product> {

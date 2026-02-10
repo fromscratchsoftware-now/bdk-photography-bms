@@ -16,6 +16,9 @@ import {
   createStockReceipt,
   createProduct,
   createProductCategory,
+  createProductName,
+  createUnitMeasure,
+  createBoardSizeCode,
   createWorkshopBatch,
   createWorkshopSheetReceipt,
   decideBankingRequest,
@@ -60,6 +63,9 @@ import {
   listReconciliationLocks,
   listSales,
   listProductCategories,
+  listProductNames,
+  listUnitMeasures,
+  listBoardSizeCodes,
   listProducts,
   listShops,
   listUsers,
@@ -85,6 +91,9 @@ import {
   updateExpenseCategory,
   updateProduct,
   updateProductCategory,
+  updateProductName,
+  updateUnitMeasure,
+  updateBoardSizeCode,
   voidSale,
   voidExpense,
   type AdminCashOverview,
@@ -121,6 +130,9 @@ import {
   type PlReport,
   type Product,
   type ProductCategory,
+  type ProductNameConfig,
+  type UnitMeasure,
+  type BoardSizeConfig,
   type ReportExportFormat,
   type ReconciliationLock,
   type Sale,
@@ -180,7 +192,7 @@ type ActiveView =
   | "master-data"
   | "users"
   | "help";
-type MasterSection = "expense-categories" | "product-categories";
+type MasterSection = "expense-categories" | "product-categories" | "unit-measures" | "board-size-codes" | "product-names";
 type ReportSection = "sales" | "commissions" | "invoices" | "payments" | "cash" | "expenses" | "pl" | "capital";
 type InventorySection = "stock" | "transfers" | "workshop" | "products";
 type MessagingSection = "templates" | "queue" | "logs" | "jobs";
@@ -319,6 +331,9 @@ export default function App(): JSX.Element {
 
   const [expenseCategories, setExpenseCategories] = useState<ExpenseCategory[]>([]);
   const [productCategories, setProductCategories] = useState<ProductCategory[]>([]);
+  const [unitMeasures, setUnitMeasures] = useState<UnitMeasure[]>([]);
+  const [boardSizeCodes, setBoardSizeCodes] = useState<BoardSizeConfig[]>([]);
+  const [productNames, setProductNames] = useState<ProductNameConfig[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
 
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -704,6 +719,32 @@ export default function App(): JSX.Element {
   } | null>(null);
   const [newExpenseCategoryForm, setNewExpenseCategoryForm] = useState({ name: "", notes: "" });
 
+  const [editingUnitMeasureId, setEditingUnitMeasureId] = useState<string | null>(null);
+  const [editingUnitMeasureForm, setEditingUnitMeasureForm] = useState<{
+    name: string;
+    notes: string;
+    isActive: boolean;
+  } | null>(null);
+  const [newUnitMeasureForm, setNewUnitMeasureForm] = useState({ name: "", notes: "" });
+
+  const [editingBoardSizeId, setEditingBoardSizeId] = useState<string | null>(null);
+  const [editingBoardSizeForm, setEditingBoardSizeForm] = useState<{
+    code: string;
+    yieldPerSheet: string;
+    notes: string;
+    isActive: boolean;
+  } | null>(null);
+  const [newBoardSizeForm, setNewBoardSizeForm] = useState({ code: "", yieldPerSheet: "", notes: "" });
+
+  const [editingProductNameId, setEditingProductNameId] = useState<string | null>(null);
+  const [editingProductNameForm, setEditingProductNameForm] = useState<{
+    name: string;
+    skuCode: string;
+    notes: string;
+    isActive: boolean;
+  } | null>(null);
+  const [newProductNameForm, setNewProductNameForm] = useState({ name: "", skuCode: "", notes: "" });
+
   const [editingProductCategoryId, setEditingProductCategoryId] = useState<string | null>(null);
   const [editingProductCategoryForm, setEditingProductCategoryForm] = useState<{
     name: string;
@@ -714,35 +755,35 @@ export default function App(): JSX.Element {
 
   const [editingProductId, setEditingProductId] = useState<string | null>(null);
   const [editingProductForm, setEditingProductForm] = useState<{
-    name: string;
+    productNameId: string;
     categoryId: string;
     productType: "BOARD" | "NON_BOARD";
-    unitOfMeasure: string;
+    unitOfMeasureId: string;
     costPrice: string;
     sellingPrice: string;
     isActive: boolean;
-    boardSizeCode: "A4C" | "A3C" | "A2C";
+    boardSizeCodeId: string;
     notes: string;
   } | null>(null);
   const [newProductForm, setNewProductForm] = useState<{
-    name: string;
+    productNameId: string;
     categoryId: string;
     productType: "BOARD" | "NON_BOARD";
-    unitOfMeasure: string;
+    unitOfMeasureId: string;
     costPrice: string;
     sellingPrice: string;
     isActive: boolean;
-    boardSizeCode: "A4C" | "A3C" | "A2C";
+    boardSizeCodeId: string;
     notes: string;
   }>({
-    name: "",
+    productNameId: "",
     categoryId: "",
     productType: "BOARD",
-    unitOfMeasure: "piece",
+    unitOfMeasureId: "",
     costPrice: "",
     sellingPrice: "",
     isActive: true,
-    boardSizeCode: "A4C",
+    boardSizeCodeId: "",
     notes: ""
   });
 
@@ -1085,17 +1126,32 @@ export default function App(): JSX.Element {
     setMasterBusy(true);
     setError(null);
     try {
-      const [expenseData, categoryData, productData] = await Promise.all([
+      const [expenseData, categoryData, unitData, boardData, nameData, productData] = await Promise.all([
         listExpenseCategories(auth.token),
         listProductCategories(auth.token),
+        listUnitMeasures(auth.token),
+        listBoardSizeCodes(auth.token),
+        listProductNames(auth.token),
         listProducts(auth.token)
       ]);
       setExpenseCategories(expenseData);
       setProductCategories(categoryData);
+      setUnitMeasures(unitData);
+      setBoardSizeCodes(boardData);
+      setProductNames(nameData);
       setProducts(productData);
 
       if (!newProductForm.categoryId && categoryData.length) {
         setNewProductForm((prev) => ({ ...prev, categoryId: categoryData[0].id }));
+      }
+      if (!newProductForm.unitOfMeasureId && unitData.length) {
+        setNewProductForm((prev) => ({ ...prev, unitOfMeasureId: unitData[0].id }));
+      }
+      if (!newProductForm.productNameId && nameData.length) {
+        setNewProductForm((prev) => ({ ...prev, productNameId: nameData[0].id }));
+      }
+      if (!newProductForm.boardSizeCodeId && boardData.length) {
+        setNewProductForm((prev) => ({ ...prev, boardSizeCodeId: boardData[0].id }));
       }
     } catch (caught: unknown) {
       setError(caught instanceof Error ? caught.message : "Failed to load configurations");
@@ -2295,19 +2351,6 @@ export default function App(): JSX.Element {
       .replace(/'/g, "&#039;");
   }
 
-  function normalizeProductName(value: string): string {
-    const trimmed = value.trim().replace(/\s+/g, " ");
-    if (!trimmed) {
-      return "";
-    }
-    const normalizedDims = trimmed.replace(/(\d+)\s*[xX×]\s*(\d+)/g, "$1×$2");
-    return normalizedDims
-      .replace(/\bframes\b/gi, "Frames")
-      .replace(/\bframe\b/gi, "Frame")
-      .trim()
-      .replace(/\s+/g, " ");
-  }
-
   function openInvoicePrint(detail: InvoiceDetail, payments: InvoicePayment[]): void {
     const invoice = detail.invoice;
 
@@ -2462,14 +2505,16 @@ export default function App(): JSX.Element {
     return sum + safeQty * safePrice;
   }, 0);
 
-  const yieldPerSheet =
+  const selectedBoardConfig =
     newProductForm.productType === "BOARD"
-      ? newProductForm.boardSizeCode === "A4C"
-        ? 48
-        : newProductForm.boardSizeCode === "A3C"
-          ? 24
-          : 12
+      ? boardSizeCodes.find((code) => code.id === newProductForm.boardSizeCodeId) ?? null
       : null;
+  const yieldPerSheet = selectedBoardConfig?.yieldPerSheet ?? null;
+  const hasProductConfigs =
+    productCategories.length > 0 &&
+    productNames.length > 0 &&
+    unitMeasures.length > 0 &&
+    (newProductForm.productType === "NON_BOARD" || boardSizeCodes.length > 0);
 
   const reportTitle =
     reportSection === "sales"
@@ -5428,7 +5473,7 @@ Payments update invoice status:
                 <section className="card" style={{ gridColumn: "1 / -1" }}>
                   <h2>Create Product</h2>
                   <p className="hint">SKU code is auto-generated on save.</p>
-                  {productCategories.length ? (
+                  {hasProductConfigs ? (
                     <form
                       className="form form--three"
                       onSubmit={async (event) => {
@@ -5441,19 +5486,19 @@ Payments update invoice status:
                         setMasterBusy(true);
                         try {
                           await createProduct(auth.token, {
-                            name: newProductForm.name,
+                            productNameId: newProductForm.productNameId,
                             categoryId: newProductForm.categoryId,
                             productType: newProductForm.productType,
-                            unitOfMeasure: newProductForm.unitOfMeasure,
+                            unitOfMeasureId: newProductForm.unitOfMeasureId,
                             costPrice: newProductForm.costPrice ? Number(newProductForm.costPrice) : null,
                             sellingPrice: Number(newProductForm.sellingPrice),
                             isActive: newProductForm.isActive,
-                            boardSizeCode: newProductForm.productType === "BOARD" ? newProductForm.boardSizeCode : null,
+                            boardSizeCodeId: newProductForm.productType === "BOARD" ? newProductForm.boardSizeCodeId : null,
                             notes: newProductForm.notes || null
                           });
                           setNewProductForm((prev) => ({
                             ...prev,
-                            name: "",
+                            productNameId: "",
                             costPrice: "",
                             sellingPrice: "",
                             notes: ""
@@ -5504,41 +5549,58 @@ Payments update invoice status:
                         <label>
                           Board Size Code
                           <select
-                            value={newProductForm.boardSizeCode}
+                            value={newProductForm.boardSizeCodeId}
                             onChange={(event) =>
                               setNewProductForm((prev) => ({
                                 ...prev,
-                                boardSizeCode: (event.target.value as "A4C" | "A3C" | "A2C") || "A4C"
+                                boardSizeCodeId: event.target.value
                               }))
                             }
                           >
-                            <option value="A4C">A4C (48/sheet)</option>
-                            <option value="A3C">A3C (24/sheet)</option>
-                            <option value="A2C">A2C (12/sheet)</option>
+                            {boardSizeCodes
+                              .filter((code) => code.isActive)
+                              .map((code) => (
+                                <option key={code.id} value={code.id}>
+                                  {code.code} ({code.yieldPerSheet}/sheet)
+                                </option>
+                              ))}
                           </select>
                         </label>
                       ) : null}
                       <label>
-                        Name
-                        <input
-                          value={newProductForm.name}
-                          onChange={(event) => setNewProductForm((prev) => ({ ...prev, name: event.target.value }))}
-                          onBlur={() =>
-                            setNewProductForm((prev) => ({ ...prev, name: normalizeProductName(prev.name) }))
-                          }
+                        Product name
+                        <select
+                          value={newProductForm.productNameId}
+                          onChange={(event) => setNewProductForm((prev) => ({ ...prev, productNameId: event.target.value }))}
                           required
-                        />
-                        <span className="hint">Use consistent size naming like 4×6 Frame (x is standardized to ×).</span>
+                        >
+                          <option value="">Select product name...</option>
+                          {productNames
+                            .filter((name) => name.isActive)
+                            .map((name) => (
+                              <option key={name.id} value={name.id}>
+                                {name.name} ({name.skuCode})
+                              </option>
+                            ))}
+                        </select>
+                        <span className="hint">Product names and SKUs are configured in Master Data.</span>
                       </label>
                       <label>
                         Unit of Measure
-                        <input
-                          value={newProductForm.unitOfMeasure}
-                          onChange={(event) =>
-                            setNewProductForm((prev) => ({ ...prev, unitOfMeasure: event.target.value }))
-                          }
+                        <select
+                          value={newProductForm.unitOfMeasureId}
+                          onChange={(event) => setNewProductForm((prev) => ({ ...prev, unitOfMeasureId: event.target.value }))}
                           required
-                        />
+                        >
+                          <option value="">Select unit...</option>
+                          {unitMeasures
+                            .filter((unit) => unit.isActive)
+                            .map((unit) => (
+                              <option key={unit.id} value={unit.id}>
+                                {unit.name}
+                              </option>
+                            ))}
+                        </select>
                       </label>
                       <label>
                         Cost Price (optional)
@@ -5585,11 +5647,13 @@ Payments update invoice status:
                       </button>
                     </form>
                   ) : (
-                    <div className="note">Create a product category first.</div>
+                    <div className="note">
+                      Configure product categories, names, units, and board sizes before creating products.
+                    </div>
                   )}
 
                   {newProductForm.productType === "BOARD" ? (
-                    <p className="hint">Yield per full sheet: {yieldPerSheet} pcs</p>
+                    <p className="hint">Yield per full sheet: {yieldPerSheet ?? "-"} pcs</p>
                   ) : null}
                 </section>
 
@@ -5630,15 +5694,21 @@ Payments update invoice status:
                                     type="button"
                                     onClick={() => {
                                       setEditingProductId(p.id);
+                                      const productNameId = productNames.find((name) => name.name === p.name)?.id ?? "";
+                                      const unitOfMeasureId = unitMeasures.find((unit) => unit.name === p.unitOfMeasure)?.id ?? "";
+                                      const boardSizeCodeId =
+                                        p.boardSizeCode && boardSizeCodes.length
+                                          ? boardSizeCodes.find((code) => code.code === p.boardSizeCode)?.id ?? ""
+                                          : "";
                                       setEditingProductForm({
-                                        name: p.name,
+                                        productNameId,
                                         categoryId: p.categoryId,
                                         productType: p.productType,
-                                        unitOfMeasure: p.unitOfMeasure,
+                                        unitOfMeasureId,
                                         costPrice: p.costPrice != null ? String(p.costPrice) : "",
                                         sellingPrice: String(p.sellingPrice),
                                         isActive: p.isActive,
-                                        boardSizeCode: p.boardSizeCode ?? "A4C",
+                                        boardSizeCodeId,
                                         notes: p.notes ?? ""
                                       });
                                     }}
@@ -5705,16 +5775,16 @@ Payments update invoice status:
                             setMasterBusy(true);
                             try {
                               await updateProduct(auth.token, editingProductId, {
-                                name: editingProductForm.name,
+                                productNameId: editingProductForm.productNameId,
                                 categoryId: editingProductForm.categoryId,
                                 productType: editingProductForm.productType,
-                                unitOfMeasure: editingProductForm.unitOfMeasure,
+                                unitOfMeasureId: editingProductForm.unitOfMeasureId,
                                 costPrice: editingProductForm.costPrice ? Number(editingProductForm.costPrice) : null,
                                 sellingPrice: Number(editingProductForm.sellingPrice),
                                 isActive: editingProductForm.isActive,
-                                boardSizeCode:
+                                boardSizeCodeId:
                                   editingProductForm.productType === "BOARD"
-                                    ? editingProductForm.boardSizeCode
+                                    ? editingProductForm.boardSizeCodeId
                                     : null,
                                 notes: editingProductForm.notes || null
                               });
@@ -5768,49 +5838,68 @@ Payments update invoice status:
                             <label>
                               Board Size Code
                               <select
-                                value={editingProductForm.boardSizeCode}
+                                value={editingProductForm.boardSizeCodeId}
                                 onChange={(event) =>
                                   setEditingProductForm((prev) =>
                                     prev
                                       ? {
                                           ...prev,
-                                          boardSizeCode: (event.target.value as "A4C" | "A3C" | "A2C") || "A4C"
+                                          boardSizeCodeId: event.target.value
                                         }
                                       : prev
                                   )
                                 }
                               >
-                                <option value="A4C">A4C (48/sheet)</option>
-                                <option value="A3C">A3C (24/sheet)</option>
-                                <option value="A2C">A2C (12/sheet)</option>
+                                {boardSizeCodes
+                                  .filter((code) => code.isActive)
+                                  .map((code) => (
+                                    <option key={code.id} value={code.id}>
+                                      {code.code} ({code.yieldPerSheet}/sheet)
+                                    </option>
+                                  ))}
                               </select>
                             </label>
                           ) : null}
                           <label>
-                            Name
-                            <input
-                              value={editingProductForm.name}
+                            Product name
+                            <select
+                              value={editingProductForm.productNameId}
                               onChange={(event) =>
-                                setEditingProductForm((prev) => (prev ? { ...prev, name: event.target.value } : prev))
-                              }
-                              onBlur={() =>
-                                setEditingProductForm((prev) => (prev ? { ...prev, name: normalizeProductName(prev.name) } : prev))
+                                setEditingProductForm((prev) => (prev ? { ...prev, productNameId: event.target.value } : prev))
                               }
                               required
-                            />
-                            <span className="hint">Use consistent size naming like 4×6 Frame (x is standardized to ×).</span>
+                            >
+                              <option value="">Select product name...</option>
+                              {productNames
+                                .filter((name) => name.isActive)
+                                .map((name) => (
+                                  <option key={name.id} value={name.id}>
+                                    {name.name} ({name.skuCode})
+                                  </option>
+                                ))}
+                            </select>
+                            <span className="hint">Product names and SKUs are managed in Master Data.</span>
                           </label>
                           <label>
                             Unit of Measure
-                            <input
-                              value={editingProductForm.unitOfMeasure}
+                            <select
+                              value={editingProductForm.unitOfMeasureId}
                               onChange={(event) =>
                                 setEditingProductForm((prev) =>
-                                  prev ? { ...prev, unitOfMeasure: event.target.value } : prev
+                                  prev ? { ...prev, unitOfMeasureId: event.target.value } : prev
                                 )
                               }
                               required
-                            />
+                            >
+                              <option value="">Select unit...</option>
+                              {unitMeasures
+                                .filter((unit) => unit.isActive)
+                                .map((unit) => (
+                                  <option key={unit.id} value={unit.id}>
+                                    {unit.name}
+                                  </option>
+                                ))}
+                            </select>
                           </label>
                           <label>
                             Cost Price (optional)
@@ -8770,7 +8859,8 @@ Payments update invoice status:
             <section className="card" style={{ gridColumn: "1 / -1" }}>
               <h2>Phase 2: Configurations</h2>
               <p className="hint">
-                Admin-only setup for dynamic expense categories and product categories. Products are managed in Production → Products.
+                Admin-only setup for expense categories, units of measure, board sizes, product names, and product categories. Products are managed in Production →
+                Products.
               </p>
 
               <div className="tabs" style={{ marginTop: "0.9rem" }}>
@@ -8782,11 +8872,32 @@ Payments update invoice status:
                   Expense Categories
                 </button>
                 <button
+                  className={`tab ${masterSection === "unit-measures" ? "isActive" : ""}`}
+                  type="button"
+                  onClick={() => setMasterSection("unit-measures")}
+                >
+                  Unit Measures
+                </button>
+                <button
                   className={`tab ${masterSection === "product-categories" ? "isActive" : ""}`}
                   type="button"
                   onClick={() => setMasterSection("product-categories")}
                 >
                   Product Categories
+                </button>
+                <button
+                  className={`tab ${masterSection === "board-size-codes" ? "isActive" : ""}`}
+                  type="button"
+                  onClick={() => setMasterSection("board-size-codes")}
+                >
+                  Board Sizes
+                </button>
+                <button
+                  className={`tab ${masterSection === "product-names" ? "isActive" : ""}`}
+                  type="button"
+                  onClick={() => setMasterSection("product-names")}
+                >
+                  Product Names
                 </button>
               </div>
             </section>
@@ -8991,6 +9102,665 @@ Payments update invoice status:
                             onClick={() => {
                               setEditingExpenseCategoryId(null);
                               setEditingExpenseCategoryForm(null);
+                            }}
+                          >
+                            Cancel
+                          </button>
+                        </form>
+                      </div>
+                    </div>
+                  ) : null}
+                </section>
+              </>
+            ) : null}
+
+            {masterSection === "unit-measures" ? (
+              <>
+                <section className="card">
+                  <h2>Create Unit Measure</h2>
+                  <form
+                    className="form"
+                    onSubmit={async (event) => {
+                      event.preventDefault();
+                      if (!auth) {
+                        return;
+                      }
+                      setError(null);
+                      setSuccess(null);
+                      setMasterBusy(true);
+                      try {
+                        await createUnitMeasure(auth.token, {
+                          name: newUnitMeasureForm.name,
+                          notes: newUnitMeasureForm.notes || undefined
+                        });
+                        setNewUnitMeasureForm({ name: "", notes: "" });
+                        setSuccess("Unit measure created.");
+                        await refreshMasterData();
+                      } catch (caught: unknown) {
+                        setError(caught instanceof Error ? caught.message : "Failed to create unit measure");
+                      } finally {
+                        setMasterBusy(false);
+                      }
+                    }}
+                  >
+                    <label>
+                      Name
+                      <input
+                        value={newUnitMeasureForm.name}
+                        onChange={(event) => setNewUnitMeasureForm((prev) => ({ ...prev, name: event.target.value }))}
+                        required
+                      />
+                    </label>
+                    <label>
+                      Notes (optional)
+                      <input
+                        value={newUnitMeasureForm.notes}
+                        onChange={(event) => setNewUnitMeasureForm((prev) => ({ ...prev, notes: event.target.value }))}
+                      />
+                    </label>
+                    <button type="submit" disabled={masterBusy}>
+                      {masterBusy ? "Saving..." : "Create"}
+                    </button>
+                  </form>
+                </section>
+
+                <section className="card">
+                  <h2>Unit Measures</h2>
+                  <div className="tableWrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Name</th>
+                          <th>Active</th>
+                          <th>Notes</th>
+                          <th>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {unitMeasures.length ? (
+                          unitMeasures.map((unit) => (
+                            <tr key={unit.id} className={editingUnitMeasureId === unit.id ? "isSelected" : ""}>
+                              <td>{unit.name}</td>
+                              <td>{unit.isActive ? "Yes" : "No"}</td>
+                              <td>{unit.notes ?? "-"}</td>
+                              <td>
+                                <div className="approvalActions">
+                                  <button
+                                    data-variant="ghost"
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingUnitMeasureId(unit.id);
+                                      setEditingUnitMeasureForm({
+                                        name: unit.name,
+                                        notes: unit.notes ?? "",
+                                        isActive: unit.isActive
+                                      });
+                                    }}
+                                  >
+                                    Edit
+                                  </button>
+                                  <button
+                                    data-variant="ghost"
+                                    type="button"
+                                    onClick={async () => {
+                                      if (!auth) {
+                                        return;
+                                      }
+                                      setError(null);
+                                      setSuccess(null);
+                                      setMasterBusy(true);
+                                      try {
+                                        await updateUnitMeasure(auth.token, unit.id, { isActive: !unit.isActive });
+                                        setSuccess("Unit measure updated.");
+                                        await refreshMasterData();
+                                      } catch (caught: unknown) {
+                                        setError(caught instanceof Error ? caught.message : "Failed to update unit");
+                                      } finally {
+                                        setMasterBusy(false);
+                                      }
+                                    }}
+                                  >
+                                    {unit.isActive ? "Deactivate" : "Activate"}
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan={4}>No unit measures yet.</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {editingUnitMeasureId && editingUnitMeasureForm ? (
+                    <div className="approvalRow">
+                      <div>
+                        <p className="subhead">Edit Unit Measure</p>
+                        <form
+                          className="form"
+                          onSubmit={async (event) => {
+                            event.preventDefault();
+                            if (!auth) {
+                              return;
+                            }
+                            setError(null);
+                            setSuccess(null);
+                            setMasterBusy(true);
+                            try {
+                              await updateUnitMeasure(auth.token, editingUnitMeasureId, {
+                                name: editingUnitMeasureForm.name,
+                                notes: editingUnitMeasureForm.notes || null,
+                                isActive: editingUnitMeasureForm.isActive
+                              });
+                              setEditingUnitMeasureId(null);
+                              setEditingUnitMeasureForm(null);
+                              setSuccess("Unit measure saved.");
+                              await refreshMasterData();
+                            } catch (caught: unknown) {
+                              setError(caught instanceof Error ? caught.message : "Failed to save unit measure");
+                            } finally {
+                              setMasterBusy(false);
+                            }
+                          }}
+                        >
+                          <label>
+                            Name
+                            <input
+                              value={editingUnitMeasureForm.name}
+                              onChange={(event) =>
+                                setEditingUnitMeasureForm((prev) => (prev ? { ...prev, name: event.target.value } : prev))
+                              }
+                              required
+                            />
+                          </label>
+                          <label>
+                            Notes
+                            <input
+                              value={editingUnitMeasureForm.notes}
+                              onChange={(event) =>
+                                setEditingUnitMeasureForm((prev) => (prev ? { ...prev, notes: event.target.value } : prev))
+                              }
+                            />
+                          </label>
+                          <label className="checkbox">
+                            <input
+                              type="checkbox"
+                              checked={editingUnitMeasureForm.isActive}
+                              onChange={(event) =>
+                                setEditingUnitMeasureForm((prev) => (prev ? { ...prev, isActive: event.target.checked } : prev))
+                              }
+                            />
+                            Active
+                          </label>
+                          <button type="submit" disabled={masterBusy}>
+                            {masterBusy ? "Saving..." : "Save"}
+                          </button>
+                          <button
+                            data-variant="ghost"
+                            type="button"
+                            onClick={() => {
+                              setEditingUnitMeasureId(null);
+                              setEditingUnitMeasureForm(null);
+                            }}
+                          >
+                            Cancel
+                          </button>
+                        </form>
+                      </div>
+                    </div>
+                  ) : null}
+                </section>
+              </>
+            ) : null}
+
+            {masterSection === "board-size-codes" ? (
+              <>
+                <section className="card">
+                  <h2>Create Board Size Code</h2>
+                  <form
+                    className="form"
+                    onSubmit={async (event) => {
+                      event.preventDefault();
+                      if (!auth) {
+                        return;
+                      }
+                      setError(null);
+                      setSuccess(null);
+                      setMasterBusy(true);
+                      try {
+                        const yieldPerSheet = Number(newBoardSizeForm.yieldPerSheet);
+                        await createBoardSizeCode(auth.token, {
+                          code: newBoardSizeForm.code,
+                          yieldPerSheet,
+                          notes: newBoardSizeForm.notes || undefined
+                        });
+                        setNewBoardSizeForm({ code: "", yieldPerSheet: "", notes: "" });
+                        setSuccess("Board size code created.");
+                        await refreshMasterData();
+                      } catch (caught: unknown) {
+                        setError(caught instanceof Error ? caught.message : "Failed to create board size code");
+                      } finally {
+                        setMasterBusy(false);
+                      }
+                    }}
+                  >
+                    <label>
+                      Code
+                      <input
+                        value={newBoardSizeForm.code}
+                        onChange={(event) => setNewBoardSizeForm((prev) => ({ ...prev, code: event.target.value }))}
+                        required
+                      />
+                    </label>
+                    <label>
+                      Yield per sheet
+                      <input
+                        type="number"
+                        min={1}
+                        value={newBoardSizeForm.yieldPerSheet}
+                        onChange={(event) => setNewBoardSizeForm((prev) => ({ ...prev, yieldPerSheet: event.target.value }))}
+                        required
+                      />
+                    </label>
+                    <label>
+                      Notes (optional)
+                      <input
+                        value={newBoardSizeForm.notes}
+                        onChange={(event) => setNewBoardSizeForm((prev) => ({ ...prev, notes: event.target.value }))}
+                      />
+                    </label>
+                    <button type="submit" disabled={masterBusy}>
+                      {masterBusy ? "Saving..." : "Create"}
+                    </button>
+                  </form>
+                </section>
+
+                <section className="card">
+                  <h2>Board Size Codes</h2>
+                  <div className="tableWrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Code</th>
+                          <th>Yield per sheet</th>
+                          <th>Active</th>
+                          <th>Notes</th>
+                          <th>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {boardSizeCodes.length ? (
+                          boardSizeCodes.map((code) => (
+                            <tr key={code.id} className={editingBoardSizeId === code.id ? "isSelected" : ""}>
+                              <td>{code.code}</td>
+                              <td>{code.yieldPerSheet}</td>
+                              <td>{code.isActive ? "Yes" : "No"}</td>
+                              <td>{code.notes ?? "-"}</td>
+                              <td>
+                                <div className="approvalActions">
+                                  <button
+                                    data-variant="ghost"
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingBoardSizeId(code.id);
+                                      setEditingBoardSizeForm({
+                                        code: code.code,
+                                        yieldPerSheet: String(code.yieldPerSheet),
+                                        notes: code.notes ?? "",
+                                        isActive: code.isActive
+                                      });
+                                    }}
+                                  >
+                                    Edit
+                                  </button>
+                                  <button
+                                    data-variant="ghost"
+                                    type="button"
+                                    onClick={async () => {
+                                      if (!auth) {
+                                        return;
+                                      }
+                                      setError(null);
+                                      setSuccess(null);
+                                      setMasterBusy(true);
+                                      try {
+                                        await updateBoardSizeCode(auth.token, code.id, { isActive: !code.isActive });
+                                        setSuccess("Board size code updated.");
+                                        await refreshMasterData();
+                                      } catch (caught: unknown) {
+                                        setError(caught instanceof Error ? caught.message : "Failed to update board size code");
+                                      } finally {
+                                        setMasterBusy(false);
+                                      }
+                                    }}
+                                  >
+                                    {code.isActive ? "Deactivate" : "Activate"}
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan={5}>No board size codes yet.</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {editingBoardSizeId && editingBoardSizeForm ? (
+                    <div className="approvalRow">
+                      <div>
+                        <p className="subhead">Edit Board Size Code</p>
+                        <form
+                          className="form"
+                          onSubmit={async (event) => {
+                            event.preventDefault();
+                            if (!auth) {
+                              return;
+                            }
+                            setError(null);
+                            setSuccess(null);
+                            setMasterBusy(true);
+                            try {
+                              await updateBoardSizeCode(auth.token, editingBoardSizeId, {
+                                code: editingBoardSizeForm.code,
+                                yieldPerSheet: Number(editingBoardSizeForm.yieldPerSheet),
+                                notes: editingBoardSizeForm.notes || null,
+                                isActive: editingBoardSizeForm.isActive
+                              });
+                              setEditingBoardSizeId(null);
+                              setEditingBoardSizeForm(null);
+                              setSuccess("Board size code saved.");
+                              await refreshMasterData();
+                            } catch (caught: unknown) {
+                              setError(caught instanceof Error ? caught.message : "Failed to save board size code");
+                            } finally {
+                              setMasterBusy(false);
+                            }
+                          }}
+                        >
+                          <label>
+                            Code
+                            <input
+                              value={editingBoardSizeForm.code}
+                              onChange={(event) =>
+                                setEditingBoardSizeForm((prev) => (prev ? { ...prev, code: event.target.value } : prev))
+                              }
+                              required
+                            />
+                          </label>
+                          <label>
+                            Yield per sheet
+                            <input
+                              type="number"
+                              min={1}
+                              value={editingBoardSizeForm.yieldPerSheet}
+                              onChange={(event) =>
+                                setEditingBoardSizeForm((prev) =>
+                                  prev ? { ...prev, yieldPerSheet: event.target.value } : prev
+                                )
+                              }
+                              required
+                            />
+                          </label>
+                          <label>
+                            Notes
+                            <input
+                              value={editingBoardSizeForm.notes}
+                              onChange={(event) =>
+                                setEditingBoardSizeForm((prev) => (prev ? { ...prev, notes: event.target.value } : prev))
+                              }
+                            />
+                          </label>
+                          <label className="checkbox">
+                            <input
+                              type="checkbox"
+                              checked={editingBoardSizeForm.isActive}
+                              onChange={(event) =>
+                                setEditingBoardSizeForm((prev) => (prev ? { ...prev, isActive: event.target.checked } : prev))
+                              }
+                            />
+                            Active
+                          </label>
+                          <button type="submit" disabled={masterBusy}>
+                            {masterBusy ? "Saving..." : "Save"}
+                          </button>
+                          <button
+                            data-variant="ghost"
+                            type="button"
+                            onClick={() => {
+                              setEditingBoardSizeId(null);
+                              setEditingBoardSizeForm(null);
+                            }}
+                          >
+                            Cancel
+                          </button>
+                        </form>
+                      </div>
+                    </div>
+                  ) : null}
+                </section>
+              </>
+            ) : null}
+
+            {masterSection === "product-names" ? (
+              <>
+                <section className="card">
+                  <h2>Create Product Name</h2>
+                  <form
+                    className="form"
+                    onSubmit={async (event) => {
+                      event.preventDefault();
+                      if (!auth) {
+                        return;
+                      }
+                      setError(null);
+                      setSuccess(null);
+                      setMasterBusy(true);
+                      try {
+                        await createProductName(auth.token, {
+                          name: newProductNameForm.name,
+                          skuCode: newProductNameForm.skuCode,
+                          notes: newProductNameForm.notes || undefined
+                        });
+                        setNewProductNameForm({ name: "", skuCode: "", notes: "" });
+                        setSuccess("Product name created.");
+                        await refreshMasterData();
+                      } catch (caught: unknown) {
+                        setError(caught instanceof Error ? caught.message : "Failed to create product name");
+                      } finally {
+                        setMasterBusy(false);
+                      }
+                    }}
+                  >
+                    <label>
+                      Name
+                      <input
+                        value={newProductNameForm.name}
+                        onChange={(event) => setNewProductNameForm((prev) => ({ ...prev, name: event.target.value }))}
+                        required
+                      />
+                    </label>
+                    <label>
+                      SKU
+                      <input
+                        value={newProductNameForm.skuCode}
+                        onChange={(event) => setNewProductNameForm((prev) => ({ ...prev, skuCode: event.target.value }))}
+                        required
+                      />
+                    </label>
+                    <label>
+                      Notes (optional)
+                      <input
+                        value={newProductNameForm.notes}
+                        onChange={(event) => setNewProductNameForm((prev) => ({ ...prev, notes: event.target.value }))}
+                      />
+                    </label>
+                    <button type="submit" disabled={masterBusy}>
+                      {masterBusy ? "Saving..." : "Create"}
+                    </button>
+                  </form>
+                </section>
+
+                <section className="card">
+                  <h2>Product Names</h2>
+                  <div className="tableWrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Name</th>
+                          <th>SKU</th>
+                          <th>Active</th>
+                          <th>Notes</th>
+                          <th>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {productNames.length ? (
+                          productNames.map((item) => (
+                            <tr key={item.id} className={editingProductNameId === item.id ? "isSelected" : ""}>
+                              <td>{item.name}</td>
+                              <td>{item.skuCode}</td>
+                              <td>{item.isActive ? "Yes" : "No"}</td>
+                              <td>{item.notes ?? "-"}</td>
+                              <td>
+                                <div className="approvalActions">
+                                  <button
+                                    data-variant="ghost"
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingProductNameId(item.id);
+                                      setEditingProductNameForm({
+                                        name: item.name,
+                                        skuCode: item.skuCode,
+                                        notes: item.notes ?? "",
+                                        isActive: item.isActive
+                                      });
+                                    }}
+                                  >
+                                    Edit
+                                  </button>
+                                  <button
+                                    data-variant="ghost"
+                                    type="button"
+                                    onClick={async () => {
+                                      if (!auth) {
+                                        return;
+                                      }
+                                      setError(null);
+                                      setSuccess(null);
+                                      setMasterBusy(true);
+                                      try {
+                                        await updateProductName(auth.token, item.id, { isActive: !item.isActive });
+                                        setSuccess("Product name updated.");
+                                        await refreshMasterData();
+                                      } catch (caught: unknown) {
+                                        setError(caught instanceof Error ? caught.message : "Failed to update product name");
+                                      } finally {
+                                        setMasterBusy(false);
+                                      }
+                                    }}
+                                  >
+                                    {item.isActive ? "Deactivate" : "Activate"}
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan={5}>No product names yet.</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {editingProductNameId && editingProductNameForm ? (
+                    <div className="approvalRow">
+                      <div>
+                        <p className="subhead">Edit Product Name</p>
+                        <form
+                          className="form"
+                          onSubmit={async (event) => {
+                            event.preventDefault();
+                            if (!auth) {
+                              return;
+                            }
+                            setError(null);
+                            setSuccess(null);
+                            setMasterBusy(true);
+                            try {
+                              await updateProductName(auth.token, editingProductNameId, {
+                                name: editingProductNameForm.name,
+                                skuCode: editingProductNameForm.skuCode,
+                                notes: editingProductNameForm.notes || null,
+                                isActive: editingProductNameForm.isActive
+                              });
+                              setEditingProductNameId(null);
+                              setEditingProductNameForm(null);
+                              setSuccess("Product name saved.");
+                              await refreshMasterData();
+                            } catch (caught: unknown) {
+                              setError(caught instanceof Error ? caught.message : "Failed to save product name");
+                            } finally {
+                              setMasterBusy(false);
+                            }
+                          }}
+                        >
+                          <label>
+                            Name
+                            <input
+                              value={editingProductNameForm.name}
+                              onChange={(event) =>
+                                setEditingProductNameForm((prev) => (prev ? { ...prev, name: event.target.value } : prev))
+                              }
+                              required
+                            />
+                          </label>
+                          <label>
+                            SKU
+                            <input
+                              value={editingProductNameForm.skuCode}
+                              onChange={(event) =>
+                                setEditingProductNameForm((prev) => (prev ? { ...prev, skuCode: event.target.value } : prev))
+                              }
+                              required
+                            />
+                          </label>
+                          <label>
+                            Notes
+                            <input
+                              value={editingProductNameForm.notes}
+                              onChange={(event) =>
+                                setEditingProductNameForm((prev) => (prev ? { ...prev, notes: event.target.value } : prev))
+                              }
+                            />
+                          </label>
+                          <label className="checkbox">
+                            <input
+                              type="checkbox"
+                              checked={editingProductNameForm.isActive}
+                              onChange={(event) =>
+                                setEditingProductNameForm((prev) => (prev ? { ...prev, isActive: event.target.checked } : prev))
+                              }
+                            />
+                            Active
+                          </label>
+                          <button type="submit" disabled={masterBusy}>
+                            {masterBusy ? "Saving..." : "Save"}
+                          </button>
+                          <button
+                            data-variant="ghost"
+                            type="button"
+                            onClick={() => {
+                              setEditingProductNameId(null);
+                              setEditingProductNameForm(null);
                             }}
                           >
                             Cancel
