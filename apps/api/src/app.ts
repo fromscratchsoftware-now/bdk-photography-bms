@@ -8,6 +8,9 @@ import { healthRouter } from "./routes/health.js";
 import { invoicesRouter } from "./routes/invoices.js";
 import { productsRouter } from "./routes/products.js";
 import { salesRouter } from "./routes/sales.js";
+import { shopsRouter } from "./routes/shops.js";
+import { commissionRatesRouter } from "./routes/commission-rates.js";
+import { expensesRouter } from "./routes/expenses.js";
 import { HttpError } from "./services/http-error.js";
 import { listSeedData } from "./services/store.js";
 
@@ -34,6 +37,9 @@ app.use("/api/auth", authRouter);
 app.use("/api", requireAuth);
 
 app.use("/api/products", productsRouter);
+app.use("/api/shops", shopsRouter);
+app.use("/api/commission-rates", commissionRatesRouter);
+app.use("/api/expenses", expensesRouter);
 app.use("/api/sales", salesRouter);
 app.use("/api/cash", cashRouter);
 app.use("/api/invoices", invoicesRouter);

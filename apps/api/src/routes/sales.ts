@@ -4,8 +4,18 @@ import { createSale, listSales } from "../services/store.js";
 
 export const salesRouter = Router();
 
-salesRouter.get("/", (_req, res) => {
-  res.json({ data: listSales() });
+salesRouter.get("/", (req, res) => {
+  const dateFrom = typeof req.query.dateFrom === "string" ? req.query.dateFrom : undefined;
+  const dateTo = typeof req.query.dateTo === "string" ? req.query.dateTo : undefined;
+
+  const filtered = listSales().filter((sale) => {
+    const ymd = sale.createdAt.slice(0, 10);
+    if (dateFrom && ymd < dateFrom) return false;
+    if (dateTo && ymd > dateTo) return false;
+    return true;
+  });
+
+  res.json({ data: filtered });
 });
 
 salesRouter.post("/", (req, res, next) => {
