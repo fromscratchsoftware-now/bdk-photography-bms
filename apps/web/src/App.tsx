@@ -2579,7 +2579,7 @@ export default function App(): JSX.Element {
             <div className="sidebarBrand" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.75rem" }}>
               <div className="sidebarBrand">
                 <p className="sidebarBrand__title">BDK Photography</p>
-                <p className="sidebarBrand__sub">Business Management</p>
+                <p className="sidebarBrand__sub">Business Management • Nav 2026.02</p>
               </div>
               <IconButton className="topbar__menu" onClick={() => setSidebarOpen(false)} aria-label="Close menu">
                 <IconClose width={18} height={18} />
@@ -2828,6 +2828,7 @@ export default function App(): JSX.Element {
             </div>
 
             <div className="sidebarFooter">
+              <div className="sidebarNavVersion">New grouped menu active</div>
               <div className="sidebarUser">
                 <div className="sidebarUser__name">{authUser.fullName}</div>
                 <div className="sidebarUser__meta">
