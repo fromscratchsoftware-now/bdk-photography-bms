@@ -269,9 +269,9 @@ export default function App(): JSX.Element {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [openNavGroups, setOpenNavGroups] = useState<Record<NavGroupKey, boolean>>({
     core: true,
-    finance: true,
-    admin: true,
-    support: true
+    finance: false,
+    admin: false,
+    support: false
   });
   const [masterSection, setMasterSection] = useState<MasterSection>("expense-categories");
   const [reportSection, setReportSection] = useState<ReportSection>("sales");
