@@ -125,9 +125,24 @@ export interface Shop {
   id: string;
   name: string;
   code: string;
+  commissionRatePercent?: number | null;
   notes?: string | null;
   createdAt?: string;
   updatedAt?: string;
+}
+
+export interface CommissionRateConfig {
+  id: string;
+  shopId?: string | null;
+  shopCode?: string | null;
+  shopName?: string | null;
+  userId?: string | null;
+  userFullName?: string | null;
+  ratePercent: number;
+  isActive: boolean;
+  notes?: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface Customer {
@@ -179,6 +194,35 @@ export interface Expense {
 export interface ProductCategory {
   id: string;
   name: string;
+  isActive: boolean;
+  notes?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UnitMeasure {
+  id: string;
+  name: string;
+  isActive: boolean;
+  notes?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BoardSizeConfig {
+  id: string;
+  code: string;
+  yieldPerSheet: number;
+  isActive: boolean;
+  notes?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProductNameConfig {
+  id: string;
+  name: string;
+  skuCode: string;
   isActive: boolean;
   notes?: string | null;
   createdAt: string;
@@ -425,6 +469,65 @@ export function listShops(token: string): Promise<Shop[]> {
   return request<Shop[]>("api/shops", undefined, token);
 }
 
+export function createShop(token: string, payload: { name: string; code: string; notes?: string | null; commissionRatePercent?: number | null }): Promise<Shop> {
+  return request<Shop>(
+    "api/shops",
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function updateShop(
+  token: string,
+  shopId: string,
+  payload: Partial<{ name: string; code: string; notes: string | null; commissionRatePercent: number | null }>
+): Promise<Shop> {
+  return request<Shop>(
+    `api/shops/${shopId}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function listCommissionRates(token: string): Promise<CommissionRateConfig[]> {
+  return request<CommissionRateConfig[]>("api/commission-rates", undefined, token);
+}
+
+export function createCommissionRate(
+  token: string,
+  payload: { shopId?: string | null; userId?: string | null; ratePercent: number; notes?: string | null; isActive?: boolean }
+): Promise<CommissionRateConfig> {
+  return request<CommissionRateConfig>(
+    "api/commission-rates",
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function updateCommissionRate(
+  token: string,
+  rateId: string,
+  payload: Partial<{ shopId: string | null; userId: string | null; ratePercent: number; notes: string | null; isActive: boolean }>
+): Promise<CommissionRateConfig> {
+  return request<CommissionRateConfig>(
+    `api/commission-rates/${rateId}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
 export function listUsers(token: string): Promise<AuthUser[]> {
   return request<AuthUser[]>("api/users", undefined, token);
 }
@@ -656,6 +759,105 @@ export function listProductCategories(token: string): Promise<ProductCategory[]>
   return request<ProductCategory[]>("api/product-categories", undefined, token);
 }
 
+export function listUnitMeasures(token: string): Promise<UnitMeasure[]> {
+  return request<UnitMeasure[]>("api/unit-measures", undefined, token);
+}
+
+export function createUnitMeasure(
+  token: string,
+  payload: { name: string; notes?: string; isActive?: boolean }
+): Promise<UnitMeasure> {
+  return request<UnitMeasure>(
+    "api/unit-measures",
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function updateUnitMeasure(
+  token: string,
+  id: string,
+  payload: { name?: string; notes?: string | null; isActive?: boolean }
+): Promise<UnitMeasure> {
+  return request<UnitMeasure>(
+    `api/unit-measures/${id}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function listBoardSizeCodes(token: string): Promise<BoardSizeConfig[]> {
+  return request<BoardSizeConfig[]>("api/board-size-codes", undefined, token);
+}
+
+export function createBoardSizeCode(
+  token: string,
+  payload: { code: string; yieldPerSheet: number; notes?: string; isActive?: boolean }
+): Promise<BoardSizeConfig> {
+  return request<BoardSizeConfig>(
+    "api/board-size-codes",
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function updateBoardSizeCode(
+  token: string,
+  id: string,
+  payload: { code?: string; yieldPerSheet?: number; notes?: string | null; isActive?: boolean }
+): Promise<BoardSizeConfig> {
+  return request<BoardSizeConfig>(
+    `api/board-size-codes/${id}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function listProductNames(token: string): Promise<ProductNameConfig[]> {
+  return request<ProductNameConfig[]>("api/product-names", undefined, token);
+}
+
+export function createProductName(
+  token: string,
+  payload: { name: string; skuCode: string; notes?: string; isActive?: boolean }
+): Promise<ProductNameConfig> {
+  return request<ProductNameConfig>(
+    "api/product-names",
+    {
+      method: "POST",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
+export function updateProductName(
+  token: string,
+  id: string,
+  payload: { name?: string; skuCode?: string; notes?: string | null; isActive?: boolean }
+): Promise<ProductNameConfig> {
+  return request<ProductNameConfig>(
+    `api/product-names/${id}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    },
+    token
+  );
+}
+
 export function createProductCategory(
   token: string,
   payload: { name: string; notes?: string; isActive?: boolean }
@@ -692,14 +894,14 @@ export function listProducts(token: string): Promise<Product[]> {
 export function createProduct(
   token: string,
   payload: {
-    name: string;
+    productNameId: string;
     categoryId: string;
     productType: ProductType;
-    unitOfMeasure: string;
+    unitOfMeasureId: string;
     costPrice?: number | null;
     sellingPrice: number;
     isActive?: boolean;
-    boardSizeCode?: BoardSizeCode | null;
+    boardSizeCodeId?: string | null;
     notes?: string | null;
   }
 ): Promise<Product> {
@@ -717,14 +919,14 @@ export function updateProduct(
   token: string,
   id: string,
   payload: Partial<{
-    name: string;
+    productNameId: string;
     categoryId: string;
     productType: ProductType;
-    unitOfMeasure: string;
+    unitOfMeasureId: string;
     costPrice: number | null;
     sellingPrice: number;
     isActive: boolean;
-    boardSizeCode: BoardSizeCode | null;
+    boardSizeCodeId: string | null;
     notes: string | null;
   }>
 ): Promise<Product> {
@@ -857,12 +1059,16 @@ export function listSales(
   params?: {
     shopId?: string;
     saleDate?: string;
+    dateFrom?: string;
+    dateTo?: string;
   }
 ): Promise<Sale[]> {
   return request<Sale[]>(
     withQuery("api/sales", {
       shopId: params?.shopId,
-      saleDate: params?.saleDate
+      saleDate: params?.saleDate,
+      dateFrom: params?.dateFrom,
+      dateTo: params?.dateTo
     }),
     undefined,
     token
@@ -1175,6 +1381,8 @@ export interface CommissionsReportItem {
   mobileMoneyAmount: number;
   cardAmount: number;
   creditAmount: number;
+  commissionRatePercent?: number;
+  commissionAmount?: number;
 }
 
 export interface CommissionsReportTotals {
@@ -1184,6 +1392,7 @@ export interface CommissionsReportTotals {
   mobileMoneyAmount: number;
   cardAmount: number;
   creditAmount: number;
+  commissionAmount: number;
 }
 
 export interface CommissionsReport {
