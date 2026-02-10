@@ -39,14 +39,50 @@ function withQuery(path: string, query?: Record<string, string | null | undefine
   return qs ? `${path}?${qs}` : path;
 }
 
+function decodeBase64Url(value: string): string {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+  if (typeof atob === "function") {
+    return atob(padded);
+  }
+  // Node/test fallback.
+  return Buffer.from(padded, "base64").toString("utf8");
+}
+
+function deriveUserIdFromToken(token?: string): string | undefined {
+  if (!token) {
+    return undefined;
+  }
+
+  // SiteGround PHP seed tokens are plain user IDs like "user-admin-1".
+  if (token.startsWith("user-")) {
+    return token;
+  }
+
+  // JWT fallback: extract common identity claims without verifying signature.
+  const parts = token.split(".");
+  if (parts.length !== 3 || !parts[1]) {
+    return undefined;
+  }
+
+  try {
+    const payload = JSON.parse(decodeBase64Url(parts[1])) as Partial<{ sub: string; userId: string; id: string }>;
+    return payload.sub || payload.userId || payload.id || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit, token?: string): Promise<T> {
   const method = (init?.method ?? "GET").toUpperCase();
   const url = method === "GET" ? addCacheBust(buildUrl(path)) : buildUrl(path);
+  const userId = deriveUserIdFromToken(token);
 
   const response = await fetch(url, {
     headers: {
       "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {})
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(userId ? { "x-user-id": userId } : {})
     },
     cache: "no-store",
     ...init
@@ -61,9 +97,11 @@ async function request<T>(path: string, init?: RequestInit, token?: string): Pro
 
 async function downloadFile(path: string, token: string): Promise<{ blob: Blob; filename: string }> {
   const url = addCacheBust(buildUrl(path));
+  const userId = deriveUserIdFromToken(token);
   const response = await fetch(url, {
     headers: {
-      ...(token ? { Authorization: `Bearer ${token}` } : {})
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(userId ? { "x-user-id": userId } : {})
     },
     cache: "no-store"
   });
