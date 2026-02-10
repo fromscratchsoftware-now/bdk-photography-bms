@@ -196,6 +196,7 @@ type MasterSection = "expense-categories" | "product-categories" | "unit-measure
 type ReportSection = "sales" | "commissions" | "invoices" | "payments" | "cash" | "expenses" | "pl" | "capital";
 type InventorySection = "stock" | "transfers" | "workshop" | "products";
 type MessagingSection = "templates" | "queue" | "logs" | "jobs";
+type NavGroupKey = "core" | "finance" | "admin" | "support";
 
 const AUTH_STORAGE_KEY = "bdk.auth.phase1.v1";
 
@@ -266,6 +267,12 @@ export default function App(): JSX.Element {
 
   const [activeView, setActiveView] = useState<ActiveView>("overview");
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [openNavGroups, setOpenNavGroups] = useState<Record<NavGroupKey, boolean>>({
+    core: true,
+    finance: true,
+    admin: true,
+    support: true
+  });
   const [masterSection, setMasterSection] = useState<MasterSection>("expense-categories");
   const [reportSection, setReportSection] = useState<ReportSection>("sales");
   const [helpTopic, setHelpTopic] = useState<"users" | "passwords" | "invoicing">("users");
@@ -795,6 +802,10 @@ export default function App(): JSX.Element {
   const [loginForm, setLoginForm] = useState({ mobileNumber: "", password: "" });
 
   const authUser = auth?.user ?? null;
+
+  function toggleNavGroup(group: NavGroupKey): void {
+    setOpenNavGroups((prev) => ({ ...prev, [group]: !prev[group] }));
+  }
 
   function dismissToast(id: string): void {
     setToasts((prev) => prev.filter((t) => t.id !== id));
@@ -2578,8 +2589,17 @@ export default function App(): JSX.Element {
             <div className="sidebarNav">
               <nav aria-label="Primary">
                 <div className="navGroup">
-                  <div className="navGroup__title">Core</div>
-                  <div className="navGroup__items">
+                  <button
+                    className={cx("navGroup__title", "navGroup__toggle", openNavGroups.core && "isOpen")}
+                    type="button"
+                    onClick={() => toggleNavGroup("core")}
+                    aria-expanded={openNavGroups.core}
+                    aria-controls="nav-group-core"
+                  >
+                    <span>Core</span>
+                    <span className="navGroup__chevron" aria-hidden="true">▾</span>
+                  </button>
+                  <div id="nav-group-core" className={cx("navGroup__items", !openNavGroups.core && "isCollapsed")}>
                     <button
                       className={cx("navItem", activeView === "overview" && "isActive")}
                       type="button"
@@ -2641,8 +2661,17 @@ export default function App(): JSX.Element {
                 </div>
 
                 <div className="navGroup">
-                  <div className="navGroup__title">Finance</div>
-                  <div className="navGroup__items">
+                  <button
+                    className={cx("navGroup__title", "navGroup__toggle", openNavGroups.finance && "isOpen")}
+                    type="button"
+                    onClick={() => toggleNavGroup("finance")}
+                    aria-expanded={openNavGroups.finance}
+                    aria-controls="nav-group-finance"
+                  >
+                    <span>Finance</span>
+                    <span className="navGroup__chevron" aria-hidden="true">▾</span>
+                  </button>
+                  <div id="nav-group-finance" className={cx("navGroup__items", !openNavGroups.finance && "isCollapsed")}>
                     {canViewCash ? (
                       <button
                         className={cx("navItem", activeView === "cash" && "isActive")}
@@ -2716,8 +2745,17 @@ export default function App(): JSX.Element {
 
                 {canViewUsers || canManageMasterData || canManageMessaging ? (
                   <div className="navGroup">
-                    <div className="navGroup__title">Admin</div>
-                    <div className="navGroup__items">
+                    <button
+                      className={cx("navGroup__title", "navGroup__toggle", openNavGroups.admin && "isOpen")}
+                      type="button"
+                      onClick={() => toggleNavGroup("admin")}
+                      aria-expanded={openNavGroups.admin}
+                      aria-controls="nav-group-admin"
+                    >
+                      <span>Admin</span>
+                      <span className="navGroup__chevron" aria-hidden="true">▾</span>
+                    </button>
+                    <div id="nav-group-admin" className={cx("navGroup__items", !openNavGroups.admin && "isCollapsed")}>
                       {canViewUsers ? (
                         <button
                           className={cx("navItem", activeView === "users" && "isActive")}
@@ -2762,8 +2800,17 @@ export default function App(): JSX.Element {
                 ) : null}
 
                 <div className="navGroup">
-                  <div className="navGroup__title">Support</div>
-                  <div className="navGroup__items">
+                  <button
+                    className={cx("navGroup__title", "navGroup__toggle", openNavGroups.support && "isOpen")}
+                    type="button"
+                    onClick={() => toggleNavGroup("support")}
+                    aria-expanded={openNavGroups.support}
+                    aria-controls="nav-group-support"
+                  >
+                    <span>Support</span>
+                    <span className="navGroup__chevron" aria-hidden="true">▾</span>
+                  </button>
+                  <div id="nav-group-support" className={cx("navGroup__items", !openNavGroups.support && "isCollapsed")}>
                     <button
                       className={cx("navItem", activeView === "help" && "isActive")}
                       type="button"

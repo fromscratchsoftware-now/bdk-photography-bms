@@ -179,9 +179,38 @@ pre {
   margin: 0.2rem 0 0.25rem;
 }
 
+.navGroup__toggle {
+  width: 100%;
+  border: 0;
+  background: rgba(148, 163, 184, 0.12);
+  border-radius: var(--radius-md);
+  padding: 0.52rem 0.62rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  margin: 0;
+}
+
+.navGroup__chevron {
+  transition: transform 140ms ease;
+}
+
+.navGroup__toggle.isOpen .navGroup__chevron {
+  transform: rotate(0deg);
+}
+
+.navGroup__toggle:not(.isOpen) .navGroup__chevron {
+  transform: rotate(-90deg);
+}
+
 .navGroup__items {
   display: grid;
   gap: 0.35rem;
+}
+
+.navGroup__items.isCollapsed {
+  display: none;
 }
 
 .navSubgroup {
